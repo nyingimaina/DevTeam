@@ -1,0 +1,179 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using DevTeam.Broker;
+using DevTeam.Broker.Domain;
+using DevTeam.Broker.Server;
+using DevTeam.Broker.Spoke;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
+namespace DevTeam.Tests;
+
+public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
+{
+    private readonly AppFactory _factory;
+
+    public ApiIntegrationTests(AppFactory factory) => _factory = factory;
+
+    [Fact]
+    public async Task Healthz_ReportsOk()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/healthz");
+        response.EnsureSuccessStatusCode();
+        var health = await response.Content.ReadFromJsonAsync<HealthResponse>();
+        Assert.Equal("ok", health!.Status);
+        Assert.False(string.IsNullOrEmpty(health.Version));
+    }
+
+    [Fact]
+    public async Task Info_ReportsAgentAndProtocol()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/info");
+        response.EnsureSuccessStatusCode();
+        var info = await response.Content.ReadFromJsonAsync<AgentViewModel>();
+        Assert.Equal("1", info!.ProtocolVersion);
+        Assert.Equal("FakeAgent", info.AgentName);
+    }
+
+    [Fact]
+    public async Task SessionLifecycle_PromptStreamsAndPersists()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/sessions",
+            new { workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var session = await create.Content.ReadFromJsonAsync<SessionSummary>();
+        Assert.NotEqual(Guid.Empty, session!.SessionId);
+        Assert.Single(session.Models);
+
+        var prompt = await client.PostAsJsonAsync($"/api/sessions/{session.SessionId}/prompt",
+            new { text = "hello world" });
+        if (!prompt.IsSuccessStatusCode)
+        {
+            var body = await prompt.Content.ReadAsStringAsync();
+            throw new Xunit.Sdk.XunitException($"Prompt failed: {(int)prompt.StatusCode} {body}");
+        }
+        var result = await prompt.Content.ReadFromJsonAsync<PromptResponse>();
+        Assert.Equal("end_turn", result!.StopReason);
+        Assert.True(result.TotalTokens > 0);
+
+        var detail = await client.GetFromJsonAsync<SessionDetail>($"/api/sessions/{session.SessionId}");
+        Assert.NotNull(detail);
+        Assert.Equal(2, detail!.Messages.Count);
+        Assert.Equal("hello world", detail.Messages[0].BodyText);
+        Assert.Equal("Hello from the fake agent", detail.Messages[1].BodyText);
+
+        var listResponse = await client.GetAsync("/api/sessions");
+        if (!listResponse.IsSuccessStatusCode)
+        {
+            var body = await listResponse.Content.ReadAsStringAsync();
+            throw new Xunit.Sdk.XunitException($"List failed: {(int)listResponse.StatusCode} {body}");
+        }
+        var list = await listResponse.Content.ReadFromJsonAsync<SessionSummary[]>();
+        Assert.Contains(list!, s => s.SessionId == session.SessionId);
+
+        var setModel = await client.PostAsJsonAsync($"/api/sessions/{session.SessionId}/model",
+            new { modelId = "opencode/big-pickle-v2" });
+        setModel.EnsureSuccessStatusCode();
+
+        var delete = await client.DeleteAsync($"/api/sessions/{session.SessionId}");
+        Assert.Equal(HttpStatusCode.NoContent, delete.StatusCode);
+
+        var afterDelete = await client.GetAsync($"/api/sessions/{session.SessionId}");
+        Assert.Equal(HttpStatusCode.NotFound, afterDelete.StatusCode);
+    }
+
+    [Fact]
+    public async Task UnknownSession_PromptReturns404()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync($"/api/sessions/{Guid.NewGuid()}/prompt",
+            new { text = "hi" });
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EmptyText_Rejected()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/sessions",
+            new { workspacePath = " " });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    public class AppFactory : WebApplicationFactory<Program>
+    {
+        public string DatabasePath { get; } =
+            Path.Combine(Path.GetTempPath(), "devteam-api-" + Guid.NewGuid().ToString("N") + ".db");
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("DataDirectory", Path.GetDirectoryName(DatabasePath) ?? ".");
+            builder.ConfigureServices(services =>
+            {
+                var descriptor = services.Single(d =>
+                    d.ServiceType == typeof(IDbContextFactory<DevTeamDbContext>));
+                services.Remove(descriptor);
+
+                var connection = $"Data Source={DatabasePath}";
+                services.AddDbContextFactory<DevTeamDbContext>(options => options.UseSqlite(connection));
+
+                services.RemoveAll<IAgentSpoke>();
+                services.AddSingleton<IAgentSpoke, FakeAgentSpoke>();
+            });
+        }
+    }
+
+    private sealed class FakeAgentSpoke : IAgentSpoke
+    {
+        private int _sessionCounter;
+
+        public event EventHandler<AgentEvent>? EventReceived;
+
+        public Task<AgentInfo> InitializeAsync(CancellationToken cancellationToken)
+            => Task.FromResult(new AgentInfo("FakeAgent", "9.9.9"));
+
+        public async Task<AgentSession> NewSessionAsync(string cwd, CancellationToken cancellationToken)
+        {
+            var sessionId = $"ses_{Interlocked.Increment(ref _sessionCounter)}";
+            return new AgentSession(sessionId,
+            [
+                new AgentConfigOption(
+                    "model", "Model", "model", "select",
+                    "opencode/big-pickle",
+                    [new AgentConfigOptionValue("opencode/big-pickle", "OpenCode Big Pickle", null)]),
+            ]);
+        }
+
+        public async Task<AgentPromptResult> PromptAsync(
+            string sessionId, IReadOnlyList<AgentPromptPart> prompt, CancellationToken cancellationToken)
+        {
+            foreach (var part in prompt)
+            {
+                var chunk = new AgentTextDelta(sessionId, $"msg_{part.Text[..1]}", "Hello from the fake agent");
+                EventReceived?.Invoke(this, chunk);
+            }
+
+            return new AgentPromptResult(
+                "end_turn",
+                new AgentUsageInfo(InputTokens: 30, OutputTokens: 5, TotalTokens: 35, CachedReadTokens: null),
+                UserMessageId: null);
+        }
+
+        public Task SetModelAsync(string sessionId, string modelId, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public Task CancelAsync(string sessionId, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
+    }
+}

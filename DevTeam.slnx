@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/back-end/">
+    <Project Path="back-end/DevTeam.Broker/DevTeam.Broker.csproj" />
+    <Project Path="back-end/DevTeam.Shared/DevTeam.Shared.csproj" />
+    <Project Path="back-end/DevTeam.Tests/DevTeam.Tests.csproj" />
+  </Folder>
+</Solution>

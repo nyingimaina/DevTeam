@@ -1,0 +1,51 @@
+# .NET build artifacts
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/
+*.sln.docstates
+*.cache
+
+# .NET test results
+**/TestResults/
+*.trx
+*.coverage
+
+# Environment / secrets
+.env
+.env.local
+.env*.local
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+coverage/
+
+# DevTeam runtime data (stored in ~/.devteam, not in repo)
+# (no action needed - data dir is outside the repo)
+
+# Build artifacts
+publish/
+installer/
+
+# AI-tooling local state / per-machine overrides (never ship these)
+.claude/
+.opencode/settings.local.json
+
+# Backend wwwroot (regenerated from front-end/out/ by build script - keep only
+# the static fallback placeholders)
+back-end/DevTeam.Broker/wwwroot/*
+!back-end/DevTeam.Broker/wwwroot/index.html
+!back-end/DevTeam.Broker/wwwroot/404.html
