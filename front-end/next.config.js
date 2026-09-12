@@ -1,10 +1,11 @@
 /** @type {import('next').NextConfig} */
+const isDev = process.env.NODE_ENV === "development";
+
 const nextConfig = {
-  output: "export",
   reactStrictMode: false,
   images: { unoptimized: true },
-  /** Dev-mode only: the export build is served by the broker on its own origin, so no rewrites needed. */
-  ...(process.env.NODE_ENV === "development"
+  /** Static export is only for the production build; dev needs a real server so rewrites can proxy to the broker. */
+  ...(isDev
     ? {
         async rewrites() {
           const broker = process.env.DEVTEAM_BROKER_URL ?? "http://127.0.0.1:5202";
@@ -15,6 +16,6 @@ const nextConfig = {
           ];
         },
       }
-    : {}),
+    : { output: "export" }),
 };
 module.exports = nextConfig;

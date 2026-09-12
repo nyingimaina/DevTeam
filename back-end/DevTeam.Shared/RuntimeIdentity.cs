@@ -33,12 +33,16 @@ public sealed record RuntimeIdentity
     /// <summary>Broker SQLite database file.</summary>
     public string DatabasePath => Path.Combine(DataDirectory, "devteam.db");
 
-    private RuntimeIdentity(int port, string dataDirectory, string appHomeDirectory)
+    /// <summary>Absolute path to the opencode executable, or null if not found.</summary>
+    public string? OpenCodePath { get; }
+
+    private RuntimeIdentity(int port, string dataDirectory, string appHomeDirectory, string? openCodePath)
     {
         Port = port;
         DataDirectory = dataDirectory;
         AppHomeDirectory = appHomeDirectory;
         MutexName = "DevTeam.Desktop";
+        OpenCodePath = openCodePath;
     }
 
     /// <summary>
@@ -57,7 +61,7 @@ public sealed record RuntimeIdentity
             userProfile);
         var appHome = Path.Combine(localAppData, "DevTeam");
 
-        return new RuntimeIdentity(port, dataDirectory, appHome);
+        return new RuntimeIdentity(port, dataDirectory, appHome, ResolveOpenCodePath(localAppData));
     }
 
     public static string? ReadArg(IReadOnlyList<string> args, string name)
@@ -85,5 +89,22 @@ public sealed record RuntimeIdentity
             return Path.GetFullPath(explicitDataDir);
 
         return Path.Combine(userProfile, ".devteam");
+    }
+
+    private static string? ResolveOpenCodePath(string localAppData)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "opencode", "opencode.exe"),
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        return null;
     }
 }

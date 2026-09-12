@@ -22,6 +22,13 @@ public partial class Program
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
+        builder.Services.AddSingleton<IAcpProcess>(sp =>
+        {
+            var exe = identity.OpenCodePath
+                ?? throw new InvalidOperationException(
+                    "opencode executable not found. Install opencode or set the path.");
+            return new OpencodeAcpProcess(exe, ["acp"]);
+        });
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
         builder.Services.AddSingleton<BrokerCoordinator>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>

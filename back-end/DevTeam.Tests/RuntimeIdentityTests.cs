@@ -90,4 +90,43 @@ public class RuntimeIdentityTests
         Assert.Null(RuntimeIdentity.ReadArg(["--other=x"], "--port"));
         Assert.Equal("", RuntimeIdentity.ReadArg(["--port="], "--port"));
     }
+
+    [Fact]
+    public void Resolve_OpenCodeAtWinGetLinksPath_ReturnsThatPath()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var linksDir = Path.Combine(localAppData, "Microsoft", "WinGet", "Links");
+        Directory.CreateDirectory(linksDir);
+        var exePath = Path.Combine(linksDir, "opencode.exe");
+        File.WriteAllText(exePath, "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData);
+
+            Assert.Equal(exePath, identity.OpenCodePath);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_OpenCodeNotFoundAnywhere_ReturnsNull()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        Directory.CreateDirectory(localAppData);
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData);
+
+            Assert.Null(identity.OpenCodePath);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
 }

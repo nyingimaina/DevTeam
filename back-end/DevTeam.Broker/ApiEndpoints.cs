@@ -57,7 +57,7 @@ public static class ApiEndpoints
             var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
             try
             {
-                var result = await coordinator.PromptAsync(sessionId, request.Text, ctx.RequestAborted);
+                var result = await coordinator.PromptWithSessionRecoveryAsync(sessionId, request.Text, ctx.RequestAborted);
                 return Results.Ok(result);
             }
             catch (KeyNotFoundException)
