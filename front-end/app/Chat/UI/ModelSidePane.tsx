@@ -1,6 +1,8 @@
 import React from "react";
 import { ModelOption, SessionSummary } from "../Data/BrokerTypes";
 import SelectWrapper from "./SelectWrapper";
+import ThemePicker from "../../Theme/ThemePicker";
+import { ThemeMode } from "../../Theme/ThemeProvider";
 import styles from "../Styles/ModelSidePane.module.css";
 
 interface IProps {
@@ -10,6 +12,8 @@ interface IProps {
   currentModeId?: string;
   sessions: SessionSummary[];
   activeSessionId?: string;
+  themeMode?: ThemeMode;
+  onThemeModeChange?: (mode: ThemeMode) => void;
   onSelectModel: (modelId: string) => void;
   onSelectMode: (modeId: string) => void;
   onSelectSession: (sessionId: string) => void;
@@ -26,6 +30,8 @@ export default function ModelSidePane({
   currentModeId,
   sessions,
   activeSessionId,
+  themeMode,
+  onThemeModeChange,
   onSelectModel,
   onSelectMode,
   onSelectSession,
@@ -38,25 +44,30 @@ export default function ModelSidePane({
     <div className={styles.pane}>
       <div className={styles.header}>
         <span className={styles.title}>DevTeam</span>
-        <button className={styles.close} onClick={onClose} aria-label="Close side pane">
+        <button type="button" className={styles.close} onClick={onClose} aria-label="Close side pane">
           ✕
         </button>
       </div>
 
-      <button className={styles.newSession} onClick={onNewSession} disabled={busy}>
+      <button type="button" className={styles.newSession} onClick={onNewSession} disabled={busy}>
         + New conversation
       </button>
+
+      <div className={styles.sectionTitle}>Theme</div>
+      <ThemePicker mode={themeMode ?? "system"} onChange={(mode) => onThemeModeChange?.(mode)} />
 
       <div className={styles.sectionTitle}>Workspaces</div>
       <ul className={styles.sessionList}>
         {sessions.map((session) => (
           <li key={session.sessionId}>
             <button
+              type="button"
               className={`${styles.session} ${session.sessionId === activeSessionId ? styles.active : ""}`}
               onClick={() => onSelectSession(session.sessionId)}
             >
               <span className={styles.sessionName}>{session.title || session.workspacePath}</span>
               <button
+                type="button"
                 className={styles.delete}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -90,6 +101,7 @@ export default function ModelSidePane({
       <div className={styles.modelList}>
         {models.map((model) => (
           <button
+            type="button"
             key={model.value}
             className={`${styles.model} ${model.value === currentModelId ? styles.active : ""}`}
             onClick={() => onSelectModel(model.value)}

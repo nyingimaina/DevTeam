@@ -45,4 +45,19 @@ describe("ModelSidePane", () => {
     renderPane({ modes: [], currentModeId: undefined });
     expect(screen.getByText("No modes available.")).toBeInTheDocument();
   });
+
+  it("renders the theme picker and reports changes", async () => {
+    const user = userEvent.setup();
+    const onThemeModeChange = jest.fn();
+    renderPane({ themeMode: "light", onThemeModeChange });
+    expect(screen.getByText("Theme")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dark" }));
+    expect(onThemeModeChange).toHaveBeenCalledWith("dark");
+  });
+
+  it("renders semantic buttons with an explicit type", () => {
+    renderPane();
+    expect(screen.getByLabelText("Close side pane")).toHaveAttribute("type", "button");
+    expect(screen.getByRole("button", { name: "+ New conversation" })).toHaveAttribute("type", "button");
+  });
 });

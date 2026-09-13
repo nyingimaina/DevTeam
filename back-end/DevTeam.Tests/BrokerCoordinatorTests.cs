@@ -110,8 +110,8 @@ public class BrokerCoordinatorTests : IDisposable
 
         var textDeltas = _broadcaster.Events.Where(e => e.Type == BrokerCoordinator.EventTextDelta).ToList();
         Assert.Equal(2, textDeltas.Count);
-        Assert.Equal("msg_1", textDeltas[0].Payload!.Value.GetProperty("MessageId").GetString());
-        Assert.Equal("Hel", textDeltas[0].Payload!.Value.GetProperty("Text").GetString());
+        Assert.Equal("msg_1", textDeltas[0].Payload!.Value.GetProperty("messageId").GetString());
+        Assert.Equal("Hel", textDeltas[0].Payload!.Value.GetProperty("text").GetString());
         Assert.Contains(_broadcaster.Events, e => e.Type == BrokerCoordinator.EventTurnEnd);
 
         var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);

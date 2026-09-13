@@ -25,6 +25,8 @@ public sealed class BrokerCoordinator : IAsyncDisposable
 
     public const string PromptPartTypeText = "text";
 
+    private static readonly JsonSerializerOptions PayloadJsonOptions = new(JsonSerializerDefaults.Web);
+
     private readonly IAgentSpoke _spoke;
     private readonly IDbContextFactory<DevTeamDbContext> _dbFactory;
     private readonly IEventBroadcaster _broadcaster;
@@ -491,7 +493,7 @@ string acpSessionId;
             var streamEvent = new StreamEvent(
                 sessionId.ToString(),
                 type,
-                payload is null ? null : JsonSerializer.SerializeToElement(payload));
+                payload is null ? null : JsonSerializer.SerializeToElement(payload, PayloadJsonOptions));
             await _broadcaster.BroadcastAsync(streamEvent, cancellationToken);
         }
         catch (Exception ex)
