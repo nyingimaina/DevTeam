@@ -12,6 +12,7 @@ public interface IGitService
     Task<GitResponse> MergeAsync(string workspacePath, string sourceBranch, string targetBranch, CancellationToken ct = default);
     Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default);
+    Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default);
 }
 
 public sealed class GitService : IGitService, IDisposable
@@ -53,6 +54,9 @@ public sealed class GitService : IGitService, IDisposable
 
     public async Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default)
         => await SendAsync(new GitRequest("checkout", workspacePath, branchName), ct);
+
+    public async Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("log", workspacePath), ct);
 
     private async Task<GitResponse> SendAsync(GitRequest request, CancellationToken ct)
     {
@@ -166,4 +170,15 @@ public record GitResponse(
     bool IsRepo = false,
     bool IsClean = true,
     int Ahead = 0,
-    int Behind = 0);
+    int Behind = 0,
+    GitCommit[]? Commits = null);
+
+public record GitCommit(
+    string Hash,
+    string ShortHash,
+    string Message,
+    string Author,
+    string Date,
+    string[] Parents,
+    string? Branch = null,
+    string[]? Tags = null);

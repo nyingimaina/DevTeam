@@ -145,10 +145,54 @@ public class GitCommandHandler
         if (request.WorkspacePath is null)
             return new GitResponse(false, "workspacePath required");
 
-        var (exit, out_, err) = await RunGitAsync(request.WorkspacePath, "log", "--oneline", "-20");
+        var (exit, out_, err) = await RunGitAsync(request.WorkspacePath, "log",
+            "--format=%H|%h|%s|%an|%aI|%P", "-30");
         if (exit != 0) return new GitResponse(false, $"git log failed: {err}");
 
-        return new GitResponse(true, out_.Trim());
+        var tags = await GetTagsAsync(request.WorkspacePath);
+        var branches = await ListBranchesAsync(request.WorkspacePath);
+        var currentBranch = (await RunGitAsync(request.WorkspacePath, "rev-parse", "--abbrev-ref", "HEAD")).output.Trim();
+
+        var commits = out_.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line =>
+            {
+                var parts = line.Split('|');
+                if (parts.Length < 6) return null;
+                var hash = parts[0];
+                var parents = parts[5].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var commitTags = tags.Where(t => t.Hash == hash).Select(t => t.Name).ToArray();
+                var commitBranch = branches.FirstOrDefault(b => {
+                    var (_, bHash, _) = RunGitAsync(request.WorkspacePath, "rev-parse", b).Result;
+                    return bHash.Trim() == hash;
+                });
+                return new GitCommit(
+                    Hash: hash,
+                    ShortHash: parts[1],
+                    Message: parts[2],
+                    Author: parts[3],
+                    Date: parts[4],
+                    Parents: parents,
+                    Branch: commitBranch ?? (hash == "HEAD" ? currentBranch : null),
+                    Tags: commitTags.Length > 0 ? commitTags : null);
+            })
+            .Where(c => c is not null)
+            .Cast<GitCommit>()
+            .ToArray();
+
+        return new GitResponse(true, "OK", Commits: commits);
+    }
+
+    private static async Task<(string Name, string Hash)[]> GetTagsAsync(string workspacePath)
+    {
+        var (_, out_, _) = await RunGitAsync(workspacePath, "tag", "--format=%(refname:short)|%(objectname)");
+        return out_.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line =>
+            {
+                var parts = line.Split('|');
+                return parts.Length == 2 ? (parts[0], parts[1]) : ("", "");
+            })
+            .Where(t => !string.IsNullOrEmpty(t.Item1))
+            .ToArray();
     }
 
     private static async Task<GitResponse> EnsureBranchAsync(GitRequest request)

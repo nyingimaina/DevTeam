@@ -65,6 +65,16 @@ public static class ApiEndpoints
             return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
         });
 
+        app.MapGet("/api/git/log", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.LogAsync(workspacePath, ctx.RequestAborted);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
+        });
+
         // ─── stage endpoints ─────────────────────────────────────────────
         app.MapPost("/api/releases/{releaseId:guid}/start-stage", async (Guid releaseId, HttpContext ctx) =>
         {

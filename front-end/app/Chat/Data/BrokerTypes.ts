@@ -220,4 +220,16 @@ export interface GitStatusDto {
   isClean: boolean;
   ahead: number;
   behind: number;
+  commits?: GitCommitDto[] | null;
+}
+
+export interface GitCommitDto {
+  hash: string;
+  shortHash: string;
+  message: string;
+  author: string;
+  date: string;
+  parents: string[];
+  branch?: string | null;
+  tags?: string[] | null;
 }

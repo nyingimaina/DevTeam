@@ -4,6 +4,7 @@
   height: 100%;
   padding: 12px 16px;
   gap: 12px;
+  overflow: hidden;
 }
 
 .notRepo {
@@ -41,9 +42,7 @@
   background: var(--bg-surface);
 }
 
-.branchIcon {
-  font-size: 14px;
-}
+.branchIcon { font-size: 14px; }
 
 .branchName {
   font-family: monospace;
@@ -71,12 +70,152 @@
   font-weight: 600;
 }
 
+/* ─── view toggle ────────────────────────────────────────────────────── */
+
+.viewToggle {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.toggleBtn {
+  flex: 1;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.toggleBtn:hover {
+  color: var(--text-body);
+}
+
+.toggleActive {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ─── graph container ────────────────────────────────────────────────── */
+
+.graphContainer {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.commitList {
+  display: flex;
+  flex-direction: column;
+}
+
+.commitRow {
+  display: flex;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.commitNode {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 20px;
+  flex-shrink: 0;
+}
+
+.commitDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border);
+  border: 2px solid var(--bg-surface);
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+.commitDotHead {
+  background: var(--accent);
+}
+
+.commitLine {
+  width: 2px;
+  flex: 1;
+  background: var(--border);
+  min-height: 16px;
+}
+
+.commitContent {
+  flex: 1;
+  min-width: 0;
+}
+
+.commitMessage {
+  font-size: 13px;
+  color: var(--text-body);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.commitMeta {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.commitHash {
+  font-family: monospace;
+  color: var(--accent);
+}
+
+.commitAuthor { }
+
+.commitDate { }
+
+.commitTag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.showMore {
+  padding: 8px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.showMore:hover {
+  text-decoration: underline;
+}
+
 /* ─── actions ────────────────────────────────────────────────────────── */
 
 .actions {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
 }
 
 .actionRow {
@@ -101,9 +240,7 @@
   box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
-.input:disabled {
-  opacity: 0.5;
-}
+.input:disabled { opacity: 0.5; }
 
 .actionBtn {
   padding: 8px 14px;
@@ -140,24 +277,13 @@
   cursor: pointer;
 }
 
-.refreshBtn:hover:not(:disabled) {
-  color: var(--text-body);
-}
+.refreshBtn:hover:not(:disabled) { color: var(--text-body); }
 
 /* ─── branches ───────────────────────────────────────────────────────── */
 
 .branchesSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.branchesSection h3 {
-  margin: 0;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
+  flex: 1;
+  overflow-y: auto;
 }
 
 .branchList {
@@ -170,15 +296,13 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 8px 10px;
   border-radius: 6px;
   font-family: monospace;
   font-size: 13px;
 }
 
-.branchItem:hover {
-  background: var(--surface-hover);
-}
+.branchItem:hover { background: var(--surface-hover); }
 
 .branchActive {
   background: var(--accent-soft);
@@ -186,6 +310,4 @@
   font-weight: 600;
 }
 
-.currentMarker {
-  color: var(--accent);
-}
+.currentMarker { color: var(--accent); }

@@ -73,4 +73,15 @@ public record GitResponse(
     [property: JsonPropertyName("isRepo")] bool IsRepo = false,
     [property: JsonPropertyName("isClean")] bool IsClean = true,
     [property: JsonPropertyName("ahead")] int Ahead = 0,
-    [property: JsonPropertyName("behind")] int Behind = 0);
+    [property: JsonPropertyName("behind")] int Behind = 0,
+    [property: JsonPropertyName("commits")] GitCommit[]? Commits = null);
+
+public record GitCommit(
+    [property: JsonPropertyName("hash")] string Hash,
+    [property: JsonPropertyName("shortHash")] string ShortHash,
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("author")] string Author,
+    [property: JsonPropertyName("date")] string Date,
+    [property: JsonPropertyName("parents")] string[] Parents,
+    [property: JsonPropertyName("branch")] string? Branch = null,
+    [property: JsonPropertyName("tags")] string[]? Tags = null);

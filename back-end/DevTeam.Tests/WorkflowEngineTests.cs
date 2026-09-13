@@ -223,6 +223,12 @@ internal sealed class FakeGitService : IGitService
         Commands.Add($"checkout:{branchName}");
         return Task.FromResult(new GitResponse(true, $"Checked out '{branchName}'", Branch: branchName));
     }
+
+    public Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default)
+    {
+        Commands.Add("log");
+        return Task.FromResult(new GitResponse(true, "OK"));
+    }
 }
 
 internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator

@@ -155,4 +155,8 @@ export default class BrokerApi {
       body: JSON.stringify({ workspacePath, sourceBranch, targetBranch }),
     });
   }
+
+  getGitLogAsync(workspacePath: string): Promise<GitStatusDto> {
+    return this.requestAsync<GitStatusDto>(`/api/git/log?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
 }
