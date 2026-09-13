@@ -65,6 +65,46 @@ public static class ApiEndpoints
             return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
         });
 
+        // ─── stage endpoints ─────────────────────────────────────────────
+        app.MapPost("/api/releases/{releaseId:guid}/start-stage", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var stageRun = await engine.StartStageAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(stageRun);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapPost("/api/releases/{releaseId:guid}/send-message", async (Guid releaseId, SendMessageRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Text))
+                return Results.BadRequest("Text is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var result = await engine.SendMessageAsync(releaseId, request.Text, ctx.RequestAborted);
+                return Results.Ok(result);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapPost("/api/releases/{releaseId:guid}/run-gates", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.RunGatesAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         // ─── release endpoints ────────────────────────────────────────────
         app.MapPost("/api/releases", async (CreateReleaseRequest request, HttpContext ctx) =>
         {

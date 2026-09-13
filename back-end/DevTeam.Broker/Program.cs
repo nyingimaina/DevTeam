@@ -35,6 +35,7 @@ public partial class Program
         });
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
         builder.Services.AddSingleton<BrokerCoordinator>();
+        builder.Services.AddSingleton<IWorkflowCoordinator>(sp => sp.GetRequiredService<BrokerCoordinator>());
         builder.Services.AddSingleton<IFileSystemService, FileSystemService>();
         builder.Services.AddSingleton<IProcessRunner, SystemProcessRunner>();
         builder.Services.AddSingleton<IGate[]>(sp =>

@@ -6,10 +6,19 @@ public interface IWorkflowEngine
 {
     Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct);
     Task<DevTeamRelease> AdvanceAsync(Guid releaseId, CancellationToken ct);
+    Task<ReleaseStageRun> StartStageAsync(Guid releaseId, CancellationToken ct);
+    Task<StagePromptResult> SendMessageAsync(Guid releaseId, string text, CancellationToken ct);
+    Task<DevTeamRelease> RunGatesAsync(Guid releaseId, CancellationToken ct);
     Task<DevTeamRelease> SignoffAsync(Guid releaseId, string stageName, string role, string? comment, CancellationToken ct);
     Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(CancellationToken ct);
 }
+
+public sealed record StagePromptResult(
+    string Response,
+    long InputTokens,
+    long OutputTokens,
+    long TotalTokens);
 
 public sealed record StepExecutionResult
 {

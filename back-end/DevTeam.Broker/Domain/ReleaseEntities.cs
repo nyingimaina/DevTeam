@@ -31,6 +31,15 @@ public enum ReleaseStageStatus
     Complete,
 }
 
+public enum StagePhase
+{
+    GuidedQA,
+    Producing,
+    Gates,
+    Challenge,
+    Signoff,
+}
+
 public enum ReviewFindingKind
 {
     Requirement,
@@ -117,6 +126,8 @@ public sealed class ReleaseStageRun
     public DevTeamSession? Session { get; set; }
     public string StageName { get; set; } = string.Empty;
     public ReleaseStageStatus Status { get; set; } = ReleaseStageStatus.Pending;
+    public StagePhase Phase { get; set; } = StagePhase.GuidedQA;
+    public int QuestionCount { get; set; }
     public int Attempt { get; set; } = 1;
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? FinishedAt { get; set; }

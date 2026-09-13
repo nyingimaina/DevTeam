@@ -2,7 +2,6 @@ using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
 using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
-using DevTeam.Broker.Spoke;
 using DevTeam.Broker.Workflow;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -152,7 +151,7 @@ public class WorkflowEngineTests : IDisposable
     }
 
     private WorkflowEngine CreateEngine() => new(
-        CreateFactory(), _gateRunner, new FakeAgentSpoke(), _broadcaster,
+        CreateFactory(), _gateRunner, new FakeBrokerCoordinator(), _broadcaster,
         new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance);
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()
@@ -226,14 +225,27 @@ internal sealed class FakeGitService : IGitService
     }
 }
 
-internal sealed class FakeAgentSpoke : IAgentSpoke
+internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
 {
-    public event EventHandler<AgentEvent>? EventReceived;
-    public Task<AgentInfo> InitializeAsync(CancellationToken ct) => Task.FromResult(new AgentInfo("Fake", "1.0"));
-    public Task<AgentSession> NewSessionAsync(string cwd, CancellationToken ct) => Task.FromResult(new AgentSession("ses", []));
-    public Task<AgentPromptResult> PromptAsync(string sessionId, IReadOnlyList<AgentPromptPart> prompt, CancellationToken ct) => Task.FromResult(new AgentPromptResult("end_turn", null, null));
-    public Task SetModelAsync(string sessionId, string modelId, CancellationToken ct) => Task.CompletedTask;
-    public Task SetModeAsync(string sessionId, string modeId, CancellationToken ct) => Task.CompletedTask;
-    public Task CancelAsync(string sessionId, CancellationToken ct) => Task.CompletedTask;
-    public void Dispose() { }
+    public List<string> Commands { get; } = [];
+
+    public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, CancellationToken ct)
+    {
+        Commands.Add($"new-session:{workspacePath}");
+        return Task.FromResult(new SessionSummary(
+            Guid.NewGuid(), "fake-acp", workspacePath, null, null, null,
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, [], []));
+    }
+
+    public Task<string> SetModeAsync(Guid sessionId, string modeId, CancellationToken ct)
+    {
+        Commands.Add($"set-mode:{modeId}");
+        return Task.FromResult(modeId);
+    }
+
+    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct)
+    {
+        Commands.Add($"prompt:{text[..Math.Min(50, text.Length)]}...");
+        return Task.FromResult(new PromptResponse(sessionId, "end_turn", 10, 5, 15));
+    }
 }

@@ -3,6 +3,7 @@ using System.Text.Json;
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Spoke;
+using DevTeam.Broker.Workflow;
 using Microsoft.EntityFrameworkCore;
 
 namespace DevTeam.Broker.Server;
@@ -12,7 +13,7 @@ namespace DevTeam.Broker.Server;
 /// StreamEvents, persists them, and broadcasts them to hub subscribers.
 /// Prompts are serialized per broker (one opencode process, one active turn).
 /// </summary>
-public sealed class BrokerCoordinator : IAsyncDisposable
+public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
 {
     public const string EventTextDelta = "textDelta";
     public const string EventThoughtDelta = "thoughtDelta";

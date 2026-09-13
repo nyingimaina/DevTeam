@@ -100,6 +100,10 @@ public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePat
 
 public sealed record SignoffRequest(string StageName, string Role, string? Comment);
 
+// ─── stage endpoints ───────────────────────────────────────────────────────
+
+public sealed record SendMessageRequest(string Text);
+
 // ─── git endpoints ─────────────────────────────────────────────────────────
 
 public sealed record GitInitRequest(string WorkspacePath);
