@@ -1,0 +1,298 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-family: inherit;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.header h2 {
+  margin: 0;
+  font-size: 1.1em;
+  flex: 1;
+}
+
+.header button {
+  padding: 6px 12px;
+  border: 1px solid var(--border-color, #555);
+  border-radius: 4px;
+  background: var(--button-bg, #2a2a2a);
+  color: var(--text-color, #eee);
+  cursor: pointer;
+}
+
+.header button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.header button:hover:not(:disabled) {
+  background: var(--button-hover-bg, #3a3a3a);
+}
+
+.error {
+  padding: 8px 16px;
+  background: #3a1515;
+  color: #ff6b6b;
+  border-bottom: 1px solid #5a2020;
+}
+
+.loading {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted, #888);
+}
+
+.empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted, #888);
+  font-style: italic;
+}
+
+/* ─── list view ──────────────────────────────────────────────────────── */
+
+.releaseList {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.releaseItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color, #2a2a2a);
+  cursor: pointer;
+}
+
+.releaseItem:hover {
+  background: var(--hover-bg, #1e1e1e);
+}
+
+.releaseTitle {
+  flex: 1;
+  font-weight: 500;
+}
+
+.releaseStatus {
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 0.85em;
+  font-weight: 500;
+}
+
+.releaseStages {
+  color: var(--text-muted, #888);
+  font-size: 0.85em;
+}
+
+/* ─── status colors ──────────────────────────────────────────────────── */
+
+.statusComplete {
+  background: #1a3a1a;
+  color: #4ade80;
+}
+
+.statusInProgress {
+  background: #1a2a3a;
+  color: #60a5fa;
+}
+
+.statusBlocked {
+  background: #3a2a1a;
+  color: #fbbf24;
+}
+
+.statusReady {
+  background: #1a3a2a;
+  color: #34d399;
+}
+
+/* ─── create view ────────────────────────────────────────────────────── */
+
+.createView {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.form {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9em;
+  color: var(--text-muted, #aaa);
+}
+
+.form input {
+  padding: 8px 12px;
+  border: 1px solid var(--border-color, #555);
+  border-radius: 4px;
+  background: var(--input-bg, #1a1a1a);
+  color: var(--text-color, #eee);
+  font-family: monospace;
+}
+
+.form button {
+  padding: 10px 16px;
+  border: 1px solid var(--border-color, #555);
+  border-radius: 4px;
+  background: var(--button-bg, #2a2a2a);
+  color: var(--text-color, #eee);
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.form button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form button:hover:not(:disabled) {
+  background: var(--button-hover-bg, #3a3a3a);
+}
+
+/* ─── detail view ────────────────────────────────────────────────────── */
+
+.detailView {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.detailInfo {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  font-size: 0.85em;
+  color: var(--text-muted, #888);
+  border-bottom: 1px solid var(--border-color, #2a2a2a);
+}
+
+.stagesSection {
+  padding: 12px 16px;
+  flex: 1;
+}
+
+.stagesSection h3 {
+  margin: 0 0 8px 0;
+  font-size: 1em;
+  color: var(--text-muted, #aaa);
+}
+
+/* ─── stage card ─────────────────────────────────────────────────────── */
+
+.stageCard {
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.stageHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--card-header-bg, #1e1e1e);
+}
+
+.stageName {
+  flex: 1;
+  font-weight: 500;
+}
+
+.stageSummary {
+  padding: 6px 12px;
+  font-size: 0.85em;
+  color: var(--text-muted, #aaa);
+  border-top: 1px solid var(--border-color, #2a2a2a);
+}
+
+/* ─── gate checks ────────────────────────────────────────────────────── */
+
+.gateChecks {
+  border-top: 1px solid var(--border-color, #2a2a2a);
+}
+
+.gateCheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 0.85em;
+}
+
+.gateCheck + .gateCheck {
+  border-top: 1px solid var(--border-color, #222);
+}
+
+.gatePassed {
+  color: #4ade80;
+}
+
+.gateFailed {
+  color: #f87171;
+}
+
+.gateName {
+  font-family: monospace;
+}
+
+.gateEvidence {
+  color: var(--text-muted, #888);
+  margin-left: auto;
+}
+
+/* ─── actions ────────────────────────────────────────────────────────── */
+
+.actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-color, #333);
+  flex-wrap: wrap;
+}
+
+.actions button {
+  padding: 8px 16px;
+  border: 1px solid var(--border-color, #555);
+  border-radius: 4px;
+  background: var(--button-bg, #2a2a2a);
+  color: var(--text-color, #eee);
+  cursor: pointer;
+}
+
+.actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.actions button:hover:not(:disabled) {
+  background: var(--button-hover-bg, #3a3a3a);
+}
+
+.signoffBtn {
+  background: #1a3a1a !important;
+  border-color: #2a5a2a !important;
+}
+
+.signoffBtn:hover:not(:disabled) {
+  background: #2a4a2a !important;
+}

@@ -141,3 +141,70 @@ export interface FileSystemStatDto {
   exists: boolean;
   isGitRepository: boolean;
 }
+
+// ─── release types ─────────────────────────────────────────────────────────
+
+export interface ReleaseDto {
+  id: string;
+  workspacePath: string;
+  title?: string | null;
+  version: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  features: ReleaseFeatureDto[];
+  stageRuns: ReleaseStageRunDto[];
+  signoffs: ReleaseSignoffDto[];
+  flowPosition?: ReleaseFlowPositionDto | null;
+}
+
+export interface ReleaseFeatureDto {
+  id: string;
+  releaseId: string;
+  key: string;
+  title: string;
+  description?: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReleaseStageRunDto {
+  id: string;
+  releaseId: string;
+  stageName: string;
+  status: string;
+  summary?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attempt: number;
+  gateChecks: ReleaseGateCheckDto[];
+}
+
+export interface ReleaseGateCheckDto {
+  id: string;
+  stageRunId: string;
+  name: string;
+  passed: boolean;
+  evidenceText?: string | null;
+  evidencePath?: string | null;
+  completedAt?: string | null;
+}
+
+export interface ReleaseSignoffDto {
+  id: string;
+  releaseId: string;
+  stageName: string;
+  required: boolean;
+  approved: boolean;
+  approvedBy?: string | null;
+  comment?: string | null;
+  approvedAt?: string | null;
+}
+
+export interface ReleaseFlowPositionDto {
+  id: string;
+  releaseId: string;
+  currentStageIndex: number;
+  currentStageName: string;
+}

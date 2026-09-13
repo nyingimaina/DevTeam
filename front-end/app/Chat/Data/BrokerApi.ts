@@ -5,6 +5,7 @@ import {
   FileSystemStatDto,
   HealthResponse,
   PromptResponse,
+  ReleaseDto,
   SessionDetail,
   SessionSummary,
 } from "./BrokerTypes";
@@ -87,6 +88,36 @@ export default class BrokerApi {
     return this.requestAsync<FileSystemStatDto>("/api/fs/mkdir", {
       method: "POST",
       body: JSON.stringify({ path }),
+    });
+  }
+
+  // ─── release endpoints ────────────────────────────────────────────────
+
+  createReleaseAsync(featureKey: string, workspacePath: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>("/api/releases", {
+      method: "POST",
+      body: JSON.stringify({ featureKey, workspacePath }),
+    });
+  }
+
+  listReleasesAsync(): Promise<ReleaseDto[]> {
+    return this.requestAsync<ReleaseDto[]>("/api/releases");
+  }
+
+  getReleaseAsync(releaseId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}`);
+  }
+
+  advanceReleaseAsync(releaseId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/advance`, {
+      method: "POST",
+    });
+  }
+
+  signoffReleaseAsync(releaseId: string, stageName: string, role: string, comment?: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/signoff`, {
+      method: "POST",
+      body: JSON.stringify({ stageName, role, comment }),
     });
   }
 }
