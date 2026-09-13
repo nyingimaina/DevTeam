@@ -117,6 +117,93 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task FsRoots_ListsHome()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/fs/roots");
+        response.EnsureSuccessStatusCode();
+        var roots = await response.Content.ReadFromJsonAsync<FileSystemRootDto[]>();
+        Assert.NotNull(roots);
+        Assert.Contains(roots!, r => r.DisplayName == "Home");
+    }
+
+    [Fact]
+    public async Task FsList_ReturnsEntriesSortedDirsFirst()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devteam-fsapi-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "zdir"));
+            await File.WriteAllTextAsync(Path.Combine(root, "afile.txt"), "x");
+
+            var client = _factory.CreateClient();
+            var response = await client.GetAsync($"/api/fs/list?path={Uri.EscapeDataString(root)}");
+            response.EnsureSuccessStatusCode();
+            var entries = await response.Content.ReadFromJsonAsync<FileSystemEntryDto[]>();
+            Assert.Equal(2, entries!.Length);
+            Assert.Equal("zdir", entries[0].Name);
+            Assert.Equal("directory", entries[0].Kind);
+            Assert.Equal("afile.txt", entries[1].Name);
+            Assert.Equal("file", entries[1].Kind);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FsStat_ReportsGitRepository()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devteam-fsapi-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, ".git"));
+        try
+        {
+            var client = _factory.CreateClient();
+            var stat = await client.GetFromJsonAsync<FileSystemStatDto>(
+                $"/api/fs/stat?path={Uri.EscapeDataString(root)}");
+            Assert.NotNull(stat);
+            Assert.True(stat!.Exists);
+            Assert.True(stat.IsGitRepository);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FsMkdir_CreatesDirectory()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devteam-fsapi-" + Guid.NewGuid().ToString("N"));
+        var created = Path.Combine(root, "new-folder");
+        try
+        {
+            var client = _factory.CreateClient();
+            var response = await client.PostAsJsonAsync("/api/fs/mkdir", new { path = created });
+            response.EnsureSuccessStatusCode();
+            Assert.True(Directory.Exists(created));
+            var stat = await response.Content.ReadFromJsonAsync<FileSystemStatDto>();
+            Assert.True(stat!.Exists);
+            Assert.Equal("directory", stat.Kind);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FsList_MissingPath_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync($"/api/fs/list?path={Uri.EscapeDataString(@"C:\does-not-exist-devteam")}");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     public class AppFactory : WebApplicationFactory<Program>
     {
         public string DatabasePath { get; } =

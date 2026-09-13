@@ -122,3 +122,22 @@ export interface TurnEndPayload {
   stopReason: string;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number } | null;
 }
+
+export interface FileSystemRootDto {
+  path: string;
+  displayName: string;
+}
+
+export interface FileSystemEntryDto {
+  name: string;
+  fullPath: string;
+  kind: string;
+  sizeBytes: number | null;
+}
+
+export interface FileSystemStatDto {
+  name: string;
+  kind: string;
+  exists: boolean;
+  isGitRepository: boolean;
+}

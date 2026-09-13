@@ -1,5 +1,8 @@
 import {
   AgentViewModel,
+  FileSystemEntryDto,
+  FileSystemRootDto,
+  FileSystemStatDto,
   HealthResponse,
   PromptResponse,
   SessionDetail,
@@ -65,6 +68,25 @@ export default class BrokerApi {
     return this.requestAsync<{ modeId: string }>(`/api/sessions/${sessionId}/mode`, {
       method: "POST",
       body: JSON.stringify({ modeId }),
+    });
+  }
+
+  listFileSystemRootsAsync(): Promise<FileSystemRootDto[]> {
+    return this.requestAsync<FileSystemRootDto[]>("/api/fs/roots");
+  }
+
+  listDirectoryAsync(path: string): Promise<FileSystemEntryDto[]> {
+    return this.requestAsync<FileSystemEntryDto[]>(`/api/fs/list?path=${encodeURIComponent(path)}`);
+  }
+
+  getFileSystemStatAsync(path: string): Promise<FileSystemStatDto> {
+    return this.requestAsync<FileSystemStatDto>(`/api/fs/stat?path=${encodeURIComponent(path)}`);
+  }
+
+  createDirectoryAsync(path: string): Promise<FileSystemStatDto> {
+    return this.requestAsync<FileSystemStatDto>("/api/fs/mkdir", {
+      method: "POST",
+      body: JSON.stringify({ path }),
     });
   }
 }

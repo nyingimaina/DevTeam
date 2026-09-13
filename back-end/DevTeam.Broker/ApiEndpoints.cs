@@ -99,5 +99,64 @@ public static class ApiEndpoints
                 return Results.NotFound($"Session {sessionId} not found.");
             }
         });
+
+        // ─── filesystem browser (PathBrowser) ─────────────────────────────────
+        app.MapGet("/api/fs/roots", (HttpContext ctx) =>
+        {
+            var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
+            return Results.Ok(fs.GetRoots());
+        });
+
+        app.MapGet("/api/fs/list", (string? path, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return Results.BadRequest("Path is required.");
+
+            var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
+            try
+            {
+                return Results.Ok(fs.ListDirectory(path));
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+
+        app.MapGet("/api/fs/stat", (string? path, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return Results.BadRequest("Path is required.");
+
+            var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
+            try
+            {
+                return Results.Ok(fs.GetStat(path));
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+
+        app.MapPost("/api/fs/mkdir", (CreateDirectoryRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+                return Results.BadRequest("Path is required.");
+
+            var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
+            try
+            {
+                return Results.Ok(fs.CreateDirectory(request.Path));
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Conflict(ex.Message);
+            }
+        });
     }
 }

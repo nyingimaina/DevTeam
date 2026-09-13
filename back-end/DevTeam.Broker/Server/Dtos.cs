@@ -83,3 +83,13 @@ public sealed record ConfigOptionDto(string ConfigId, string CurrentValue, IRead
 /// <summary>One hub-broadcast frame. Type is a stable discriminator the UI switches on.</summary>
 public sealed record StreamEvent(string SessionId, string Type, JsonElement? Payload,
     string? SessionTitle = null, DateTimeOffset? At = null);
+
+// ─── filesystem browser (PathBrowser) ────────────────────────────────────────
+
+public sealed record FileSystemRootDto(string Path, string DisplayName);
+
+public sealed record FileSystemEntryDto(string Name, string FullPath, string Kind, long? SizeBytes);
+
+public sealed record FileSystemStatDto(string Name, string Kind, bool Exists, bool IsGitRepository);
+
+public sealed record CreateDirectoryRequest(string Path);

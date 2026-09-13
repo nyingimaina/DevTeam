@@ -31,6 +31,7 @@ public partial class Program
         });
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
         builder.Services.AddSingleton<BrokerCoordinator>();
+        builder.Services.AddSingleton<IFileSystemService, FileSystemService>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>
             options.UseSqlite($"Data Source={identity.DatabasePath}"));
         builder.Services.AddSignalR();
