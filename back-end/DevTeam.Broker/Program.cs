@@ -55,6 +55,12 @@ public partial class Program
 
         var app = builder.Build();
 
+        using (var scope = app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<DevTeamDbContext>();
+            db.Database.EnsureCreated();
+        }
+
         app.MapHub<BrokerHub>("/hub");
         app.MapApi();
 
