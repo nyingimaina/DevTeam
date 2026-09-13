@@ -1,3 +1,4 @@
+using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
 
@@ -7,6 +8,63 @@ public static class ApiEndpoints
 {
     public static void MapApi(this WebApplication app)
     {
+        // ─── git endpoints ───────────────────────────────────────────────
+        app.MapPost("/api/git/init", async (GitInitRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.InitAsync(request.WorkspacePath, ctx.RequestAborted);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
+        });
+
+        app.MapGet("/api/git/status", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.StatusAsync(workspacePath, ctx.RequestAborted);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
+        });
+
+        app.MapPost("/api/git/branch", async (GitBranchRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+            if (string.IsNullOrWhiteSpace(request.BranchName))
+                return Results.BadRequest("BranchName is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.EnsureBranchAsync(request.WorkspacePath, request.BranchName, ctx.RequestAborted);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
+        });
+
+        app.MapPost("/api/git/commit", async (GitCommitRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+            if (string.IsNullOrWhiteSpace(request.Message))
+                return Results.BadRequest("Message is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.CommitAsync(request.WorkspacePath, request.Message, ctx.RequestAborted);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
+        });
+
+        app.MapPost("/api/git/merge", async (GitMergeRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+            if (string.IsNullOrWhiteSpace(request.SourceBranch))
+                return Results.BadRequest("SourceBranch is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.MergeAsync(request.WorkspacePath, request.SourceBranch, request.TargetBranch ?? "develop", ctx.RequestAborted);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
+        });
+
         // ─── release endpoints ────────────────────────────────────────────
         app.MapPost("/api/releases", async (CreateReleaseRequest request, HttpContext ctx) =>
         {

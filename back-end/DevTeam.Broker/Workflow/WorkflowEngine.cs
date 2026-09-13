@@ -1,5 +1,6 @@
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
+using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using Microsoft.EntityFrameworkCore;
@@ -12,6 +13,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     private readonly IGateRunner _gateRunner;
     private readonly IAgentSpoke _agentSpoke;
     private readonly IEventBroadcaster _broadcaster;
+    private readonly IGitService _gitService;
     private readonly WorkflowDefinitionLoader _loader;
     private readonly ILogger<WorkflowEngine> _logger;
 
@@ -20,6 +22,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         IGateRunner gateRunner,
         IAgentSpoke agentSpoke,
         IEventBroadcaster broadcaster,
+        IGitService gitService,
         WorkflowDefinitionLoader loader,
         ILogger<WorkflowEngine> logger)
     {
@@ -27,6 +30,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         _gateRunner = gateRunner;
         _agentSpoke = agentSpoke;
         _broadcaster = broadcaster;
+        _gitService = gitService;
         _loader = loader;
         _logger = logger;
     }
@@ -79,6 +83,20 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await db.SaveChangesAsync(ct);
 
         release.FlowPosition = position;
+
+        // Auto-create git release branch
+        try
+        {
+            var releaseBranch = $"release/{featureKey}";
+            await _gitService.InitAsync(workspacePath, ct);
+            await _gitService.EnsureBranchAsync(workspacePath, releaseBranch, ct);
+            _logger.LogInformation("Created git branch {Branch} for release {ReleaseId}", releaseBranch, release.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to create git branch for release {ReleaseId}", release.Id);
+        }
+
         _logger.LogInformation("Started release {ReleaseId} for feature {FeatureKey}", release.Id, featureKey);
         return release;
     }

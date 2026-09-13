@@ -99,3 +99,13 @@ public sealed record CreateDirectoryRequest(string Path);
 public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePath);
 
 public sealed record SignoffRequest(string StageName, string Role, string? Comment);
+
+// ─── git endpoints ─────────────────────────────────────────────────────────
+
+public sealed record GitInitRequest(string WorkspacePath);
+
+public sealed record GitBranchRequest(string WorkspacePath, string BranchName);
+
+public sealed record GitCommitRequest(string WorkspacePath, string Message);
+
+public sealed record GitMergeRequest(string WorkspacePath, string SourceBranch, string? TargetBranch = null);

@@ -1,5 +1,6 @@
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
+using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using DevTeam.Broker.Workflow;
@@ -152,7 +153,7 @@ public class WorkflowEngineTests : IDisposable
 
     private WorkflowEngine CreateEngine() => new(
         CreateFactory(), _gateRunner, new FakeAgentSpoke(), _broadcaster,
-        new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance);
+        new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance);
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()
         => new TestDbContextFactory(_connection);
@@ -175,6 +176,53 @@ internal sealed class FakeGateRunner : IGateRunner
         Requests.Add((builtin, request));
         var result = _index < Results.Count ? Results[_index++] : new GateResult(true, "OK", "");
         return Task.FromResult(result);
+    }
+}
+
+internal sealed class FakeGitService : IGitService
+{
+    public List<string> Commands { get; } = [];
+
+    public Task<GitResponse> InitAsync(string workspacePath, CancellationToken ct = default)
+    {
+        Commands.Add($"init:{workspacePath}");
+        return Task.FromResult(new GitResponse(true, "Initialized", IsRepo: true));
+    }
+
+    public Task<GitResponse> StatusAsync(string workspacePath, CancellationToken ct = default)
+    {
+        Commands.Add($"status:{workspacePath}");
+        return Task.FromResult(new GitResponse(true, "OK", IsRepo: true, IsClean: true));
+    }
+
+    public Task<GitResponse> EnsureBranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
+    {
+        Commands.Add($"ensure-branch:{branchName}");
+        return Task.FromResult(new GitResponse(true, $"Branch '{branchName}' created", Branch: branchName));
+    }
+
+    public Task<GitResponse> CommitAsync(string workspacePath, string message, CancellationToken ct = default)
+    {
+        Commands.Add($"commit:{message}");
+        return Task.FromResult(new GitResponse(true, "Committed"));
+    }
+
+    public Task<GitResponse> MergeAsync(string workspacePath, string sourceBranch, string targetBranch, CancellationToken ct = default)
+    {
+        Commands.Add($"merge:{sourceBranch}->{targetBranch}");
+        return Task.FromResult(new GitResponse(true, $"Merged {sourceBranch} into {targetBranch}"));
+    }
+
+    public Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
+    {
+        Commands.Add($"branch:{branchName}");
+        return Task.FromResult(new GitResponse(true, $"Branch '{branchName}' created", Branches: [branchName]));
+    }
+
+    public Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default)
+    {
+        Commands.Add($"checkout:{branchName}");
+        return Task.FromResult(new GitResponse(true, $"Checked out '{branchName}'", Branch: branchName));
     }
 }
 

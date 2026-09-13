@@ -1,6 +1,8 @@
 <Solution>
   <Folder Name="/back-end/">
     <Project Path="back-end/DevTeam.Broker/DevTeam.Broker.csproj" />
+    <Project Path="back-end/DevTeam.GitCli.Tests/DevTeam.GitCli.Tests.csproj" />
+    <Project Path="back-end/DevTeam.GitCli/DevTeam.GitCli.csproj" />
     <Project Path="back-end/DevTeam.Shared/DevTeam.Shared.csproj" />
     <Project Path="back-end/DevTeam.Tests/DevTeam.Tests.csproj" />
   </Folder>

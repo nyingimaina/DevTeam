@@ -1,6 +1,7 @@
 using System.Reflection;
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
+using DevTeam.Broker.Git;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
@@ -44,6 +45,7 @@ public partial class Program
         builder.Services.AddSingleton<IGateRunner, GateRunner>();
         builder.Services.AddSingleton<WorkflowDefinitionLoader>();
         builder.Services.AddScoped<IWorkflowEngine, WorkflowEngine>();
+        builder.Services.AddSingleton<IGitService, GitService>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>
             options.UseSqlite($"Data Source={identity.DatabasePath}"));
         builder.Services.AddSignalR();
