@@ -1,5 +1,6 @@
 using System.Reflection;
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Gates;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
@@ -32,6 +33,13 @@ public partial class Program
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
         builder.Services.AddSingleton<BrokerCoordinator>();
         builder.Services.AddSingleton<IFileSystemService, FileSystemService>();
+        builder.Services.AddSingleton<IProcessRunner, SystemProcessRunner>();
+        builder.Services.AddSingleton<IGate[]>(sp =>
+        {
+            var runner = sp.GetRequiredService<IProcessRunner>();
+            return BuiltinGateRegistry.Create(runner);
+        });
+        builder.Services.AddSingleton<IGateRunner, GateRunner>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>
             options.UseSqlite($"Data Source={identity.DatabasePath}"));
         builder.Services.AddSignalR();

@@ -1,0 +1,88 @@
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
+
+namespace DevTeam.Broker.Gates;
+
+public sealed class SliceManifest
+{
+    public SliceManifest()
+    {
+    }
+
+    public SliceManifest(
+        string feature,
+        string title,
+        string codePathBack,
+        string codePathFront,
+        IReadOnlyList<string> shared,
+        string testCommand)
+    {
+        Feature = feature;
+        Title = title;
+        CodePathBack = codePathBack;
+        CodePathFront = codePathFront;
+        Shared = shared.ToList();
+        TestCommand = testCommand;
+    }
+
+    public string Feature { get; set; } = string.Empty;
+
+    public string Title { get; set; } = string.Empty;
+
+    public string CodePathBack { get; set; } = string.Empty;
+
+    public string CodePathFront { get; set; } = string.Empty;
+
+    public List<string> Shared { get; set; } = [];
+
+    public string TestCommand { get; set; } = "dotnet test DevTeam.slnx";
+}
+
+public static class SliceManifestIO
+{
+    private static readonly ISerializer Serializer = new SerializerBuilder()
+        .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .Build();
+
+    public static string DefaultPath(string workspacePath, string featureKey)
+        => Path.Combine(workspacePath, "devteam", "features", featureKey, "manifest.yaml");
+
+    public static string Write(string path, SliceManifest manifest)
+    {
+        if (File.Exists(path))
+            throw new IOException($"Manifest already exists: {path}");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, Serializer.Serialize(manifest));
+        return path;
+    }
+
+    public static SliceManifest? TryRead(string path)
+    {
+        if (!File.Exists(path))
+            return null;
+
+        var deserializer = new DeserializerBuilder()
+            .IgnoreUnmatchedProperties()
+            .WithNamingConvention(CamelCaseNamingConvention.Instance)
+            .Build();
+        return deserializer.Deserialize<SliceManifest>(File.ReadAllText(path));
+    }
+}
+
+public static class GateInputs
+{
+    public static string Get(IReadOnlyDictionary<string, string>? inputs, string key, string fallback = "")
+        => inputs is not null && inputs.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : fallback;
+
+    public static string? GetOptional(IReadOnlyDictionary<string, string>? inputs, string key)
+        => inputs is not null && inputs.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
+
+    public static IReadOnlyList<string> GetList(IReadOnlyDictionary<string, string>? inputs, string key)
+    {
+        var raw = GetOptional(inputs, key);
+        return raw is null
+            ? []
+            : raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+}
