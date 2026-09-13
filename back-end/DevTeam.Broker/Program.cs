@@ -4,8 +4,10 @@ using DevTeam.Broker.Gates;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
+using DevTeam.Broker.Workflow;
 using DevTeam.Shared;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json.Serialization;
 
 namespace DevTeam.Broker;
 
@@ -40,10 +42,16 @@ public partial class Program
             return BuiltinGateRegistry.Create(runner);
         });
         builder.Services.AddSingleton<IGateRunner, GateRunner>();
+        builder.Services.AddSingleton<WorkflowDefinitionLoader>();
+        builder.Services.AddScoped<IWorkflowEngine, WorkflowEngine>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>
             options.UseSqlite($"Data Source={identity.DatabasePath}"));
         builder.Services.AddSignalR();
         builder.Services.AddSingleton<IEventBroadcaster, SignalRHubBroadcaster>();
+        builder.Services.ConfigureHttpJsonOptions(options =>
+        {
+            options.SerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
+        });
 
         var app = builder.Build();
 

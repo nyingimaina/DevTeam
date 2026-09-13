@@ -273,7 +273,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         try
         {
             var evt = new StreamEvent(releaseId.ToString(), type, System.Text.Json.JsonSerializer.SerializeToElement(payload));
-            await _broadcaster.BroadcastAsync(evt, ct);
+            await _broadcaster.BroadcastToReleaseAsync(releaseId, evt, ct);
         }
         catch (Exception ex) { _logger.LogError(ex, "Failed to broadcast {Type} for {ReleaseId}.", type, releaseId); }
     }

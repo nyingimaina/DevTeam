@@ -204,10 +204,94 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ReleaseLifecycle_CreateListGetAdvanceSignoff()
+    {
+        var client = _factory.CreateClient();
+
+        // Create release
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-api-001", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+        Assert.NotNull(release);
+        Assert.Equal("feat-api-001", release!.Features[0].Key);
+        Assert.Equal(ReleaseStatus.InProgress, release.Status);
+
+        // List releases
+        var list = await client.GetFromJsonAsync<DevTeamRelease[]>("/api/releases");
+        Assert.NotNull(list);
+        Assert.Contains(list!, r => r.Id == release.Id);
+
+        // Get release by ID
+        var get = await client.GetFromJsonAsync<DevTeamRelease>($"/api/releases/{release.Id}");
+        Assert.NotNull(get);
+        Assert.Equal(release.Id, get!.Id);
+
+        // Advance release
+        var advance = await client.PostAsJsonAsync($"/api/releases/{release.Id}/advance", new { });
+        advance.EnsureSuccessStatusCode();
+        var advanced = await advance.Content.ReadFromJsonAsync<DevTeamRelease>();
+        Assert.NotNull(advanced);
+        Assert.True(advanced!.StageRuns.Count > 0);
+
+        // Signoff (if required)
+        if (advanced.Status == ReleaseStatus.Blocked)
+        {
+            var signoff = advanced.Signoffs.First(s => s.Required && !s.Approved);
+            var signoffResp = await client.PostAsJsonAsync($"/api/releases/{release.Id}/signoff",
+                new { stageName = signoff.StageName, role = "qa-lead", comment = "Looks good" });
+            signoffResp.EnsureSuccessStatusCode();
+        }
+    }
+
+    [Fact]
+    public async Task ReleaseCreate_MissingFeatureKey_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = " ", workspacePath = @"C:\work\test" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ReleaseCreate_MissingWorkspacePath_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-001", workspacePath = " " });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ReleaseAdvance_NotFound_Returns404()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync($"/api/releases/{Guid.NewGuid()}/advance", new { });
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ReleaseSignoff_MissingStageName_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync($"/api/releases/{Guid.NewGuid()}/signoff",
+            new { stageName = " ", role = "qa-lead", comment = "ok" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     public class AppFactory : WebApplicationFactory<Program>
     {
         public string DatabasePath { get; } =
             Path.Combine(Path.GetTempPath(), "devteam-api-" + Guid.NewGuid().ToString("N") + ".db");
+
+        public AppFactory()
+        {
+            using var db = new DevTeamDbContext(new DbContextOptionsBuilder<DevTeamDbContext>()
+                .UseSqlite($"Data Source={DatabasePath}")
+                .Options);
+            db.Database.EnsureCreated();
+        }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -281,6 +365,23 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class FakeEventBroadcaster : IEventBroadcaster
+    {
+        public List<StreamEvent> Events { get; } = [];
+
+        public Task BroadcastAsync(StreamEvent streamEvent, CancellationToken cancellationToken)
+        {
+            Events.Add(streamEvent);
+            return Task.CompletedTask;
+        }
+
+        public Task BroadcastToReleaseAsync(Guid releaseId, StreamEvent streamEvent, CancellationToken cancellationToken)
+        {
+            Events.Add(streamEvent);
+            return Task.CompletedTask;
         }
     }
 }

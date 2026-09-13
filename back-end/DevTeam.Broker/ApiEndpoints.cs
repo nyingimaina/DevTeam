@@ -1,4 +1,5 @@
 using DevTeam.Broker.Server;
+using DevTeam.Broker.Workflow;
 
 namespace DevTeam.Broker;
 
@@ -6,6 +7,81 @@ public static class ApiEndpoints
 {
     public static void MapApi(this WebApplication app)
     {
+        // ─── release endpoints ────────────────────────────────────────────
+        app.MapPost("/api/releases", async (CreateReleaseRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.FeatureKey))
+                return Results.BadRequest("FeatureKey is required.");
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            var release = await engine.StartReleaseAsync(request.FeatureKey, request.WorkspacePath, ctx.RequestAborted);
+            return Results.Created($"/api/releases/{release.Id}", release);
+        });
+
+        app.MapGet("/api/releases", async (HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            var releases = await engine.ListReleasesAsync(ctx.RequestAborted);
+            return Results.Ok(releases);
+        });
+
+        app.MapGet("/api/releases/{releaseId:guid}", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.GetReleaseAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound($"Release {releaseId} not found.");
+            }
+        });
+
+        app.MapPost("/api/releases/{releaseId:guid}/advance", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.AdvanceAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound($"Release {releaseId} not found.");
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+
+        app.MapPost("/api/releases/{releaseId:guid}/signoff", async (Guid releaseId, SignoffRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.StageName))
+                return Results.BadRequest("StageName is required.");
+            if (string.IsNullOrWhiteSpace(request.Role))
+                return Results.BadRequest("Role is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.SignoffAsync(releaseId, request.StageName, request.Role, request.Comment, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound($"Release {releaseId} not found.");
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+
         app.MapGet("/healthz", (HttpContext ctx) =>
         {
             var appInfo = ctx.RequestServices.GetRequiredService<IAppInfo>();

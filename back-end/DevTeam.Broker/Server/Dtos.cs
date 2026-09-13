@@ -93,3 +93,9 @@ public sealed record FileSystemEntryDto(string Name, string FullPath, string Kin
 public sealed record FileSystemStatDto(string Name, string Kind, bool Exists, bool IsGitRepository);
 
 public sealed record CreateDirectoryRequest(string Path);
+
+// ─── release endpoints ─────────────────────────────────────────────────────
+
+public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePath);
+
+public sealed record SignoffRequest(string StageName, string Role, string? Comment);

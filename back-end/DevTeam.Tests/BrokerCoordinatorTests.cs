@@ -337,4 +337,10 @@ internal sealed class RecordingBroadcaster : IEventBroadcaster
         Events.Add(streamEvent);
         return Task.CompletedTask;
     }
+
+    public Task BroadcastToReleaseAsync(Guid releaseId, StreamEvent streamEvent, CancellationToken cancellationToken)
+    {
+        Events.Add(streamEvent);
+        return Task.CompletedTask;
+    }
 }

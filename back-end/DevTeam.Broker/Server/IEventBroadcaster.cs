@@ -6,6 +6,7 @@ namespace DevTeam.Broker.Server;
 public interface IEventBroadcaster
 {
     Task BroadcastAsync(StreamEvent streamEvent, CancellationToken cancellationToken);
+    Task BroadcastToReleaseAsync(Guid releaseId, StreamEvent streamEvent, CancellationToken cancellationToken);
 }
 
 public sealed class SignalRHubBroadcaster : IEventBroadcaster
@@ -18,6 +19,13 @@ public sealed class SignalRHubBroadcaster : IEventBroadcaster
     {
         await _hub.Clients
             .Group(BrokerHub.SessionGroup(streamEvent.SessionId))
+            .OnEvent(streamEvent);
+    }
+
+    public async Task BroadcastToReleaseAsync(Guid releaseId, StreamEvent streamEvent, CancellationToken cancellationToken)
+    {
+        await _hub.Clients
+            .Group(BrokerHub.ReleaseGroup(releaseId.ToString()))
             .OnEvent(streamEvent);
     }
 }
