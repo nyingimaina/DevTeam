@@ -12,8 +12,10 @@
   },
   "dependencies": {
     "@microsoft/signalr": "^8.0.7",
+    "framer-motion": "^12.43.0",
     "jattac.libs.web.zest-button": "^1.5.2",
     "jattac.libs.web.zest-responsive-layout": "2.6.1",
+    "jattac.libs.web.zest-tabs": "^0.2.2",
     "jattac.libs.web.zest-textbox": "0.5.5",
     "module-state-manager": "^0.2.1",
     "next": "13.5.6",

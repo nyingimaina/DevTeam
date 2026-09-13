@@ -1,0 +1,30 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--bg-app);
+}
+
+.tabBar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+  padding: 8px 12px;
+  background: var(--bg-app);
+  border-bottom: 1px solid var(--border);
+}
+
+.viewPort {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 768px) {
+  .tabBar {
+    padding: 8px 24px;
+  }
+}

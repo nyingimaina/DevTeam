@@ -5,25 +5,31 @@ import MessageRow from "./MessageRow";
 import LiveAssistantBubble from "./LiveAssistantBubble";
 import AutoGrowTextarea from "./AutoGrowTextarea";
 import ModelSidePane from "./ModelSidePane";
+import BrokerApi from "../Data/BrokerApi";
+import PathBrowser from "../../Project/UI/PathBrowser";
 import { useTheme } from "../../Theme/ThemeProvider";
 import { SidePaneProvider, useSidePane, ZestResponsiveLayout } from "jattac.libs.web.zest-responsive-layout";
 import ZestButton from "jattac.libs.web.zest-button";
-import ZestTextbox from "jattac.libs.web.zest-textbox";
 import { FaRobot, FaList } from "react-icons/fa6";
 import styles from "../Styles/Chat.module.css";
 
-export default function Chat() {
+interface IChatProps {
+  api?: BrokerApi;
+}
+
+export default function Chat({ api }: IChatProps) {
   return (
     <SidePaneProvider>
       <ZestResponsiveLayout>
-        <ChatInner />
+        <ChatInner api={api} />
       </ZestResponsiveLayout>
     </SidePaneProvider>
   );
 }
 
-function ChatInner() {
-  const [logic] = useState(() => new ChatLogic());
+function ChatInner({ api: externalApi }: IChatProps) {
+  const [api] = useState(() => externalApi ?? new BrokerApi());
+  const [logic] = useState(() => new ChatLogic(api));
   const [, forceRender] = useReducer((x: number) => x + 1, 0);
   const [draft, setDraft] = useState("");
   const { openSidePane, closeSidePane } = useSidePane();
@@ -51,15 +57,17 @@ function ChatInner() {
     void openSidePane<{ workspacePath: string } | null>({
       title: "New workspace",
       content: (
-        <WorkspacePicker
-          onPick={async (path) => {
+        <PathBrowser
+          api={api}
+          mode="pickDirectory"
+          onSelect={async (path) => {
             await logic.createSessionAsync(path);
             closeSidePane(null);
           }}
         />
       ),
     });
-  }, [logic, openSidePane, closeSidePane]);
+  }, [api, logic, openSidePane, closeSidePane]);
 
   const showSidePane = useCallback(() => {
     void openSidePane<string | null>({
@@ -125,7 +133,11 @@ function ChatInner() {
           DevTeam is a chat surface into your opencode-powered agent. Pick a workspace folder to
           start.
         </div>
-        <WorkspacePicker onPick={(path) => void logic.createSessionAsync(path)} />
+        <PathBrowser
+          api={api}
+          mode="pickDirectory"
+          onSelect={(path) => void logic.createSessionAsync(path)}
+        />
         <div className={styles.pickerHint}>
           {r.agentName ? `Connected to ${r.agentName}.` : "Checking broker…"}
           {r.brokerVersion ? ` Broker v${r.brokerVersion}.` : ""}
@@ -180,34 +192,6 @@ function ChatInner() {
         </ZestButton>
       </div>
       {r.error && <div className={styles.errorBanner}>{r.error}</div>}
-    </div>
-  );
-}
-
-interface IWorkspacePickerProps {
-  onPick: (workspacePath: string) => void;
-}
-
-function WorkspacePicker({ onPick }: IWorkspacePickerProps) {
-  const [path, setPath] = useState("");
-  return (
-    <div className={styles.picker}>
-      <ZestTextbox
-        className={styles.pathInput}
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-        placeholder="C:\work\my-project"
-        maxLength={260}
-        autoFocus
-      />
-<ZestButton
-          type="button"
-          onClick={() => onPick(path.trim())}
-          disabled={path.trim().length === 0}
-          zest={{ visualOptions: { variant: "standard" } }}
-        >
-        Start workspace
-      </ZestButton>
     </div>
   );
 }

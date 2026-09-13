@@ -1,5 +1,5 @@
-import Chat from "./Chat/UI/Chat";
+import App from "./App";
 
 export default function Home() {
-  return <Chat />;
+  return <App />;
 }
