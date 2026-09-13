@@ -233,3 +233,49 @@ export interface GitCommitDto {
   branch?: string | null;
   tags?: string[] | null;
 }
+
+// ─── stage types ─────────────────────────────────────────────────────────
+
+export interface StageRunDto {
+  id: string;
+  releaseId: string;
+  sessionId?: string | null;
+  acpSessionId?: string | null;
+  stageName: string;
+  status: string;
+  phase: string;
+  questionCount: number;
+  attempt: number;
+  startedAt: string;
+  finishedAt?: string | null;
+  summary?: string | null;
+  gateChecks: GateCheckDto[];
+  findings: ReviewFindingDto[];
+}
+
+export interface GateCheckDto {
+  id: string;
+  stageRunId: string;
+  name: string;
+  passed: boolean;
+  evidenceText?: string | null;
+  evidencePath?: string | null;
+  completedAt?: string | null;
+}
+
+export interface ReviewFindingDto {
+  id: string;
+  stageRunId: string;
+  target: string;
+  kind: string;
+  severity: string;
+  summary: string;
+  status: string;
+}
+
+export interface StagePromptResult {
+  response: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}

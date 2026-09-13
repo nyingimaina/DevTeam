@@ -9,6 +9,8 @@ import {
   ReleaseDto,
   SessionDetail,
   SessionSummary,
+  StagePromptResult,
+  StageRunDto,
 } from "./BrokerTypes";
 
 export default class BrokerApi {
@@ -158,5 +160,26 @@ export default class BrokerApi {
 
   getGitLogAsync(workspacePath: string): Promise<GitStatusDto> {
     return this.requestAsync<GitStatusDto>(`/api/git/log?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  // ─── stage endpoints ────────────────────────────────────────────────────
+
+  startStageAsync(releaseId: string): Promise<StageRunDto> {
+    return this.requestAsync<StageRunDto>(`/api/releases/${releaseId}/start-stage`, {
+      method: "POST",
+    });
+  }
+
+  sendStageMessageAsync(releaseId: string, text: string): Promise<StagePromptResult> {
+    return this.requestAsync<StagePromptResult>(`/api/releases/${releaseId}/send-message`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+  }
+
+  runStageGatesAsync(releaseId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/run-gates`, {
+      method: "POST",
+    });
   }
 }

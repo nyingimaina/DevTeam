@@ -34,7 +34,7 @@ describe("ReleaseWizard", () => {
     const releases = [makeRelease({ id: "r1" }), makeRelease({ id: "r2", title: "Release feat-b" })];
     mockApi.listReleasesAsync.mockResolvedValue(releases);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -46,7 +46,7 @@ describe("ReleaseWizard", () => {
   it("shows empty message when no releases exist", async () => {
     mockApi.listReleasesAsync.mockResolvedValue([]);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
 
     await waitFor(() => {
       expect(screen.getByText("No releases yet.")).toBeInTheDocument();
@@ -83,7 +83,7 @@ describe("ReleaseWizard", () => {
     mockApi.listReleasesAsync.mockResolvedValue([release]);
     mockApi.getReleaseAsync.mockResolvedValue(release);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -96,15 +96,20 @@ describe("ReleaseWizard", () => {
     });
   });
 
-  it("advance button triggers advanceReleaseAsync", async () => {
+  it("advance button triggers runGatesAsync", async () => {
     const user = userEvent.setup();
     const release = makeRelease();
     mockApi.listReleasesAsync.mockResolvedValue([release]);
     const advanced = makeRelease({ status: "Blocked" });
-    mockApi.advanceReleaseAsync.mockResolvedValue(advanced);
+    mockApi.runStageGatesAsync.mockResolvedValue(advanced);
     mockApi.getReleaseAsync.mockResolvedValue(release);
+    mockApi.startStageAsync.mockResolvedValue({
+      id: "sr1", releaseId: release.id, stageName: "business-analyst", status: "Active",
+      phase: "GuidedQA", questionCount: 1, attempt: 1, startedAt: "2026-01-01T00:00:00Z",
+      gateChecks: [], findings: [],
+    });
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -113,38 +118,27 @@ describe("ReleaseWizard", () => {
     await user.click(screen.getByTestId("release-item-00000000-0000-0000-0000-000000000001"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("release-advance-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("release-start-stage-btn")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByTestId("release-advance-btn"));
+    await user.click(screen.getByTestId("release-start-stage-btn"));
 
     await waitFor(() => {
-      expect(mockApi.advanceReleaseAsync).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000001");
+      expect(screen.getByTestId("release-run-gates-btn")).toBeInTheDocument();
     });
   });
 
-  it("displays gate check results", async () => {
+  it("shows signoff buttons for blocked releases", async () => {
     const release = makeRelease({
-      stageRuns: [{
-        id: "sr1",
-        releaseId: "r1",
-        stageName: "business-analyst",
-        status: "Complete",
-        summary: "All gates passed.",
-        attempt: 1,
-        gateChecks: [
-          { id: "gc1", stageRunId: "sr1", name: "scaffold_specs", passed: true, evidenceText: "12 tests, all green" },
-          { id: "gc2", stageRunId: "sr1", name: "context_bundle", passed: false, evidenceText: "Missing context" },
-        ],
-      }],
+      status: "Blocked",
+      signoffs: [{ id: "s1", releaseId: "r1", stageName: "requirements-approval", required: true, approved: false, createdAt: "2026-01-01T00:00:00Z" }],
     });
-    mockApi.listReleasesAsync.mockResolvedValue([]);
+    mockApi.listReleasesAsync.mockResolvedValue([release]);
     mockApi.getReleaseAsync.mockResolvedValue(release);
+    mockApi.signoffReleaseAsync.mockResolvedValue(makeRelease({ status: "InProgress" }));
 
     const user = userEvent.setup();
-    mockApi.listReleasesAsync.mockResolvedValue([release]);
-
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -153,10 +147,7 @@ describe("ReleaseWizard", () => {
     await user.click(screen.getByTestId("release-item-00000000-0000-0000-0000-000000000001"));
 
     await waitFor(() => {
-      expect(screen.getByText("scaffold_specs")).toBeInTheDocument();
+      expect(screen.getByTestId("release-signoff-requirements-approval")).toBeInTheDocument();
     });
-    expect(screen.getByText("12 tests, all green")).toBeInTheDocument();
-    expect(screen.getByText("context_bundle")).toBeInTheDocument();
-    expect(screen.getByText("Missing context")).toBeInTheDocument();
   });
 });

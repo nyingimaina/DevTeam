@@ -296,3 +296,184 @@
 .signoffBtn:hover:not(:disabled) {
   background: #2a4a2a !important;
 }
+
+/* ─── stage panel ─────────────────────────────────────────────────────── */
+
+.stagePanel {
+  border-top: 1px solid var(--border-color, #333);
+  padding: 12px 16px;
+}
+
+/* ─── chat container ──────────────────────────────────────────────────── */
+
+.chatContainer {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: var(--bg-surface, #1a1a1a);
+}
+
+.chatMessage {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  max-width: 85%;
+}
+
+.chatUser {
+  align-self: flex-end;
+  background: var(--accent-soft, rgba(28, 124, 84, 0.15));
+}
+
+.chatAgent {
+  align-self: flex-start;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.05));
+}
+
+.chatRole {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, #888);
+}
+
+.chatText {
+  font-size: 13px;
+  color: var(--text-body, #eee);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* ─── chat input ──────────────────────────────────────────────────────── */
+
+.chatInput {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.chatInput .input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color, #555);
+  border-radius: 6px;
+  background: var(--bg-input, #1a1a1a);
+  color: var(--text-body, #eee);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.chatInput .input:focus {
+  border-color: var(--accent, #1c7c54);
+}
+
+/* ─── signoff section ─────────────────────────────────────────────────── */
+
+.signoffSection {
+  border-top: 1px solid var(--border-color, #333);
+  padding: 12px 16px;
+}
+
+.signoffSection h3 {
+  margin: 0 0 8px 0;
+  font-size: 1em;
+  color: var(--text-muted, #aaa);
+}
+
+.signoffRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.signoffStage {
+  font-weight: 500;
+  flex: 1;
+}
+
+/* ─── phase badge ─────────────────────────────────────────────────────── */
+
+.phaseBadge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft, rgba(28, 124, 84, 0.15));
+  color: var(--accent, #1c7c54);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.questionBadge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-muted, #888);
+  font-size: 11px;
+}
+
+/* ─── findings ────────────────────────────────────────────────────────── */
+
+.findingsSection {
+  border-top: 1px solid var(--border-color, #333);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
+.findingsSection h4 {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, #aaa);
+}
+
+.findingCard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.05));
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.findingSeverity {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text-muted, #888);
+}
+
+.severityBlocker {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+
+.severityMajor {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+.findingTarget {
+  font-family: monospace;
+  color: var(--accent, #1c7c54);
+}
+
+.findingSummary {
+  flex: 1;
+  color: var(--text-body, #eee);
+}
