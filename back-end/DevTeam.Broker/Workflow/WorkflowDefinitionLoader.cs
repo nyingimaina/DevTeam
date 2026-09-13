@@ -93,7 +93,7 @@ public sealed class WorkflowDefinitionLoader
             }
 
             var steps = ResolveRoleSteps(name, role, errors);
-            roles.Add(new WorkflowRole(name, steps, role.Signoff));
+            roles.Add(new WorkflowRole(name, steps, role.Signoff, role.UserInputRequired, role.ExpectedArtifacts));
         }
 
         return roles;

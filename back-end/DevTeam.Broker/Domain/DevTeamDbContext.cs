@@ -158,6 +158,7 @@ public sealed class DevTeamDbContext : DbContext
             stage.HasOne(e => e.Session)
                 .WithMany()
                 .HasForeignKey(e => e.SessionId)
+                .IsRequired(false)
                 .OnDelete(DeleteBehavior.SetNull);
             stage.HasMany(e => e.GateChecks)
                 .WithOne(g => g.StageRun)

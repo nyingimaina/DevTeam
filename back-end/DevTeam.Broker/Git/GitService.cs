@@ -130,7 +130,8 @@ public sealed class GitService : IGitService, IDisposable
         var candidates = new[]
         {
             Path.Combine(baseDir, "DevTeam.GitCli.dll"),
-            Path.Combine(baseDir, "..", "..", "..", "..", "DevTeam.GitCli", "bin", "Release", "net10.0", "DevTeam.GitCli.dll"),
+            Path.Combine(baseDir, "DevTeam.GitCli", "bin", "Debug", "net10.0", "DevTeam.GitCli.dll"),
+            Path.Combine(baseDir, "DevTeam.GitCli", "bin", "Release", "net10.0", "DevTeam.GitCli.dll"),
         };
 
         foreach (var candidate in candidates)

@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
 import { GitCommitDto, GitStatusDto } from "../../Chat/Data/BrokerTypes";
+import ZestButton from "jattac.libs.web.zest-button";
 import styles from "../Styles/GitView.module.css";
 
 interface IGitViewProps {
@@ -38,46 +39,25 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
   useEffect(() => { void loadAll(); }, [loadAll]);
 
   const handleInit = useCallback(async () => {
-    setLoading(true);
     setError(null);
-    try {
-      await api.initGitAsync(workspacePath);
-      await loadAll();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+    await api.initGitAsync(workspacePath);
+    await loadAll();
   }, [api, workspacePath, loadAll]);
 
   const handleCommit = useCallback(async () => {
     if (!commitMessage.trim()) return;
-    setLoading(true);
     setError(null);
-    try {
-      await api.commitGitAsync(workspacePath, commitMessage.trim());
-      setCommitMessage("");
-      await loadAll();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+    await api.commitGitAsync(workspacePath, commitMessage.trim());
+    setCommitMessage("");
+    await loadAll();
   }, [api, workspacePath, commitMessage, loadAll]);
 
   const handleCreateBranch = useCallback(async () => {
     if (!newBranch.trim()) return;
-    setLoading(true);
     setError(null);
-    try {
-      await api.createGitBranchAsync(workspacePath, newBranch.trim());
-      setNewBranch("");
-      await loadAll();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+    await api.createGitBranchAsync(workspacePath, newBranch.trim());
+    setNewBranch("");
+    await loadAll();
   }, [api, workspacePath, newBranch, loadAll]);
 
   if (!status && loading) {
@@ -90,9 +70,16 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
         <div className={styles.notRepo}>
           <div className={styles.notRepoIcon}>📂</div>
           <div>Not a git repository</div>
-          <button onClick={handleInit} disabled={loading} className={styles.actionBtn}>
+          <ZestButton
+            type="button"
+            onClick={handleInit}
+            zest={{
+              semanticType: "add",
+              busyOptions: { preventRageClick: true },
+            }}
+          >
             Initialize Git
-          </button>
+          </ZestButton>
         </div>
       </div>
     );
@@ -114,18 +101,28 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
 
       {/* View toggle */}
       <div className={styles.viewToggle}>
-        <button
-          className={`${styles.toggleBtn} ${view === "graph" ? styles.toggleActive : ""}`}
+        <ZestButton
+          type="button"
           onClick={() => setView("graph")}
+          className={styles.toggleBtn}
+          zest={{
+            buttonStyle: view === "graph" ? "solid" : "text",
+            visualOptions: { size: "sm" },
+          }}
         >
           Graph
-        </button>
-        <button
-          className={`${styles.toggleBtn} ${view === "branches" ? styles.toggleActive : ""}`}
+        </ZestButton>
+        <ZestButton
+          type="button"
           onClick={() => setView("branches")}
+          className={styles.toggleBtn}
+          zest={{
+            buttonStyle: view === "branches" ? "solid" : "text",
+            visualOptions: { size: "sm" },
+          }}
         >
           Branches
-        </button>
+        </ZestButton>
       </div>
 
       {view === "graph" && (
@@ -161,9 +158,18 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
             onKeyDown={(e) => e.key === "Enter" && handleCommit()}
             disabled={loading}
           />
-          <button onClick={handleCommit} disabled={loading || !commitMessage.trim()} className={styles.actionBtn}>
+          <ZestButton
+            type="button"
+            onClick={handleCommit}
+            disabled={!commitMessage.trim()}
+            zest={{
+              semanticType: "save",
+              busyOptions: { preventRageClick: true },
+              visualOptions: { size: "sm" },
+            }}
+          >
             Commit
-          </button>
+          </ZestButton>
         </div>
         <div className={styles.actionRow}>
           <input
@@ -174,11 +180,31 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
             onKeyDown={(e) => e.key === "Enter" && handleCreateBranch()}
             disabled={loading}
           />
-          <button onClick={handleCreateBranch} disabled={loading || !newBranch.trim()} className={styles.actionBtn}>
+          <ZestButton
+            type="button"
+            onClick={handleCreateBranch}
+            disabled={!newBranch.trim()}
+            zest={{
+              semanticType: "add",
+              busyOptions: { preventRageClick: true },
+              visualOptions: { size: "sm" },
+            }}
+          >
             Branch
-          </button>
+          </ZestButton>
         </div>
-        <button onClick={loadAll} disabled={loading} className={styles.refreshBtn}>Refresh</button>
+        <ZestButton
+          type="button"
+          onClick={loadAll}
+          zest={{
+            semanticType: "refresh",
+            busyOptions: { preventRageClick: true },
+            buttonStyle: "text",
+            visualOptions: { size: "sm" },
+          }}
+        >
+          Refresh
+        </ZestButton>
       </div>
     </div>
   );
@@ -201,9 +227,14 @@ function CommitGraph({ commits, currentBranch }: CommitGraphProps) {
         <CommitRow key={commit.hash} commit={commit} isHead={i === 0} />
       ))}
       {commits.length > 20 && !expanded && (
-        <button className={styles.showMore} onClick={() => setExpanded(true)}>
+        <ZestButton
+          type="button"
+          onClick={() => setExpanded(true)}
+          className={styles.showMore}
+          zest={{ buttonStyle: "text", visualOptions: { size: "sm" } }}
+        >
           Show all {commits.length} commits...
-        </button>
+        </ZestButton>
       )}
     </div>
   );

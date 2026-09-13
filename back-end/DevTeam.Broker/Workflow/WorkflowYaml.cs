@@ -19,6 +19,8 @@ public sealed class WorkflowYaml
         ["business-analyst"] = new RoleYaml
         {
             Signoff = Signoffs.RequirementsApproval,
+            UserInputRequired = true,
+            ExpectedArtifacts = ["devteam/features/<F>/specs.feature", "devteam/features/<F>/handoff.md"],
             Steps =
             [
                 new StepYaml { Builtin = BuiltinRegistry.ScaffoldSpecs },
@@ -31,6 +33,8 @@ public sealed class WorkflowYaml
         ["developer"] = new RoleYaml
         {
             Signoff = Signoffs.PrCreated,
+            UserInputRequired = false,
+            ExpectedArtifacts = ["devteam/features/<F>/code/"],
             Steps =
             [
                 new StepYaml { Builtin = BuiltinRegistry.ContextBundle },
@@ -54,6 +58,8 @@ public sealed class WorkflowYaml
         ["qa"] = new RoleYaml
         {
             Signoff = Signoffs.ReleaseApproval,
+            UserInputRequired = false,
+            ExpectedArtifacts = ["devteam/features/<F>/coverage.md"],
             Steps =
             [
                 new StepYaml { Builtin = BuiltinRegistry.ContextBundle },
@@ -126,6 +132,10 @@ public sealed class RoleYaml
     public AgentYaml? Agent { get; set; }
 
     public LoopYaml? Loop { get; set; }
+
+    public bool UserInputRequired { get; set; }
+
+    public List<string> ExpectedArtifacts { get; set; } = [];
 }
 
 public sealed class StepYaml

@@ -228,10 +228,17 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         Assert.NotNull(get);
         Assert.Equal(release.Id, get!.Id);
 
-        // Advance release
-        var advance = await client.PostAsJsonAsync($"/api/releases/{release.Id}/advance", new { });
-        advance.EnsureSuccessStatusCode();
-        var advanced = await advance.Content.ReadFromJsonAsync<DevTeamRelease>();
+        // Interactive flow: start stage → send message → run gates
+        var startStage = await client.PostAsJsonAsync($"/api/releases/{release.Id}/start-stage", new { });
+        startStage.EnsureSuccessStatusCode();
+
+        var sendMessage = await client.PostAsJsonAsync($"/api/releases/{release.Id}/send-message",
+            new { text = "We need a login form for users" });
+        sendMessage.EnsureSuccessStatusCode();
+
+        var runGates = await client.PostAsJsonAsync($"/api/releases/{release.Id}/run-gates", new { });
+        runGates.EnsureSuccessStatusCode();
+        var advanced = await runGates.Content.ReadFromJsonAsync<DevTeamRelease>();
         Assert.NotNull(advanced);
         Assert.True(advanced!.StageRuns.Count > 0);
 

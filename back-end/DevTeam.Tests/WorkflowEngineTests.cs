@@ -55,7 +55,10 @@ public class WorkflowEngineTests : IDisposable
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
-        var result = await engine.AdvanceAsync(release.Id, CancellationToken.None);
+        // BA stage requires user input — use interactive flow
+        var stageRun = await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.SendMessageAsync(release.Id, "We need a login form", CancellationToken.None);
+        var result = await engine.RunGatesAsync(release.Id, CancellationToken.None);
 
         Assert.True(_gateRunner.Requests.Count > 0);
         Assert.Contains(result.StageRuns, sr => sr.GateChecks.All(gc => gc.Passed));
@@ -68,7 +71,10 @@ public class WorkflowEngineTests : IDisposable
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
-        var result = await engine.AdvanceAsync(release.Id, CancellationToken.None);
+        // BA stage requires user input — use interactive flow
+        var stageRun = await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.SendMessageAsync(release.Id, "We need a login form", CancellationToken.None);
+        var result = await engine.RunGatesAsync(release.Id, CancellationToken.None);
 
         Assert.Contains(result.StageRuns, sr => sr.Status == ReleaseStageStatus.BlockedGate);
     }
@@ -80,7 +86,10 @@ public class WorkflowEngineTests : IDisposable
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
-        var result = await engine.AdvanceAsync(release.Id, CancellationToken.None);
+        // BA stage requires user input — use interactive flow
+        var stageRun = await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.SendMessageAsync(release.Id, "We need a login form", CancellationToken.None);
+        var result = await engine.RunGatesAsync(release.Id, CancellationToken.None);
 
         if (release.Signoffs.Any(s => s.Required))
         {
@@ -95,7 +104,11 @@ public class WorkflowEngineTests : IDisposable
         _gateRunner.Results.Add(new GateResult(true, "OK", "passed"));
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
-        await engine.AdvanceAsync(release.Id, CancellationToken.None);
+
+        // BA stage requires user input — use interactive flow
+        var stageRun = await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.SendMessageAsync(release.Id, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(release.Id, CancellationToken.None);
 
         var requiredSignoffs = release.Signoffs.Where(s => s.Required).ToList();
         foreach (var s in requiredSignoffs)
@@ -144,7 +157,10 @@ public class WorkflowEngineTests : IDisposable
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
-        var result = await engine.AdvanceAsync(release.Id, CancellationToken.None);
+        // BA stage requires user input — use interactive flow
+        var stageRun = await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.SendMessageAsync(release.Id, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(release.Id, CancellationToken.None);
 
         var fetched = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
         Assert.True(fetched.FlowPosition!.CurrentStageIndex >= 0);

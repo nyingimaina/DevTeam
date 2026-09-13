@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DevTeam.Shared\DevTeam.Shared.csproj" />
+    <ProjectReference Include="..\DevTeam.GitCli\DevTeam.GitCli.csproj" />
   </ItemGroup>
 
   <ItemGroup>

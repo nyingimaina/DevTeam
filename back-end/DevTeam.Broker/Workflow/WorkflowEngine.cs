@@ -132,7 +132,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             StageName = role.Name,
             Status = ReleaseStageStatus.Active,
             Phase = StagePhase.GuidedQA,
-            SessionId = session.SessionId,
+            AcpSessionId = session.SessionId.ToString(),
         };
         db.ReleaseStageRuns.Add(stageRun);
         await db.SaveChangesAsync(ct);
@@ -163,10 +163,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
 
-        if (stageRun.SessionId is null)
+        if (stageRun.AcpSessionId is null)
             throw new InvalidOperationException("Stage run has no linked session.");
 
-        var response = await _coordinator.PromptWithSessionRecoveryAsync(stageRun.SessionId.Value, text, ct);
+        var acpSessionId = Guid.Parse(stageRun.AcpSessionId);
+        var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, ct);
 
         stageRun.QuestionCount++;
         await db.SaveChangesAsync(ct);
@@ -194,6 +195,32 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var stageRun = release.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
+
+        // Check user input requirement
+        if (role.UserInputRequired && stageRun.QuestionCount == 0)
+        {
+            throw new InvalidOperationException(
+                $"Stage '{role.Name}' requires user input. Please chat with the agent before running gates.");
+        }
+
+        // Check expected artifacts (warn but don't block)
+        var workspacePath = release.WorkspacePath;
+        var missingArtifacts = new List<string>();
+        foreach (var artifactPattern in role.ExpectedArtifacts)
+        {
+            var artifactPath = artifactPattern.Replace("<F>", featureKey);
+            var fullPath = Path.Combine(workspacePath, artifactPath);
+            if (!Directory.Exists(fullPath) && !File.Exists(fullPath))
+            {
+                missingArtifacts.Add(artifactPattern);
+            }
+        }
+
+        if (missingArtifacts.Count > 0)
+        {
+            _logger.LogWarning("Stage '{Stage}' missing artifacts: {Artifacts}",
+                role.Name, string.Join(", ", missingArtifacts));
+        }
 
         stageRun.Phase = StagePhase.Gates;
         stageRun.Status = ReleaseStageStatus.GatesRunning;
@@ -295,6 +322,32 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var role = workflow.Pipeline[currentIndex];
         var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
+
+        // Check user input requirement for legacy advance
+        if (role.UserInputRequired)
+        {
+            throw new InvalidOperationException(
+                $"Stage '{role.Name}' requires user input. " +
+                "Use StartStageAsync → SendMessageAsync → RunGatesAsync for interactive stages.");
+        }
+
+        // Check expected artifacts (warn but don't block)
+        var missingArtifacts = new List<string>();
+        foreach (var artifactPattern in role.ExpectedArtifacts)
+        {
+            var artifactPath = artifactPattern.Replace("<F>", featureKey);
+            var fullPath = Path.Combine(release.WorkspacePath, artifactPath);
+            if (!Directory.Exists(fullPath) && !File.Exists(fullPath))
+            {
+                missingArtifacts.Add(artifactPattern);
+            }
+        }
+
+        if (missingArtifacts.Count > 0)
+        {
+            _logger.LogWarning("Stage '{Stage}' missing artifacts: {Artifacts}",
+                role.Name, string.Join(", ", missingArtifacts));
+        }
 
         var stageRun = new ReleaseStageRun
         {

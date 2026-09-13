@@ -124,6 +124,7 @@ public sealed class ReleaseStageRun
     public DevTeamRelease Release { get; set; } = null!;
     public Guid? SessionId { get; set; }
     public DevTeamSession? Session { get; set; }
+    public string? AcpSessionId { get; set; }
     public string StageName { get; set; } = string.Empty;
     public ReleaseStageStatus Status { get; set; } = ReleaseStageStatus.Pending;
     public StagePhase Phase { get; set; } = StagePhase.GuidedQA;

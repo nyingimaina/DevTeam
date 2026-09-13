@@ -22,7 +22,12 @@ public sealed record WorkflowSlices(
     string CodeBack,
     string CodeFront);
 
-public sealed record WorkflowRole(string Name, IReadOnlyList<WorkflowStep> Steps, string? Signoff);
+public sealed record WorkflowRole(
+    string Name,
+    IReadOnlyList<WorkflowStep> Steps,
+    string? Signoff,
+    bool UserInputRequired,
+    IReadOnlyList<string> ExpectedArtifacts);
 
 public sealed record WorkflowStep(
     WorkflowStepKind Kind,
