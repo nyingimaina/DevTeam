@@ -99,7 +99,7 @@ public sealed class GitService : IGitService, IDisposable
         if (_process is { HasExited: false }) return;
 
         _logger.LogInformation("Starting GitCli at {Path}", _cliPath);
-        var psi = new ProcessStartInfo(_cliPath)
+        var psi = new ProcessStartInfo("dotnet", new[] { _cliPath })
         {
             WorkingDirectory = Directory.GetCurrentDirectory(),
             RedirectStandardInput = true,

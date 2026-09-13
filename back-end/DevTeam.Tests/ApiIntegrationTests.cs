@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using DevTeam.Broker;
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using Microsoft.AspNetCore.Hosting;
@@ -285,6 +286,81 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var response = await client.PostAsJsonAsync($"/api/releases/{Guid.NewGuid()}/signoff",
             new { stageName = " ", role = "qa-lead", comment = "ok" });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task E2E_FullReleaseLifecycle()
+    {
+        var client = _factory.CreateClient();
+
+        // 1. Health
+        var health = await client.GetAsync("/healthz");
+        health.EnsureSuccessStatusCode();
+
+        // 2. Git init
+        var tmpDir = Path.Combine(Path.GetTempPath(), "e2e-git-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmpDir);
+        try
+        {
+            var gitInit = await client.PostAsJsonAsync("/api/git/init", new { workspacePath = tmpDir });
+            var gitInitBody = await gitInit.Content.ReadAsStringAsync();
+            Assert.True(gitInit.IsSuccessStatusCode, $"Git init failed: {gitInit.StatusCode} {gitInitBody}");
+            var gitStatus = await client.GetFromJsonAsync<GitResponse>($"/api/git/status?workspacePath={Uri.EscapeDataString(tmpDir)}");
+            Assert.True(gitStatus!.IsRepo);
+
+            // 3. Git branches
+            var gitBranch = await client.PostAsJsonAsync("/api/git/branch", new { workspacePath = tmpDir, branchName = "feature/test" });
+            gitBranch.EnsureSuccessStatusCode();
+
+            // 4. Create release
+            var create = await client.PostAsJsonAsync("/api/releases",
+                new { featureKey = "e2e-test", workspacePath = tmpDir });
+            create.EnsureSuccessStatusCode();
+            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(release);
+            Assert.Equal("e2e-test", release!.Features[0].Key);
+
+            // 5. List releases
+            var list = await client.GetFromJsonAsync<DevTeamRelease[]>("/api/releases");
+            Assert.Contains(list!, r => r.Id == release.Id);
+
+            // 6. Get release
+            var get = await client.GetFromJsonAsync<DevTeamRelease>($"/api/releases/{release.Id}");
+            Assert.Equal(release.Id, get!.Id);
+
+            // 7. Start BA stage
+            var startStage = await client.PostAsJsonAsync($"/api/releases/{release.Id}/start-stage", new { });
+            startStage.EnsureSuccessStatusCode();
+
+            // 8. Send message to BA agent
+            var sendMessage = await client.PostAsJsonAsync($"/api/releases/{release.Id}/send-message",
+                new { text = "We need a login form with email and password" });
+            sendMessage.EnsureSuccessStatusCode();
+
+            // 9. Run gates on BA stage
+            var runGates = await client.PostAsJsonAsync($"/api/releases/{release.Id}/run-gates", new { });
+            runGates.EnsureSuccessStatusCode();
+            var afterGates = await runGates.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(afterGates);
+
+            // 10. Signoff BA stage
+            if (afterGates.Status == ReleaseStatus.Blocked)
+            {
+                var signoff = afterGates.Signoffs.First(s => s.Required && !s.Approved);
+                var signoffResp = await client.PostAsJsonAsync($"/api/releases/{release.Id}/signoff",
+                    new { stageName = signoff.StageName, role = "pm", comment = "Approved" });
+                signoffResp.EnsureSuccessStatusCode();
+            }
+
+            // 11. Git log
+            var gitLog = await client.GetFromJsonAsync<GitResponse>($"/api/git/log?workspacePath={Uri.EscapeDataString(tmpDir)}");
+            Assert.NotNull(gitLog);
+            Assert.True(gitLog!.Success);
+        }
+        finally
+        {
+            try { Directory.Delete(tmpDir, recursive: true); } catch { }
+        }
     }
 
     public class AppFactory : WebApplicationFactory<Program>
