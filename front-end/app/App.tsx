@@ -4,11 +4,12 @@ import ZestTabs from "jattac.libs.web.zest-tabs";
 import BrokerApi from "./Chat/Data/BrokerApi";
 import Chat from "./Chat/UI/Chat";
 import ReleaseWizard from "./Project/Release/ReleaseWizard";
+import GitView from "./Project/Git/GitView";
 import PathBrowser from "./Project/UI/PathBrowser";
 import { FaFolderOpen } from "react-icons/fa6";
 import styles from "./App.module.css";
 
-type TabValue = "releases" | "chat";
+type TabValue = "releases" | "chat" | "git";
 
 const STORAGE_KEY = "devteam-project";
 
@@ -72,6 +73,7 @@ export default function App() {
           items={[
             { label: "Releases", value: "releases" },
             { label: "Chat", value: "chat" },
+            { label: "Git", value: "git" },
           ]}
           activeValue={activeTab}
           onChange={(v) => setActiveTab(v as TabValue)}
@@ -80,6 +82,7 @@ export default function App() {
       <main className={styles.viewPort}>
         {activeTab === "releases" && <ReleaseWizard api={api} workspacePath={project} />}
         {activeTab === "chat" && <Chat api={api} workspacePath={project} />}
+        {activeTab === "git" && <GitView api={api} workspacePath={project} />}
       </main>
     </div>
   );

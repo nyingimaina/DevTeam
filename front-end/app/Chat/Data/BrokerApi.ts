@@ -3,6 +3,7 @@ import {
   FileSystemEntryDto,
   FileSystemRootDto,
   FileSystemStatDto,
+  GitStatusDto,
   HealthResponse,
   PromptResponse,
   ReleaseDto,
@@ -118,6 +119,40 @@ export default class BrokerApi {
     return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/signoff`, {
       method: "POST",
       body: JSON.stringify({ stageName, role, comment }),
+    });
+  }
+
+  // ─── git endpoints ────────────────────────────────────────────────────
+
+  initGitAsync(workspacePath: string): Promise<GitStatusDto> {
+    return this.requestAsync<GitStatusDto>("/api/git/init", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath }),
+    });
+  }
+
+  getGitStatusAsync(workspacePath: string): Promise<GitStatusDto> {
+    return this.requestAsync<GitStatusDto>(`/api/git/status?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  createGitBranchAsync(workspacePath: string, branchName: string): Promise<GitStatusDto> {
+    return this.requestAsync<GitStatusDto>("/api/git/branch", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, branchName }),
+    });
+  }
+
+  commitGitAsync(workspacePath: string, message: string): Promise<GitStatusDto> {
+    return this.requestAsync<GitStatusDto>("/api/git/commit", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, message }),
+    });
+  }
+
+  mergeGitAsync(workspacePath: string, sourceBranch: string, targetBranch?: string): Promise<GitStatusDto> {
+    return this.requestAsync<GitStatusDto>("/api/git/merge", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, sourceBranch, targetBranch }),
     });
   }
 }

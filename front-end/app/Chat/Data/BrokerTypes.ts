@@ -208,3 +208,16 @@ export interface ReleaseFlowPositionDto {
   currentStageIndex: number;
   currentStageName: string;
 }
+
+// ─── git types ─────────────────────────────────────────────────────────────
+
+export interface GitStatusDto {
+  success: boolean;
+  message?: string | null;
+  branch?: string | null;
+  branches?: string[] | null;
+  isRepo: boolean;
+  isClean: boolean;
+  ahead: number;
+  behind: number;
+}

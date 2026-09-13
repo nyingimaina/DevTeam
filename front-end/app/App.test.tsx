@@ -59,6 +59,15 @@ jest.mock("./Chat/UI/Chat", () => {
   };
 });
 
+jest.mock("./Project/Git/GitView", () => {
+  return {
+    __esModule: true,
+    default: ({ workspacePath }: { workspacePath?: string }) => (
+      <div data-testid="git-mock">Git Mock — {workspacePath}</div>
+    ),
+  };
+});
+
 jest.mock("./Project/UI/PathBrowser", () => {
   return {
     __esModule: true,
@@ -128,14 +137,26 @@ describe("App", () => {
     expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
   });
 
-  it("passes workspacePath to both tabs", () => {
+  it("passes workspacePath to all three tabs", () => {
     render(<App />);
     fireEvent.click(screen.getByText("Pick"));
 
     fireEvent.click(screen.getByText("Chat"));
     expect(screen.getByText(/Chat Mock/)).toHaveTextContent("C:\\work\\my-project");
 
+    fireEvent.click(screen.getByText("Git"));
+    expect(screen.getByText(/Git Mock/)).toHaveTextContent("C:\\work\\my-project");
+
     fireEvent.click(screen.getByText("Releases"));
     expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\my-project");
+  });
+
+  it("switches to Git tab", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+    fireEvent.click(screen.getByText("Git"));
+    expect(screen.getByTestId("git-mock")).toBeInTheDocument();
+    expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-mock")).not.toBeInTheDocument();
   });
 });

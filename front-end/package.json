@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@microsoft/signalr": "^8.0.7",
+    "@tomplum/react-git-log": "^2.5.0",
     "framer-motion": "^12.43.0",
     "jattac.libs.web.zest-button": "^1.5.2",
     "jattac.libs.web.zest-responsive-layout": "2.6.1",

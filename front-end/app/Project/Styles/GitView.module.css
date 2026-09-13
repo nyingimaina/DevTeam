@@ -1,0 +1,191 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px 16px;
+  gap: 12px;
+}
+
+.notRepo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.notRepoIcon {
+  font-size: 32px;
+}
+
+.error {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+/* ─── branch header ──────────────────────────────────────────────────── */
+
+.branchHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+
+.branchIcon {
+  font-size: 14px;
+}
+
+.branchName {
+  font-family: monospace;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.dirtyBadge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #3a2a1a;
+  color: #fbbf24;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cleanBadge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #1a3a1a;
+  color: #4ade80;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ─── actions ────────────────────────────────────────────────────────── */
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.actionRow {
+  display: flex;
+  gap: 8px;
+}
+
+.input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-body);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.input:disabled {
+  opacity: 0.5;
+}
+
+.actionBtn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-body);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.actionBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.refreshBtn {
+  align-self: flex-start;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.refreshBtn:hover:not(:disabled) {
+  color: var(--text-body);
+}
+
+/* ─── branches ───────────────────────────────────────────────────────── */
+
+.branchesSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.branchesSection h3 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.branchList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.branchItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.branchItem:hover {
+  background: var(--surface-hover);
+}
+
+.branchActive {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.currentMarker {
+  color: var(--accent);
+}
