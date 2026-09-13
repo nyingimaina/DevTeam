@@ -67,6 +67,9 @@ public sealed class OpencodeAcpSpoke : IAgentSpoke
     public Task SetModelAsync(string sessionId, string modelId, CancellationToken cancellationToken)
         => _connection.SendAsync("session/set_model", new { sessionId, modelId }, cancellationToken);
 
+    public Task SetModeAsync(string sessionId, string modeId, CancellationToken cancellationToken)
+        => _connection.SendAsync("session/set_mode", new { sessionId, modeId }, cancellationToken);
+
     public Task CancelAsync(string sessionId, CancellationToken cancellationToken)
         => _connection.SendNotificationAsync("session/cancel", new { sessionId }, cancellationToken);
 

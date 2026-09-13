@@ -151,6 +151,24 @@ public class OpencodeAcpSpokeTests : IDisposable
     }
 
     [Fact]
+    public async Task SetModeAsync_SendsSetModeRequest()
+    {
+        using var spoke = new OpencodeAcpSpoke(_harness.Process);
+
+        var pending = spoke.SetModeAsync("ses_abc", "build", CancellationToken.None);
+        var (method, idRaw, paramsJson) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_mode", method);
+        using (var doc = JsonDocument.Parse(paramsJson))
+        {
+            Assert.Equal("ses_abc", doc.RootElement.GetProperty("sessionId").GetString());
+            Assert.Equal("build", doc.RootElement.GetProperty("modeId").GetString());
+        }
+
+        _harness.Reply(idRaw, "{}");
+        await pending;
+    }
+
+    [Fact]
     public async Task CancelAsync_SendsNotificationWithoutId()
     {
         using var spoke = new OpencodeAcpSpoke(_harness.Process);

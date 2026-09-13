@@ -60,4 +60,11 @@ export default class BrokerApi {
       body: JSON.stringify({ modelId }),
     });
   }
+
+  setModeAsync(sessionId: string, modeId: string): Promise<{ modeId: string }> {
+    return this.requestAsync<{ modeId: string }>(`/api/sessions/${sessionId}/mode`, {
+      method: "POST",
+      body: JSON.stringify({ modeId }),
+    });
+  }
 }

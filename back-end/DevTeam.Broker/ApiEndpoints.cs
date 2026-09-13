@@ -82,5 +82,22 @@ public static class ApiEndpoints
                 return Results.NotFound($"Session {sessionId} not found.");
             }
         });
+
+        app.MapPost("/api/sessions/{sessionId:guid}/mode", async (Guid sessionId, SetModeRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.ModeId))
+                return Results.BadRequest("ModeId is required.");
+
+            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
+            try
+            {
+                var modeId = await coordinator.SetModeAsync(sessionId, request.ModeId, ctx.RequestAborted);
+                return Results.Ok(new { modeId });
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound($"Session {sessionId} not found.");
+            }
+        });
     }
 }

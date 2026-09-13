@@ -1,13 +1,17 @@
 import React from "react";
 import { ModelOption, SessionSummary } from "../Data/BrokerTypes";
+import SelectWrapper from "./SelectWrapper";
 import styles from "../Styles/ModelSidePane.module.css";
 
 interface IProps {
   models: ModelOption[];
   currentModelId?: string;
+  modes: ModelOption[];
+  currentModeId?: string;
   sessions: SessionSummary[];
   activeSessionId?: string;
   onSelectModel: (modelId: string) => void;
+  onSelectMode: (modeId: string) => void;
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
   onDeleteSession: (sessionId: string) => void;
@@ -18,9 +22,12 @@ interface IProps {
 export default function ModelSidePane({
   models,
   currentModelId,
+  modes,
+  currentModeId,
   sessions,
   activeSessionId,
   onSelectModel,
+  onSelectMode,
   onSelectSession,
   onNewSession,
   onDeleteSession,
@@ -63,6 +70,20 @@ export default function ModelSidePane({
           </li>
         ))}
       </ul>
+
+      <div className={styles.sectionTitle}>Mode</div>
+      {modes.length === 0 ? (
+        <div className={styles.empty}>No modes available.</div>
+      ) : (
+        <SelectWrapper
+          options={modes}
+          value={currentModeId}
+          onChange={onSelectMode}
+          placeholder="Select a mode"
+          disabled={busy}
+          testId="mode-select"
+        />
+      )}
 
       <div className={styles.sectionTitle}>Model</div>
       {models.length === 0 && <div className={styles.empty}>No models available.</div>}

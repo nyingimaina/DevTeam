@@ -9,6 +9,7 @@ public sealed class DevTeamSession
     public string AcpSessionId { get; set; } = string.Empty;
     public string? Title { get; set; }
     public string? ModelId { get; set; }
+    public string? ModeId { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<Message> Messages { get; set; } = [];

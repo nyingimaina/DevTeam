@@ -105,12 +105,14 @@ public sealed class BrokerCoordinator : IAsyncDisposable
 
         var effectiveModelId = modelId
             ?? acpSession.ConfigOptions.FirstOrDefault(o => o.Id == "model")?.CurrentValue;
+        var effectiveModeId = acpSession.ConfigOptions.FirstOrDefault(o => o.Id == "mode")?.CurrentValue;
 
         var entity = new DevTeamSession
         {
             WorkspacePath = workspacePath,
             AcpSessionId = acpSession.SessionId,
             ModelId = effectiveModelId,
+            ModeId = effectiveModeId,
         };
 
         await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
@@ -150,8 +152,10 @@ public sealed class BrokerCoordinator : IAsyncDisposable
             entity.WorkspacePath,
             entity.Title,
             entity.ModelId,
+            entity.ModeId,
             entity.CreatedAt,
             entity.UpdatedAt,
+            [],
             [],
             entity.Messages
                 .OrderBy(m => m.CreatedAt)
@@ -341,6 +345,25 @@ string acpSessionId;
         return modelId;
     }
 
+    public async Task<string> SetModeAsync(
+        Guid sessionId, string modeId, CancellationToken cancellationToken)
+    {
+        string acpSessionId;
+        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        {
+            var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
+                ?? throw new KeyNotFoundException($"Session {sessionId} not found.");
+            acpSessionId = session.AcpSessionId;
+            session.ModeId = modeId;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        await _spoke.SetModeAsync(acpSessionId, modeId, cancellationToken);
+        _logger.LogInformation("Session {SessionId} switched to mode {Mode}", sessionId, modeId);
+        return modeId;
+    }
+
     public async Task<bool> DeleteSessionAsync(Guid sessionId, CancellationToken cancellationToken)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
@@ -485,15 +508,23 @@ string acpSessionId;
             .Select(o => new ModelOption(o.Value, o.Name, o.Description))
             .ToArray() ?? [];
 
+        var modes = configOptions
+            .FirstOrDefault(o => o.Id == "mode")
+            ?.Options
+            .Select(o => new ModelOption(o.Value, o.Name, o.Description))
+            .ToArray() ?? [];
+
         return new SessionSummary(
             s.Id,
             s.AcpSessionId,
             s.WorkspacePath,
             s.Title,
             s.ModelId,
+            s.ModeId,
             s.CreatedAt,
             s.UpdatedAt,
-            models);
+            models,
+            modes);
     }
 
     private static ConfigOptionDto ToConfigOptionDto(AgentConfigOption o) => new(

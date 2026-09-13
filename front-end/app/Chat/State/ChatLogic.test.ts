@@ -27,16 +27,21 @@ function makeLogic(api: BrokerApi, hub: BrokerHub): ChatLogic {
   return logic;
 }
 
-function makeSessionDetails(sessionId: string, modelId: string): SessionDetail {
+function makeSessionDetails(sessionId: string, modelId: string, modeId = "build"): SessionDetail {
   return {
     sessionId,
     acpSessionId: `acp-${sessionId}`,
     workspacePath: `C:\\work\\${sessionId}`,
     title: null,
     modelId,
+    modeId,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     models: [{ value: modelId, name: modelId }],
+    modes: [
+      { value: "build", name: "Build" },
+      { value: "plan", name: "Plan" },
+    ],
     messages: [],
   };
 }
@@ -48,9 +53,11 @@ function makeSessionSummaries(details: SessionDetail[]): SessionSummary[] {
     workspacePath: d.workspacePath,
     title: d.title,
     modelId: d.modelId,
+    modeId: d.modeId,
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
     models: d.models,
+    modes: d.modes,
   }));
 }
 
@@ -76,6 +83,7 @@ describe("ChatLogic", () => {
     expect(logic.repository.brokerReady).toBe(true);
     expect(logic.repository.activeSession?.sessionId).toBe("s1");
     expect(logic.repository.currentModelId).toBe("opencode/big-pickle");
+    expect(logic.repository.currentModeId).toBe("build");
     expect(hub.joined).toContain("s1");
   });
 
@@ -160,5 +168,29 @@ describe("ChatLogic", () => {
     expect(logic.repository.activeSession?.sessionId).toBe("s2");
     expect(logic.repository.currentModelId).toBe("model-b");
     expect(hub.joined).toEqual(["s2"]);
+  });
+
+  it("switches the mode on switchModeAsync", async () => {
+    const detail = makeSessionDetails("s1", "opencode/big-pickle");
+    const api = {
+      getHealthAsync: jest.fn().mockResolvedValue({ status: "ok", version: "0.1.0" }),
+      getInfoAsync: jest.fn().mockResolvedValue({ protocolVersion: "1", agentName: "a", agentVendor: "b", agentVersion: "1", models: [] }),
+      listSessionsAsync: jest.fn().mockResolvedValue(makeSessionSummaries([detail])),
+      getSessionAsync: jest.fn().mockResolvedValue(detail),
+      createSessionAsync: jest.fn(),
+      promptAsync: jest.fn(),
+      setModelAsync: jest.fn(),
+      setModeAsync: jest.fn().mockResolvedValue({ modeId: "plan" }),
+      deleteSessionAsync: jest.fn(),
+    } as unknown as BrokerApi;
+    const hub = new FakeHub();
+
+    const logic = makeLogic(api, hub);
+    await logic.initializeAsync();
+    await logic.switchModeAsync("plan");
+
+    expect(api.setModeAsync).toHaveBeenCalledWith("s1", "plan");
+    expect(logic.repository.currentModeId).toBe("plan");
+    expect(logic.repository.activeSession?.modeId).toBe("plan");
   });
 });

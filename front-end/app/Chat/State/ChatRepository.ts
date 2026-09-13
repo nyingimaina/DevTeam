@@ -19,6 +19,7 @@ export default class ChatRepository {
   error?: string;
   isPending = false;
   currentModelId?: string;
+  currentModeId?: string;
 }
 
 export type OnErrorChanged = (error: string | undefined) => void;

@@ -20,9 +20,11 @@ public sealed record SessionSummary(
     string WorkspacePath,
     string? Title,
     string? ModelId,
+    string? ModeId,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    IReadOnlyList<ModelOption> Models);
+    IReadOnlyList<ModelOption> Models,
+    IReadOnlyList<ModelOption> Modes);
 
 public sealed record PartDto(
     Guid Id,
@@ -50,9 +52,11 @@ public sealed record SessionDetail(
     string WorkspacePath,
     string? Title,
     string? ModelId,
+    string? ModeId,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     IReadOnlyList<ModelOption> Models,
+    IReadOnlyList<ModelOption> Modes,
     IReadOnlyList<MessageDto> Messages);
 
 public sealed record PromptRequest(string Text, string? ModelId = null);
@@ -65,6 +69,8 @@ public sealed record PromptResponse(
     long TotalTokens);
 
 public sealed record SetModelRequest(string ModelId);
+
+public sealed record SetModeRequest(string ModeId);
 
 public sealed record NewSessionRequest(string WorkspacePath, string? ModelId = null);
 

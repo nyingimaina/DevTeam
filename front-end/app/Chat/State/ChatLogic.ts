@@ -38,6 +38,7 @@ export default class ChatLogic extends ModuleStateManager<ChatRepository> {
         sessions,
         activeSession,
         currentModelId: activeSession?.modelId ?? undefined,
+        currentModeId: activeSession?.modeId ?? undefined,
       });
 
       await this.hub.startAsync();
@@ -61,6 +62,7 @@ export default class ChatLogic extends ModuleStateManager<ChatRepository> {
       this.updateRepository({
         activeSession: detail,
         currentModelId: detail.modelId ?? this.repository.currentModelId,
+        currentModeId: detail.modeId ?? this.repository.currentModeId,
         sessions: [newSession, ...this.repository.sessions],
       });
       await this.hub.joinSessionAsync(detail.sessionId);
@@ -81,6 +83,7 @@ export default class ChatLogic extends ModuleStateManager<ChatRepository> {
       this.updateRepository({
         activeSession: detail,
         currentModelId: detail.modelId ?? this.repository.currentModelId,
+        currentModeId: detail.modeId ?? this.repository.currentModeId,
       });
       await this.hub.joinSessionAsync(sessionId);
     } catch (err) {
@@ -138,6 +141,17 @@ export default class ChatLogic extends ModuleStateManager<ChatRepository> {
     }
   }
 
+  public async switchModeAsync(modeId: string): Promise<void> {
+    const session = this.repository.activeSession;
+    if (!session) return;
+    try {
+      await this.api.setModeAsync(session.sessionId, modeId);
+      this.updateRepository({ currentModeId: modeId, activeSession: { ...session, modeId } });
+    } catch (err) {
+      this.updateRepository({ error: `Failed to switch mode: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
   public async deleteSessionAsync(sessionId: string): Promise<void> {
     try {
       await this.hub.leaveSessionAsync(sessionId);
@@ -148,9 +162,19 @@ export default class ChatLogic extends ModuleStateManager<ChatRepository> {
       if (!activeSession && remaining.length > 0) {
         const detail = await this.api.getSessionAsync(remaining[0].sessionId);
         await this.hub.joinSessionAsync(detail.sessionId);
-        this.updateRepository({ sessions: remaining, activeSession: detail, currentModelId: detail.modelId ?? undefined });
+        this.updateRepository({
+          sessions: remaining,
+          activeSession: detail,
+          currentModelId: detail.modelId ?? undefined,
+          currentModeId: detail.modeId ?? undefined,
+        });
       } else {
-        this.updateRepository({ sessions: remaining, activeSession, currentModelId: activeSession?.modelId ?? undefined });
+        this.updateRepository({
+          sessions: remaining,
+          activeSession,
+          currentModelId: activeSession?.modelId ?? undefined,
+          currentModeId: activeSession?.modeId ?? undefined,
+        });
       }
     } catch (err) {
       this.updateRepository({ error: `Failed to delete session: ${err instanceof Error ? err.message : String(err)}` });

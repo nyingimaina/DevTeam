@@ -56,12 +56,15 @@ function ChatInner() {
         <ModelSidePane
           models={r.activeSession?.models ?? []}
           currentModelId={r.currentModelId}
+          modes={r.activeSession?.modes ?? []}
+          currentModeId={r.currentModeId}
           sessions={r.sessions}
           activeSessionId={r.activeSession?.sessionId}
           onSelectModel={async (modelId) => {
             await logic.switchModelAsync(modelId);
             closeSidePane(null);
           }}
+          onSelectMode={(modeId) => void logic.switchModeAsync(modeId)}
           onSelectSession={async (sessionId) => {
             await logic.switchSessionAsync(sessionId);
             closeSidePane(null);

@@ -20,5 +20,7 @@ public interface IAgentSpoke : IDisposable
 
     Task SetModelAsync(string sessionId, string modelId, CancellationToken cancellationToken);
 
+    Task SetModeAsync(string sessionId, string modeId, CancellationToken cancellationToken);
+
     Task CancelAsync(string sessionId, CancellationToken cancellationToken);
 }

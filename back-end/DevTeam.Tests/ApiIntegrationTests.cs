@@ -51,6 +51,8 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var session = await create.Content.ReadFromJsonAsync<SessionSummary>();
         Assert.NotEqual(Guid.Empty, session!.SessionId);
         Assert.Single(session.Models);
+        Assert.Equal("build", session.ModeId);
+        Assert.Equal(2, session.Modes.Count);
 
         var prompt = await client.PostAsJsonAsync($"/api/sessions/{session.SessionId}/prompt",
             new { text = "hello world" });
@@ -81,6 +83,14 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var setModel = await client.PostAsJsonAsync($"/api/sessions/{session.SessionId}/model",
             new { modelId = "opencode/big-pickle-v2" });
         setModel.EnsureSuccessStatusCode();
+
+        var setMode = await client.PostAsJsonAsync($"/api/sessions/{session.SessionId}/mode",
+            new { modeId = "plan" });
+        setMode.EnsureSuccessStatusCode();
+
+        var afterMode = await client.GetFromJsonAsync<SessionDetail>($"/api/sessions/{session.SessionId}");
+        Assert.NotNull(afterMode);
+        Assert.Equal("plan", afterMode!.ModeId);
 
         var delete = await client.DeleteAsync($"/api/sessions/{session.SessionId}");
         Assert.Equal(HttpStatusCode.NoContent, delete.StatusCode);
@@ -148,6 +158,13 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                     "model", "Model", "model", "select",
                     "opencode/big-pickle",
                     [new AgentConfigOptionValue("opencode/big-pickle", "OpenCode Big Pickle", null)]),
+                new AgentConfigOption(
+                    "mode", "Mode", "provider", "select",
+                    "build",
+                    [
+                        new AgentConfigOptionValue("build", "Build", null),
+                        new AgentConfigOptionValue("plan", "Plan", null),
+                    ]),
             ]);
         }
 
@@ -167,6 +184,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         }
 
         public Task SetModelAsync(string sessionId, string modelId, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public Task SetModeAsync(string sessionId, string modeId, CancellationToken cancellationToken)
             => Task.CompletedTask;
 
         public Task CancelAsync(string sessionId, CancellationToken cancellationToken)

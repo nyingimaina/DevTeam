@@ -26,6 +26,7 @@ public sealed class DevTeamDbContext : DbContext
             session.HasIndex(e => e.AcpSessionId).IsUnique();
             session.Property(e => e.Title).HasMaxLength(512);
             session.Property(e => e.ModelId).HasMaxLength(256);
+            session.Property(e => e.ModeId).HasMaxLength(256);
         });
 
         modelBuilder.Entity<Message>(message =>

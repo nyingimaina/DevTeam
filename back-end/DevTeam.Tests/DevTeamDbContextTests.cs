@@ -50,6 +50,7 @@ public class DevTeamDbContextTests : IDisposable
                 WorkspacePath = @"C:\work\proj",
                 AcpSessionId = "ses_abc",
                 ModelId = "opencode/big-pickle",
+                ModeId = "build",
             };
             var userMessage = new Message
             {
@@ -89,6 +90,7 @@ public class DevTeamDbContextTests : IDisposable
 
         Assert.Equal(@"C:\work\proj", loaded.WorkspacePath);
         Assert.Equal("opencode/big-pickle", loaded.ModelId);
+        Assert.Equal("build", loaded.ModeId);
         Assert.Single(loaded.Messages);
         var message = loaded.Messages[0];
         Assert.Equal("user", message.Role);

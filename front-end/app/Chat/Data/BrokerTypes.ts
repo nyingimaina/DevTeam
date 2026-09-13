@@ -12,9 +12,11 @@ export interface SessionSummary {
   workspacePath: string;
   title?: string | null;
   modelId?: string | null;
+  modeId?: string | null;
   createdAt: string;
   updatedAt: string;
   models: ModelOption[];
+  modes: ModelOption[];
 }
 
 export interface PartDto {
@@ -45,9 +47,11 @@ export interface SessionDetail {
   workspacePath: string;
   title?: string | null;
   modelId?: string | null;
+  modeId?: string | null;
   createdAt: string;
   updatedAt: string;
   models: ModelOption[];
+  modes: ModelOption[];
   messages: MessageDto[];
 }
 

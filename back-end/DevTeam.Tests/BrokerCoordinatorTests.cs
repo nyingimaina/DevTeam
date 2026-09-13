@@ -82,6 +82,9 @@ public class BrokerCoordinatorTests : IDisposable
         Assert.Equal("opencode/big-pickle", session.ModelId);
         Assert.Single(session.Models);
         Assert.Equal("opencode/big-pickle", session.Models[0].Value);
+        Assert.Equal("build", session.ModeId);
+        Assert.Equal(2, session.Modes.Count);
+        Assert.Contains(session.Modes, m => m.Value == "plan");
     }
 
     [Fact]
@@ -243,6 +246,30 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task SetMode_UpdatesStoreAndSpoke()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.SetModeAsync(session.SessionId, "plan", CancellationToken.None);
+        var (method, idRaw, paramsJson) = await _harness.ReadRequestAsync();
+
+        Assert.Equal("session/set_mode", method);
+        using (var doc = JsonDocument.Parse(paramsJson))
+        {
+            Assert.Equal("ses_abc", doc.RootElement.GetProperty("sessionId").GetString());
+            Assert.Equal("plan", doc.RootElement.GetProperty("modeId").GetString());
+        }
+
+        _harness.Reply(idRaw, "{}");
+        await pending;
+
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("plan", detail!.ModeId);
+        Assert.Empty(_broadcaster.Events);
+    }
+
+    [Fact]
     public async Task DeleteSession_RemovesRow()
     {
         await using var coordinator = CreateCoordinator();
@@ -295,7 +322,10 @@ public class BrokerCoordinatorTests : IDisposable
         "{\"sessionId\":\"ses_abc\",\"configOptions\":["
         + "{\"id\":\"model\",\"name\":\"Model\",\"category\":\"model\",\"type\":\"select\","
         + "\"currentValue\":\"opencode/big-pickle\","
-        + "\"options\":[{\"value\":\"opencode/big-pickle\",\"name\":\"OpenCode Big Pickle\"}]}]}";
+        + "\"options\":[{\"value\":\"opencode/big-pickle\",\"name\":\"OpenCode Big Pickle\"}]},"
+        + "{\"id\":\"mode\",\"name\":\"Mode\",\"category\":\"provider\",\"type\":\"select\","
+        + "\"currentValue\":\"build\","
+        + "\"options\":[{\"value\":\"build\",\"name\":\"Build\"},{\"value\":\"plan\",\"name\":\"Plan\"}]}]}";
 }
 
 internal sealed class RecordingBroadcaster : IEventBroadcaster
