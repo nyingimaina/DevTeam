@@ -9,6 +9,7 @@ import styles from "../Styles/ReleaseWizard.module.css";
 
 interface IReleaseWizardProps {
   api: BrokerApi;
+  workspacePath: string;
   testIdPrefix?: string;
 }
 
@@ -30,7 +31,7 @@ function statusColor(status: string): string {
   }
 }
 
-export default function ReleaseWizard({ api, testIdPrefix = "release" }: IReleaseWizardProps) {
+export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "release" }: IReleaseWizardProps) {
   const [view, setView] = useState<WizardView>("list");
   const [releases, setReleases] = useState<ReleaseDto[]>([]);
   const [selectedRelease, setSelectedRelease] = useState<ReleaseDto | null>(null);
@@ -38,7 +39,6 @@ export default function ReleaseWizard({ api, testIdPrefix = "release" }: IReleas
   const [error, setError] = useState<string | null>(null);
 
   const [featureKey, setFeatureKey] = useState("");
-  const [workspacePath, setWorkspacePath] = useState("");
 
   const loadReleases = useCallback(async () => {
     setLoading(true);
@@ -58,15 +58,14 @@ export default function ReleaseWizard({ api, testIdPrefix = "release" }: IReleas
   }, [view, loadReleases]);
 
   const handleCreate = useCallback(async () => {
-    if (!featureKey.trim() || !workspacePath.trim()) return;
+    if (!featureKey.trim()) return;
     setLoading(true);
     setError(null);
     try {
-      const release = await api.createReleaseAsync(featureKey.trim(), workspacePath.trim());
+      const release = await api.createReleaseAsync(featureKey.trim(), workspacePath);
       setSelectedRelease(release);
       setView("detail");
       setFeatureKey("");
-      setWorkspacePath("");
     } catch (e) {
       setError(toErrorMessage(e));
     } finally {
@@ -179,18 +178,9 @@ export default function ReleaseWizard({ api, testIdPrefix = "release" }: IReleas
                 data-testid={`${testIdPrefix}-feature-key`}
               />
             </label>
-            <label>
-              Workspace Path
-              <input
-                value={workspacePath}
-                onChange={(e) => setWorkspacePath(e.target.value)}
-                placeholder="e.g. C:\\work\\project"
-                data-testid={`${testIdPrefix}-workspace-path`}
-              />
-            </label>
             <button
               onClick={handleCreate}
-              disabled={loading || !featureKey.trim() || !workspacePath.trim()}
+              disabled={loading || !featureKey.trim()}
               data-testid={`${testIdPrefix}-create-btn`}
             >
               {loading ? "Creating..." : "Create Release"}

@@ -34,7 +34,7 @@ describe("ReleaseWizard", () => {
     const releases = [makeRelease({ id: "r1" }), makeRelease({ id: "r2", title: "Release feat-b" })];
     mockApi.listReleasesAsync.mockResolvedValue(releases);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -46,7 +46,7 @@ describe("ReleaseWizard", () => {
   it("shows empty message when no releases exist", async () => {
     mockApi.listReleasesAsync.mockResolvedValue([]);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
 
     await waitFor(() => {
       expect(screen.getByText("No releases yet.")).toBeInTheDocument();
@@ -60,7 +60,7 @@ describe("ReleaseWizard", () => {
     mockApi.createReleaseAsync.mockResolvedValue(created);
     mockApi.getReleaseAsync.mockResolvedValue(created);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
 
     await waitFor(() => {
       expect(screen.getByText("No releases yet.")).toBeInTheDocument();
@@ -69,7 +69,6 @@ describe("ReleaseWizard", () => {
     await user.click(screen.getByText("New Release"));
 
     await user.type(screen.getByTestId("release-feature-key"), "login-form");
-    await user.type(screen.getByTestId("release-workspace-path"), "C:\\work\\proj");
     await user.click(screen.getByTestId("release-create-btn"));
 
     await waitFor(() => {
@@ -84,7 +83,7 @@ describe("ReleaseWizard", () => {
     mockApi.listReleasesAsync.mockResolvedValue([release]);
     mockApi.getReleaseAsync.mockResolvedValue(release);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -105,7 +104,7 @@ describe("ReleaseWizard", () => {
     mockApi.advanceReleaseAsync.mockResolvedValue(advanced);
     mockApi.getReleaseAsync.mockResolvedValue(release);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();
@@ -145,7 +144,7 @@ describe("ReleaseWizard", () => {
     const user = userEvent.setup();
     mockApi.listReleasesAsync.mockResolvedValue([release]);
 
-    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} />);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath="C:\\work\\proj" />);
 
     await waitFor(() => {
       expect(screen.getByText("Release login-form")).toBeInTheDocument();

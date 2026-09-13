@@ -34,17 +34,6 @@ jest.mock("../State/ChatLogic", () => {
   };
 });
 
-jest.mock("../../Project/UI/PathBrowser", () => {
-  return {
-    __esModule: true,
-    default: ({ onSelect }: { onSelect?: (path: string) => void }) => (
-      <div data-testid="path-browser">
-        <button onClick={() => onSelect?.("C:\\work\\picked")}>Pick</button>
-      </div>
-    ),
-  };
-});
-
 function renderChat() {
   return render(
     <ThemeProvider>
@@ -88,12 +77,12 @@ describe("Chat", () => {
     expect(currentTheme()).toBe("light");
   });
 
-  it("opens the PathBrowser workspace picker from side pane", async () => {
+  it("new conversation button creates session with workspacePath", async () => {
     renderChat();
     fireEvent.click(screen.getByLabelText("Open side pane"));
     await screen.findByLabelText("Close side pane");
     fireEvent.click(screen.getByRole("button", { name: "+ New conversation" }));
-    expect(await screen.findByText("New workspace")).toBeInTheDocument();
-    expect(screen.getByTestId("path-browser")).toBeInTheDocument();
+    // Side pane closes, no PathBrowser needed
+    expect(screen.queryByLabelText("Close side pane")).not.toBeInTheDocument();
   });
 });

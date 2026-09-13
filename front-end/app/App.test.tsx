@@ -42,8 +42,10 @@ jest.mock("./Chat/Data/BrokerApi", () => {
 jest.mock("./Project/Release/ReleaseWizard", () => {
   return {
     __esModule: true,
-    default: ({ testIdPrefix }: { testIdPrefix?: string }) => (
-      <div data-testid={testIdPrefix ?? "release-wizard"}>ReleaseWizard Mock</div>
+    default: ({ testIdPrefix, workspacePath }: { testIdPrefix?: string; workspacePath?: string }) => (
+      <div data-testid={testIdPrefix ?? "release-wizard"}>
+        ReleaseWizard Mock — {workspacePath}
+      </div>
     ),
   };
 });
@@ -51,32 +53,89 @@ jest.mock("./Project/Release/ReleaseWizard", () => {
 jest.mock("./Chat/UI/Chat", () => {
   return {
     __esModule: true,
-    default: () => <div data-testid="chat-mock">Chat Mock</div>,
+    default: ({ workspacePath }: { workspacePath?: string }) => (
+      <div data-testid="chat-mock">Chat Mock — {workspacePath}</div>
+    ),
   };
 });
 
+jest.mock("./Project/UI/PathBrowser", () => {
+  return {
+    __esModule: true,
+    default: ({ onSelect }: { onSelect?: (path: string) => void }) => (
+      <div data-testid="path-browser">
+        <button onClick={() => onSelect?.("C:\\work\\my-project")}>Pick</button>
+      </div>
+    ),
+  };
+});
+
+beforeEach(() => {
+  localStorage.clear();
+});
+
 describe("App", () => {
-  it("renders with Releases tab active by default", () => {
+  it("shows PathBrowser when no project is open", () => {
     render(<App />);
-    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+    expect(screen.getByTestId("path-browser")).toBeInTheDocument();
+    expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
     expect(screen.queryByTestId("chat-mock")).not.toBeInTheDocument();
   });
 
-  it("switches to Chat tab when clicked", () => {
+  it("opens project when folder is picked", () => {
     render(<App />);
-    const chatTab = screen.getByText("Chat");
-    fireEvent.click(chatTab);
+    fireEvent.click(screen.getByText("Pick"));
+    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+    expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\my-project");
+    expect(screen.queryByTestId("path-browser")).not.toBeInTheDocument();
+  });
+
+  it("persists project in localStorage", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+    expect(localStorage.getItem("devteam-project")).toBe("C:\\work\\my-project");
+  });
+
+  it("restores project from localStorage", () => {
+    localStorage.setItem("devteam-project", "C:\\work\\saved");
+    render(<App />);
+    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+    expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\saved");
+    expect(screen.queryByTestId("path-browser")).not.toBeInTheDocument();
+  });
+
+  it("shows folder name in tab bar", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+    expect(screen.getByText("my-project")).toBeInTheDocument();
+  });
+
+  it("clicking folder name clears project", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("my-project"));
+    expect(screen.getByTestId("path-browser")).toBeInTheDocument();
+    expect(localStorage.getItem("devteam-project")).toBeNull();
+  });
+
+  it("switches to Chat tab", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+    fireEvent.click(screen.getByText("Chat"));
     expect(screen.getByTestId("chat-mock")).toBeInTheDocument();
     expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
   });
 
-  it("switches back to Releases tab", () => {
+  it("passes workspacePath to both tabs", () => {
     render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+
     fireEvent.click(screen.getByText("Chat"));
-    expect(screen.getByTestId("chat-mock")).toBeInTheDocument();
+    expect(screen.getByText(/Chat Mock/)).toHaveTextContent("C:\\work\\my-project");
 
     fireEvent.click(screen.getByText("Releases"));
-    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
-    expect(screen.queryByTestId("chat-mock")).not.toBeInTheDocument();
+    expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\my-project");
   });
 });

@@ -10,10 +10,29 @@
   top: 0;
   z-index: 10;
   display: flex;
-  justify-content: center;
+  align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--bg-app);
   border-bottom: 1px solid var(--border);
+}
+
+.projectName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+  flex-shrink: 0;
+}
+
+.projectName:hover {
+  background: var(--accent-soft);
 }
 
 .viewPort {
@@ -21,6 +40,29 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+/* ─── open folder screen ─────────────────────────────────────────────── */
+
+.openFolder {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  text-align: center;
+}
+
+.openFolderIcon {
+  color: var(--accent);
+}
+
+.openFolderText {
+  color: var(--text-muted);
+  font-size: 14px;
+  max-width: 360px;
 }
 
 @media (min-width: 768px) {
