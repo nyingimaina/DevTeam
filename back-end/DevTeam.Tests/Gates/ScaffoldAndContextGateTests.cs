@@ -61,6 +61,32 @@ public class ScaffoldAndContextGateTests : IDisposable
     }
 
     [Fact]
+    public async Task Scaffold_DoesNotOverwriteExistingRequirementsFile()
+    {
+        var gate = new ScaffoldSpecsGate();
+        var requirementsPath = ArtifactPaths.RequirementsPath(_workspace, "feat-001");
+        Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
+        await File.WriteAllTextAsync(requirementsPath,
+            "## REQ-9: Authored by the analyst" + Environment.NewLine +
+            "Given a registered user" + Environment.NewLine +
+            "Then they are signed in");
+
+        var inputs = new Dictionary<string, string>
+        {
+            ["requirementsJson"] =
+                """[{"id":"REQ-1","title":"Scaffold default","acceptanceCriteria":"Given x, When y, Then z"}]""",
+        };
+        var result = await gate.RunAsync(Request(_workspace, inputs: inputs), CancellationToken.None);
+
+        Assert.True(result.Passed);
+        var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace, "feat-001"));
+        Assert.NotNull(manifest);
+        var requirements = File.ReadAllText(requirementsPath);
+        Assert.Contains("REQ-9: Authored by the analyst", requirements);
+        Assert.DoesNotContain("REQ-1", requirements);
+    }
+
+    [Fact]
     public async Task Context_RequiresScaffoldFirst()
     {
         var gate = new ContextBundleGate();

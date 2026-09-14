@@ -363,6 +363,248 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         }
     }
 
+    [Fact]
+    public async Task PipelineEndpoint_ReturnsOrderedStages()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-pipe-001", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+        Assert.NotNull(release);
+
+        var pipeline = await client.GetFromJsonAsync<PipelineStageDto[]>($"/api/releases/{release!.Id}/pipeline");
+        Assert.NotNull(pipeline);
+        Assert.Equal(3, pipeline!.Length);
+        Assert.Equal("business-analyst", pipeline[0].Name);
+        Assert.True(pipeline[0].UserInputRequired);
+        Assert.Equal("requirements-approval", pipeline[0].Signoff);
+        Assert.Equal("developer", pipeline[1].Name);
+        Assert.False(pipeline[1].UserInputRequired);
+        Assert.Equal("pr-created", pipeline[1].Signoff);
+        Assert.Equal("qa", pipeline[2].Name);
+        Assert.False(pipeline[2].UserInputRequired);
+        Assert.Equal("release-approval", pipeline[2].Signoff);
+    }
+
+    [Fact]
+    public async Task PipelineEndpoint_UnknownRelease_Returns404()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync($"/api/releases/{Guid.NewGuid()}/pipeline");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BAProgression_SeededRequirements_PassesGates_ThenBlocksOnSignoff()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-ba-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var client = _factory.CreateClient();
+            // Real gates read requirements from the workspace during the BA gate run.
+            var requirementsPath = DevTeam.Broker.Gates.ArtifactPaths.RequirementsPath(workspace, "feat-ba-001");
+            Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
+            await File.WriteAllTextAsync(requirementsPath,
+                "## REQ-001: User can log in" + Environment.NewLine +
+                "Given a registered user" + Environment.NewLine +
+                "When they enter valid credentials" + Environment.NewLine +
+                "Then they are signed in");
+
+            var create = await client.PostAsJsonAsync("/api/releases",
+                new { featureKey = "feat-ba-001", workspacePath = workspace });
+            create.EnsureSuccessStatusCode();
+            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(release);
+
+            (await client.PostAsJsonAsync($"/api/releases/{release!.Id}/start-stage", new { })).EnsureSuccessStatusCode();
+            var send = await client.PostAsJsonAsync($"/api/releases/{release.Id}/send-message",
+                new { text = "We need a login form with email and password" });
+            send.EnsureSuccessStatusCode();
+
+            var runGates = await client.PostAsJsonAsync($"/api/releases/{release.Id}/run-gates", new { });
+            runGates.EnsureSuccessStatusCode();
+            var after = await runGates.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(after);
+
+            var baRun = after!.StageRuns.Single(sr => sr.StageName == "business-analyst");
+            Assert.Equal(ReleaseStageStatus.BlockedSignoff, baRun.Status);
+            Assert.Equal(DevTeam.Broker.Domain.ReleaseStatus.Blocked, after.Status);
+            Assert.True(baRun.GateChecks.All(gc => gc.Passed));
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task BAProgression_WithoutRequirements_GatesFail()
+
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-ba-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var client = _factory.CreateClient();
+            var create = await client.PostAsJsonAsync("/api/releases",
+                new { featureKey = "feat-ba-002", workspacePath = workspace });
+            create.EnsureSuccessStatusCode();
+            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(release);
+
+            (await client.PostAsJsonAsync($"/api/releases/{release!.Id}/start-stage", new { })).EnsureSuccessStatusCode();
+            (await client.PostAsJsonAsync($"/api/releases/{release.Id}/send-message",
+                new { text = "We need a login form" })).EnsureSuccessStatusCode();
+
+            var runGates = await client.PostAsJsonAsync($"/api/releases/{release.Id}/run-gates", new { });
+            runGates.EnsureSuccessStatusCode();
+            var after = await runGates.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(after);
+
+            var baRun = after!.StageRuns.Single(sr => sr.StageName == "business-analyst");
+            Assert.Equal(ReleaseStageStatus.BlockedGate, baRun.Status);
+            Assert.Contains(baRun.GateChecks, gc => gc.Name == "gherkin_validator" && !gc.Passed);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_InteractiveStage_ReturnsBadRequest()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-run-001", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+        Assert.NotNull(release);
+
+        var response = await client.PostAsJsonAsync($"/api/releases/{release!.Id}/run-stage", new { });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task StageMessages_ReturnsLinkedSessionConversation()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-msg-001", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+        Assert.NotNull(release);
+
+        var start = await client.PostAsJsonAsync($"/api/releases/{release!.Id}/start-stage", new { });
+        start.EnsureSuccessStatusCode();
+        var stageRun = await start.Content.ReadFromJsonAsync<ReleaseStageRun>();
+        Assert.NotNull(stageRun);
+        Assert.NotNull(stageRun!.AcpSessionId);
+
+        var send = await client.PostAsJsonAsync($"/api/releases/{release.Id}/send-message",
+            new { text = "We need a login form" });
+        send.EnsureSuccessStatusCode();
+
+        var messages = await client.GetFromJsonAsync<MessageDto[]>(
+            $"/api/releases/{release.Id}/stages/{stageRun.Id}/messages");
+        Assert.NotNull(messages);
+        Assert.Contains(messages!, m => m.BodyText?.Contains("We need a login form") == true);
+        Assert.Contains(messages!, m => m.BodyText?.Contains("Hello from the fake agent") == true);
+    }
+
+    [Fact]
+    public async Task RunStage_FailsGates_ThenPushBack_ReworksAndRestarts()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-runstage-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var client = _factory.CreateClient();
+            var create = await client.PostAsJsonAsync("/api/releases",
+                new { featureKey = "feat-rw-001", workspacePath = workspace });
+            create.EnsureSuccessStatusCode();
+            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(release);
+
+            // BA progression (interactive + agent requirements extraction) is covered by the
+            // engine tests with fake gates; here we seed the flow position to the developer
+            // stage so the autonomous run/push-back HTTP surface can be exercised end to end.
+            await SeedDeveloperPositionAsync(release!.Id);
+
+            // 1. Autonomous developer run: gates fail in an empty workspace (no code) → BlockedGate
+            var runDev = await client.PostAsJsonAsync($"/api/releases/{release.Id}/run-stage", new { });
+            runDev.EnsureSuccessStatusCode();
+            var afterDev = await runDev.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(afterDev);
+            Assert.Equal(ReleaseStageStatus.BlockedGate,
+                afterDev!.StageRuns.Single(sr => sr.StageName == "developer").Status);
+            Assert.Equal(1, afterDev.FlowPosition!.CurrentStageIndex);
+
+            // 2. Push back to BA with instructions
+            var push = await client.PostAsJsonAsync($"/api/releases/{release.Id}/push-back",
+                new { targetStageName = "business-analyst", instructions = "Rework: add email validation" });
+            push.EnsureSuccessStatusCode();
+            var rewritten = await push.Content.ReadFromJsonAsync<DevTeamRelease>();
+            Assert.NotNull(rewritten);
+            Assert.Equal(0, rewritten!.FlowPosition!.CurrentStageIndex);
+            Assert.Equal("business-analyst", rewritten.FlowPosition.CurrentStageName);
+            Assert.Equal(ReleaseStatus.InProgress, rewritten.Status);
+            Assert.False(rewritten.Signoffs.Single(s => s.StageName == "business-analyst").Approved);
+            var devRun = rewritten.StageRuns.Single(sr => sr.StageName == "developer");
+            Assert.Equal("Rework: add email validation", devRun.GuidanceNotes.Single().Text);
+
+            // 3. Re-starting BA after push-back creates a fresh active attempt
+            var restart = await client.PostAsJsonAsync($"/api/releases/{release.Id}/start-stage", new { });
+            restart.EnsureSuccessStatusCode();
+            var baRun2 = await restart.Content.ReadFromJsonAsync<ReleaseStageRun>();
+            Assert.Equal(1, baRun2!.Attempt);
+            Assert.Equal(ReleaseStageStatus.Active, baRun2.Status);
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task PushBack_Validation_ReturnsExpectedStatusCodes()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-pb-001", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>();
+        Assert.NotNull(release);
+
+        var forward = await client.PostAsJsonAsync($"/api/releases/{release!.Id}/push-back",
+            new { targetStageName = "qa", instructions = "nope" });
+        Assert.Equal(HttpStatusCode.BadRequest, forward.StatusCode);
+
+        var unknown = await client.PostAsJsonAsync($"/api/releases/{release.Id}/push-back",
+            new { targetStageName = "nobody", instructions = "nope" });
+        Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
+
+        var missing = await client.PostAsJsonAsync($"/api/releases/{release.Id}/push-back",
+            new { targetStageName = " " });
+        Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+
+        var noRelease = await client.PostAsJsonAsync($"/api/releases/{Guid.NewGuid()}/push-back",
+            new { targetStageName = "business-analyst", instructions = "x" });
+        Assert.Equal(HttpStatusCode.NotFound, noRelease.StatusCode);
+    }
+
+    private async Task SeedDeveloperPositionAsync(Guid releaseId)
+    {
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+        await using var db = await dbFactory.CreateDbContextAsync();
+        var release = await db.Releases.Include(r => r.FlowPosition).SingleAsync(r => r.Id == releaseId);
+        release.FlowPosition!.CurrentStageIndex = 1;
+        release.FlowPosition.CurrentStageName = "developer";
+        await db.SaveChangesAsync();
+    }
+
     public class AppFactory : WebApplicationFactory<Program>
     {
         public string DatabasePath { get; } =

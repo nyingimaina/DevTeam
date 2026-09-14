@@ -46,6 +46,14 @@ public sealed class ScaffoldSpecsGate : IGate
 
     private static void WriteRequirements(string workspacePath, string featureKey, string title, IReadOnlyList<RequirementDtos.Requirement> requirements)
     {
+        var path = ArtifactPaths.RequirementsPath(workspacePath, featureKey);
+        if (File.Exists(path))
+        {
+            // The business-analyst may have authored requirements during the conversation (e.g. on a
+            // reworked attempt). Never clobber an existing contract file with scaffold defaults.
+            return;
+        }
+
         var builder = new StringBuilder();
         builder.Append($"# {featureKey} — {title}").AppendLine();
         builder.AppendLine();
@@ -67,7 +75,6 @@ public sealed class ScaffoldSpecsGate : IGate
             }
         }
 
-        var path = ArtifactPaths.RequirementsPath(workspacePath, featureKey);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, builder.ToString());
     }

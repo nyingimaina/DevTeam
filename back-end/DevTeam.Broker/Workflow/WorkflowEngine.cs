@@ -124,12 +124,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var session = await _coordinator.NewSessionAsync(release.WorkspacePath, null, ct);
 
-        await _coordinator.SetModeAsync(session.SessionId, role.Name, ct);
-
         var stageRun = new ReleaseStageRun
         {
             Release = release,
             StageName = role.Name,
+            Attempt = release.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
             Status = ReleaseStageStatus.Active,
             Phase = StagePhase.GuidedQA,
             AcpSessionId = session.SessionId.ToString(),
@@ -138,12 +137,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await db.SaveChangesAsync(ct);
 
         var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
+        var guidanceContext = BuildGuidanceContext(release);
+
+        // Use a separate cancellation for the agent prompt so HTTP timeouts don't kill it.
+        // The agent may take time to process the initial prompt — that's expected.
+        using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+        agentCts.CancelAfter(TimeSpan.FromMinutes(10));
         await _coordinator.PromptWithSessionRecoveryAsync(
             session.SessionId,
             $"You are the {role.Name} for feature '{featureKey}' in workspace '{release.WorkspacePath}'. " +
             $"Ask ONE question at a time. Follow each answer to its logical conclusion before asking the next. " +
-            $"When you have enough information to produce the required output, say DONE and provide the structured result.",
-            ct);
+            $"When you have enough information to produce the required output, say DONE and provide the structured result." +
+            guidanceContext,
+            agentCts.Token);
 
         _logger.LogInformation("Started stage {StageName} for release {ReleaseId}, session {SessionId}",
             role.Name, releaseId, session.SessionId);
@@ -300,6 +306,285 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return release;
     }
 
+    // ─── autonomous stage execution ─────────────────────────────────────────
+
+    public async Task<DevTeamRelease> RunStageAsync(Guid releaseId, CancellationToken ct)
+    {
+        var workflow = LoadWorkflow();
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var release = await LoadReleaseAsync(db, releaseId, ct);
+        var position = release.FlowPosition
+            ?? throw new InvalidOperationException("Release has no flow position.");
+
+        var currentIndex = position.CurrentStageIndex;
+        if (currentIndex >= workflow.Pipeline.Count)
+            throw new InvalidOperationException("All stages already complete.");
+
+        var role = workflow.Pipeline[currentIndex];
+        if (role.UserInputRequired)
+        {
+            throw new InvalidOperationException(
+                $"Stage '{role.Name}' requires user input. " +
+                "Use StartStageAsync → SendMessageAsync → RunGatesAsync for interactive stages.");
+        }
+
+        var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
+        var guidanceContext = BuildGuidanceContext(release);
+
+        var stageRun = release.StageRuns
+            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
+        if (stageRun is null)
+        {
+            var session = await _coordinator.NewSessionAsync(release.WorkspacePath, null, ct);
+            stageRun = new ReleaseStageRun
+            {
+                Release = release,
+                StageName = role.Name,
+                Attempt = release.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
+                Status = ReleaseStageStatus.Active,
+                Phase = StagePhase.GuidedQA,
+                AcpSessionId = session.SessionId.ToString(),
+            };
+            db.ReleaseStageRuns.Add(stageRun);
+            await db.SaveChangesAsync(ct);
+        }
+
+        stageRun.Phase = StagePhase.Producing;
+        await db.SaveChangesAsync(ct);
+
+        async Task PromptRoleAsync()
+        {
+            if (stageRun.AcpSessionId is null)
+                throw new InvalidOperationException("Stage run has no linked session.");
+            var acpSessionId = Guid.Parse(stageRun.AcpSessionId);
+
+            using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+            agentCts.CancelAfter(TimeSpan.FromMinutes(15));
+            var prompt =
+                $"You are the {role.Name} for feature '{featureKey}' in workspace '{release.WorkspacePath}'. " +
+                "Work autonomously and do not ask the user for input. Produce the required artifacts." +
+                guidanceContext +
+                "When you are done, say DONE and provide a summary of what you changed.";
+            await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, agentCts.Token);
+        }
+
+        var allPassed = true;
+        foreach (var step in role.Steps)
+        {
+            switch (step.Kind)
+            {
+                case WorkflowStepKind.Agent:
+                    await PromptRoleAsync();
+                    break;
+                case WorkflowStepKind.Builtin:
+                    var builtin = await ExecuteStepAsync(step, featureKey, release.WorkspacePath, ct);
+                    db.ReleaseGateChecks.Add(new ReleaseGateCheck
+                    {
+                        StageRun = stageRun,
+                        Name = builtin.StepName,
+                        Passed = builtin.Passed,
+                        EvidenceText = builtin.Evidence,
+                    });
+                    if (!builtin.Passed) allPassed = false;
+                    break;
+                case WorkflowStepKind.Loop:
+                    var attempts = step.LoopAttempts ?? 3;
+                    var lastAttemptPassed = false;
+                    for (var attempt = 1; attempt <= attempts; attempt++)
+                    {
+                        var attemptPassed = true;
+                        foreach (var innerStep in step.LoopSteps ?? [])
+                        {
+                            if (innerStep.Kind == WorkflowStepKind.Agent)
+                            {
+                                await PromptRoleAsync();
+                                continue;
+                            }
+
+                            var inner = await ExecuteStepAsync(innerStep, featureKey, release.WorkspacePath, ct);
+                            db.ReleaseGateChecks.Add(new ReleaseGateCheck
+                            {
+                                StageRun = stageRun,
+                                Name = inner.StepName,
+                                Passed = inner.Passed,
+                                EvidenceText = inner.Evidence,
+                            });
+                            if (!inner.Passed) attemptPassed = false;
+                        }
+
+                        lastAttemptPassed = attemptPassed;
+                        if (attemptPassed) break;
+                    }
+
+                    if (!lastAttemptPassed) allPassed = false;
+                    break;
+            }
+        }
+
+        stageRun.Phase = StagePhase.Challenge;
+        await db.SaveChangesAsync(ct);
+
+        var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
+        if (challenge is not null)
+        {
+            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, release.WorkspacePath, db, ct);
+            if (!challengeResult.Passed) allPassed = false;
+        }
+
+        if (allPassed)
+        {
+            var needsSignoff = release.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
+            stageRun.Status = needsSignoff ? ReleaseStageStatus.BlockedSignoff : ReleaseStageStatus.Complete;
+            stageRun.Phase = StagePhase.Signoff;
+
+            if (!needsSignoff)
+            {
+                position.CurrentStageIndex++;
+                position.CurrentStageName = currentIndex + 1 < workflow.Pipeline.Count
+                    ? workflow.Pipeline[currentIndex + 1].Name
+                    : "done";
+                position.UpdatedAt = DateTimeOffset.UtcNow;
+
+                if (position.CurrentStageIndex >= workflow.Pipeline.Count)
+                {
+                    release.Status = ReleaseStatus.Ready;
+                    release.Features.ForEach(f => f.Status = ReleaseFeatureStatus.Complete);
+                }
+            }
+            else
+            {
+                release.Status = ReleaseStatus.Blocked;
+            }
+        }
+        else
+        {
+            stageRun.Status = ReleaseStageStatus.BlockedGate;
+        }
+
+        stageRun.FinishedAt = DateTimeOffset.UtcNow;
+        stageRun.Summary = allPassed
+            ? $"Stage {role.Name} passed all gates and challenge."
+            : $"Stage {role.Name} failed gates or challenge.";
+
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await BroadcastEventAsync(release.Id, "stageStateChanged", new
+        {
+            StageName = role.Name,
+            Status = stageRun.Status.ToString(),
+            Phase = stageRun.Phase.ToString(),
+            AllPassed = allPassed,
+        }, ct);
+
+        return release;
+    }
+
+    public async Task<DevTeamRelease> PushBackAsync(
+        Guid releaseId, string targetStageName, string? instructions, CancellationToken ct)
+    {
+        var workflow = LoadWorkflow();
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var release = await LoadReleaseAsync(db, releaseId, ct);
+        var position = release.FlowPosition
+            ?? throw new InvalidOperationException("Release has no flow position.");
+
+        var currentIndex = position.CurrentStageIndex;
+        var targetIndex = -1;
+        for (var i = 0; i < workflow.Pipeline.Count; i++)
+        {
+            if (workflow.Pipeline[i].Name == targetStageName)
+            {
+                targetIndex = i;
+                break;
+            }
+        }
+
+        if (targetIndex < 0)
+            throw new InvalidOperationException($"No stage '{targetStageName}' in the pipeline.");
+        if (targetIndex >= currentIndex)
+            throw new InvalidOperationException("Push back is only allowed to a previous stage.");
+
+        var notesTarget = release.StageRuns
+            .Where(sr => sr.StageName == workflow.Pipeline[currentIndex].Name)
+            .OrderByDescending(sr => sr.StartedAt)
+            .FirstOrDefault()
+            ?? release.StageRuns.OrderByDescending(sr => sr.StartedAt).FirstOrDefault();
+
+        if (notesTarget is not null && !string.IsNullOrWhiteSpace(instructions))
+        {
+            db.ReleaseGuidanceNotes.Add(new ReleaseGuidanceNote
+            {
+                StageRunId = notesTarget.Id,
+                StageRun = notesTarget,
+                Text = instructions,
+                AddedBy = "user",
+            });
+        }
+
+        position.CurrentStageIndex = targetIndex;
+        position.CurrentStageName = targetStageName;
+        position.UpdatedAt = DateTimeOffset.UtcNow;
+
+        var signoff = release.Signoffs.FirstOrDefault(s => s.StageName == targetStageName);
+        if (signoff is not null && signoff.Approved)
+        {
+            signoff.Approved = false;
+            signoff.ApprovedBy = null;
+            signoff.ApprovedAt = null;
+        }
+
+        release.Status = ReleaseStatus.InProgress;
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await BroadcastEventAsync(release.Id, "pushedBack", new
+        {
+            TargetStage = targetStageName,
+            Instructions = instructions,
+        }, ct);
+
+        return release;
+    }
+
+    public async Task<IReadOnlyList<MessageDto>> GetStageMessagesAsync(
+        Guid releaseId, Guid stageRunId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var release = await LoadReleaseAsync(db, releaseId, ct);
+        var stageRun = release.StageRuns.FirstOrDefault(sr => sr.Id == stageRunId)
+            ?? throw new KeyNotFoundException($"Stage run {stageRunId} not found for release {releaseId}.");
+
+        if (string.IsNullOrWhiteSpace(stageRun.AcpSessionId))
+            return [];
+
+        var sessionId = Guid.Parse(stageRun.AcpSessionId);
+        var session = await db.Sessions
+            .Include(s => s.Messages)
+            .ThenInclude(m => m.Parts)
+            .SingleOrDefaultAsync(s => s.Id == sessionId, ct);
+        if (session is null)
+            return [];
+
+        return session.Messages
+            .OrderBy(m => m.CreatedAt)
+            .Select(BrokerCoordinator.ToMessageDto)
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<PipelineStageDto>> GetPipelineAsync(Guid releaseId, CancellationToken ct)
+    {
+        var workflow = LoadWorkflow();
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        _ = await LoadReleaseAsync(db, releaseId, ct);
+
+        return workflow.Pipeline
+            .Select(r => new PipelineStageDto(r.Name, r.UserInputRequired, r.Signoff))
+            .ToArray();
+    }
+
     // ─── legacy advance (runs all steps synchronously) ─────────────────────
 
     public async Task<DevTeamRelease> AdvanceAsync(Guid releaseId, CancellationToken ct)
@@ -449,6 +734,41 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         await db.SaveChangesAsync(ct);
 
+        // When the current stage's signoff is approved, move the flow forward so
+        // the release can continue to the next stage (e.g. after autonomous run).
+        if (allSignoffsComplete)
+        {
+            var workflow = LoadWorkflow();
+            var position = release.FlowPosition;
+            if (position is not null && position.CurrentStageName == stageName)
+            {
+                var workflowIndex = -1;
+                for (var i = 0; i < workflow.Pipeline.Count; i++)
+                {
+                    if (workflow.Pipeline[i].Name == stageName)
+                    {
+                        workflowIndex = i;
+                        break;
+                    }
+                }
+
+                if (workflowIndex >= 0 && workflowIndex < workflow.Pipeline.Count)
+                {
+                    position.CurrentStageIndex = workflowIndex + 1;
+                    position.CurrentStageName = workflowIndex + 1 < workflow.Pipeline.Count
+                        ? workflow.Pipeline[workflowIndex + 1].Name
+                        : "done";
+                    position.UpdatedAt = DateTimeOffset.UtcNow;
+
+                    release.Status = workflowIndex + 1 >= workflow.Pipeline.Count
+                        ? ReleaseStatus.Ready
+                        : ReleaseStatus.InProgress;
+                    release.UpdatedAt = DateTimeOffset.UtcNow;
+                    await db.SaveChangesAsync(ct);
+                }
+            }
+        }
+
         await BroadcastEventAsync(releaseId, "signoffApproved", new
         {
             StageName = stageName,
@@ -489,9 +809,21 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     private async Task<StepExecutionResult> ExecuteBuiltinAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
     {
-        var request = new GateRequest(gateName, workspacePath, featureKey);
+        var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: BuildBuiltinInputs(gateName, featureKey, workspacePath));
         var result = await _gateRunner.RunAsync(gateName, request, ct);
         return new StepExecutionResult { StepName = gateName, Passed = result.Passed, Evidence = result.EvidenceText };
+    }
+
+    private static IReadOnlyDictionary<string, string> BuildBuiltinInputs(string gateName, string featureKey, string workspacePath)
+    {
+        if (gateName is not BuiltinRegistry.GherkinValidator and not BuiltinRegistry.CoverageMatrix and not BuiltinRegistry.ScaffoldSpecs)
+            return new Dictionary<string, string>();
+
+        var requirements = RequirementsExtractor.Extract(workspacePath, featureKey);
+        return new Dictionary<string, string>
+        {
+            ["requirementsJson"] = System.Text.Json.JsonSerializer.Serialize(requirements),
+        };
     }
 
     private async Task<StepExecutionResult> ExecuteLoopAsync(WorkflowStep step, string featureKey, string workspacePath, CancellationToken ct)
@@ -515,9 +847,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         try
         {
-            var antagonistMode = challenge.AntagonistMode ?? "qa";
+            var antagonistMode = challenge.AntagonistMode ?? "build";
             var session = await _coordinator.NewSessionAsync(workspacePath, null, ct);
-            await _coordinator.SetModeAsync(session.SessionId, antagonistMode, ct);
 
             var prompt = $"You are reviewing the {challenge.Producer}'s work for feature '{featureKey}'. " +
                          $"Review for completeness, correctness, and quality. " +
@@ -570,11 +901,27 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     private WorkflowDefinition LoadWorkflow() => _loader.LoadDefault();
 
+    private static string BuildGuidanceContext(DevTeamRelease release)
+    {
+        var notes = release.StageRuns
+            .SelectMany(sr => sr.GuidanceNotes)
+            .Where(n => !string.IsNullOrWhiteSpace(n.Text))
+            .Select(n => n.Text)
+            .Distinct()
+            .ToArray();
+        return notes.Length == 0
+            ? ""
+            : Environment.NewLine + Environment.NewLine +
+              "Feedback from the team to incorporate:" + Environment.NewLine +
+              string.Join(Environment.NewLine, notes.Select(n => "  - " + n));
+    }
+
     private static async Task<DevTeamRelease> LoadReleaseAsync(DevTeamDbContext db, Guid releaseId, CancellationToken ct)
         => await db.Releases
             .Include(r => r.Features)
             .Include(r => r.StageRuns).ThenInclude(sr => sr.GateChecks)
             .Include(r => r.StageRuns).ThenInclude(sr => sr.Findings)
+            .Include(r => r.StageRuns).ThenInclude(sr => sr.GuidanceNotes)
             .Include(r => r.Signoffs)
             .Include(r => r.FlowPosition)
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
