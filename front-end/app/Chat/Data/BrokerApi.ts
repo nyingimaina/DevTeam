@@ -5,6 +5,8 @@ import {
   FileSystemStatDto,
   GitStatusDto,
   HealthResponse,
+  MessageDto,
+  PipelineStageDto,
   PromptResponse,
   ReleaseDto,
   SessionDetail,
@@ -180,6 +182,27 @@ export default class BrokerApi {
   runStageGatesAsync(releaseId: string): Promise<ReleaseDto> {
     return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/run-gates`, {
       method: "POST",
+    });
+  }
+
+  getPipelineAsync(releaseId: string): Promise<PipelineStageDto[]> {
+    return this.requestAsync<PipelineStageDto[]>(`/api/releases/${releaseId}/pipeline`);
+  }
+
+  getStageMessagesAsync(releaseId: string, stageRunId: string): Promise<MessageDto[]> {
+    return this.requestAsync<MessageDto[]>(`/api/releases/${releaseId}/stages/${stageRunId}/messages`);
+  }
+
+  runStageAsync(releaseId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/run-stage`, {
+      method: "POST",
+    });
+  }
+
+  pushBackAsync(releaseId: string, targetStageName: string, instructions: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/push-back`, {
+      method: "POST",
+      body: JSON.stringify({ targetStageName, instructions }),
     });
   }
 }

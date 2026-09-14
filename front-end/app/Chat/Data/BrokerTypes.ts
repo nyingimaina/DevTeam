@@ -174,11 +174,31 @@ export interface ReleaseStageRunDto {
   releaseId: string;
   stageName: string;
   status: string;
+  phase: string;
+  questionCount: number;
+  sessionId?: string | null;
+  acpSessionId?: string | null;
   summary?: string | null;
   startedAt?: string | null;
   finishedAt?: string | null;
   attempt: number;
   gateChecks: ReleaseGateCheckDto[];
+  findings: ReviewFindingDto[];
+  guidanceNotes: ReleaseGuidanceNoteDto[];
+}
+
+export interface ReleaseGuidanceNoteDto {
+  id: string;
+  stageRunId: string;
+  text: string;
+  addedBy?: string | null;
+  createdAt: string;
+}
+
+export interface PipelineStageDto {
+  name: string;
+  userInputRequired: boolean;
+  signoff?: string | null;
 }
 
 export interface ReleaseGateCheckDto {

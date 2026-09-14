@@ -1,10 +1,13 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
 import {
+  MessageDto,
+  PipelineStageDto,
   ReleaseDto,
+  ReleaseStageRunDto,
   ReviewFindingDto,
-  StageRunDto,
 } from "../../Chat/Data/BrokerTypes";
+import MessageRow from "../../Chat/UI/MessageRow";
 import ZestButton from "jattac.libs.web.zest-button";
 import styles from "../Styles/ReleaseWizard.module.css";
 
@@ -41,6 +44,16 @@ function phaseLabel(phase: string): string {
     case "Signoff": return "Awaiting signoff";
     default: return phase;
   }
+}
+
+function isRunning(status: string): boolean {
+  return status === "Active" || status === "Producing" || status === "Gates" || status === "Challenge" || status === "Signoff";
+}
+
+function latestRunFor(release: ReleaseDto, stageName: string): ReleaseStageRunDto | undefined {
+  const runs = release.stageRuns.filter((sr) => sr.stageName === stageName);
+  if (runs.length === 0) return undefined;
+  return [...runs].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""))[0];
 }
 
 export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "release" }: IReleaseWizardProps) {
@@ -196,7 +209,7 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
   );
 }
 
-// ─── release detail with interactive stage ───────────────────────────────
+// ─── release detail with per-stage screens ─────────────────────────────────
 
 interface IReleaseDetailProps {
   release: ReleaseDto;
@@ -209,10 +222,56 @@ interface IReleaseDetailProps {
 }
 
 function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh, onReleaseUpdated }: IReleaseDetailProps) {
+  const [pipeline, setPipeline] = useState<PipelineStageDto[]>([]);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+
+  const loadPipeline = useCallback(async () => {
+    setPipelineError(null);
+    try {
+      const p = await api.getPipelineAsync(release.id);
+      setPipeline(p);
+    } catch (e) {
+      setPipelineError(toErrorMessage(e));
+    }
+  }, [api, release.id]);
+
+  useEffect(() => {
+    void loadPipeline();
+  }, [loadPipeline]);
+
+  const refreshRelease = useCallback(async () => {
+    try {
+      const fresh = await api.getReleaseAsync(release.id);
+      onReleaseUpdated(fresh);
+    } catch (e) {
+      setPipelineError(toErrorMessage(e));
+    }
+  }, [api, release.id, onReleaseUpdated]);
+
+  const stageIndex = useMemo(() => {
+    if (pipeline.length === 0) return release.flowPosition?.currentStageIndex ?? 0;
+    const fp = release.flowPosition;
+    if (release.status === "Ready" || release.status === "Complete") return pipeline.length;
+    if (fp && fp.currentStageIndex >= 0 && fp.currentStageIndex < pipeline.length) return fp.currentStageIndex;
+    if (fp) return Math.min(fp.currentStageIndex, pipeline.length - 1);
+    return 0;
+  }, [pipeline, release]);
+
+  const role = stageIndex < pipeline.length ? pipeline[stageIndex] : null;
+  const run = role ? latestRunFor(release, role.name) : undefined;
+  const currentRunId = run?.id;
+
+  useEffect(() => {
+    if (!run || !role || role.userInputRequired) return;
+    if (!isRunning(run.status)) return;
+    const timer = window.setInterval(() => {
+      void refreshRelease();
+    }, 2000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, release.id, currentRunId, run?.status, role?.userInputRequired]);
+
   const pendingSignoffs = release.signoffs.filter((s) => s.required && !s.approved);
-  const currentStageRun = release.stageRuns
-    .filter((sr) => sr.status === "Active" || sr.status === "BlockedGate" || sr.status === "BlockedSignoff")
-    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
 
   return (
     <div className={styles.detailView}>
@@ -230,19 +289,25 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
       <div className={styles.detailInfo}>
         <span>ID: {release.id.slice(0, 8)}...</span>
         <span>Workspace: {release.workspacePath}</span>
-        <span>Stage: {release.flowPosition?.currentStageName ?? "—"}</span>
+        <span>Version: {release.version}</span>
       </div>
 
-      {/* Interactive stage panel */}
-      <StagePanel
+      {pipeline.length > 0 && (
+        <PipelineStepper pipeline={pipeline} stageIndex={stageIndex} signoffs={release.signoffs} />
+      )}
+
+      {pipelineError && <div className={styles.error}>{pipelineError}</div>}
+
+      <StageScreen
         release={release}
         api={api}
+        pipeline={pipeline}
+        role={role}
+        run={run}
         testIdPrefix={testIdPrefix}
-        loading={loading}
-        onReleaseUpdated={onReleaseUpdated}
+        refreshRelease={refreshRelease}
       />
 
-      {/* Signoff buttons */}
       {pendingSignoffs.length > 0 && (
         <div className={styles.signoffSection}>
           <h3>Signoff Required</h3>
@@ -259,7 +324,6 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
         </div>
       )}
 
-      {/* Stage history */}
       {release.stageRuns.length > 0 && (
         <div className={styles.stagesSection}>
           <h3>Stage History</h3>
@@ -272,105 +336,271 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
   );
 }
 
-// ─── stage panel (start, chat, run gates) ────────────────────────────────
+// ─── pipeline stepper ──────────────────────────────────────────────────────
 
-interface IStagePanelProps {
-  release: ReleaseDto;
-  api: BrokerApi;
-  testIdPrefix: string;
-  loading: boolean;
-  onReleaseUpdated: (release: ReleaseDto) => void;
+function PipelineStepper({
+  pipeline,
+  stageIndex,
+  signoffs,
+}: {
+  pipeline: PipelineStageDto[];
+  stageIndex: number;
+  signoffs: ReleaseDto["signoffs"];
+}) {
+  return (
+    <div className={styles.stepper} data-testid="pipeline-stepper">
+      {pipeline.map((p, i) => {
+        let cls = styles.stepChip;
+        if (i < stageIndex) cls += ` ${styles.stepChipDone}`;
+        else if (i === stageIndex) cls += ` ${styles.stepChipCurrent}`;
+        else cls += ` ${styles.stepChipPending}`;
+        const approvedSignoff = signoffs.some((s) => s.required && s.approved && s.stageName === p.signoff);
+        return (
+          <React.Fragment key={p.name}>
+            {i > 0 && <span className={styles.stepSeparator}>›</span>}
+            <span className={cls} data-testid={`pipeline-step-${p.name}`}>
+              {i < stageIndex && <span className={styles.stepTick}>✓ </span>}
+              {i + 1} {p.name}
+              {p.signoff && <span className={styles.stepSignoff}>{approvedSignoff ? " · approved" : ` · ${p.signoff}`}</span>}
+            </span>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
 }
 
-function StagePanel({ release, api, testIdPrefix, loading, onReleaseUpdated }: IStagePanelProps) {
-  const [activeStage, setActiveStage] = useState<StageRunDto | null>(null);
-  const [messages, setMessages] = useState<{ role: "user" | "agent"; text: string }[]>([]);
-  const [input, setInput] = useState("");
-  const [stageLoading, setStageLoading] = useState(false);
-  const [stageError, setStageError] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+// ─── stage screen (dedicated view for the current stage) ───────────────────
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+interface IStageScreenProps {
+  release: ReleaseDto;
+  api: BrokerApi;
+  pipeline: PipelineStageDto[];
+  role: PipelineStageDto | null;
+  run: ReleaseStageRunDto | undefined;
+  testIdPrefix: string;
+  refreshRelease: () => Promise<void>;
+}
+
+function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshRelease }: IStageScreenProps) {
+  const [busy, setBusy] = useState(false);
+  const [stageError, setStageError] = useState<string | null>(null);
 
   const handleStartStage = useCallback(async () => {
-    setStageLoading(true);
+    setBusy(true);
     setStageError(null);
     try {
-      const stageRun = await api.startStageAsync(release.id);
-      setActiveStage(stageRun);
-      setMessages([{ role: "agent", text: "Stage started. Ask me anything about this phase." }]);
+      await api.startStageAsync(release.id);
+      await refreshRelease();
     } catch (e) {
       setStageError(toErrorMessage(e));
     } finally {
-      setStageLoading(false);
+      setBusy(false);
     }
-  }, [api, release.id]);
+  }, [api, release.id, refreshRelease]);
 
-  const handleSendMessage = useCallback(async () => {
-    if (!input.trim() || !activeStage) return;
-    const userMsg = input.trim();
-    setInput("");
-    setMessages((prev) => [...prev, { role: "user", text: userMsg }]);
-    setStageLoading(true);
+  const handleRunStage = useCallback(async () => {
+    setBusy(true);
     setStageError(null);
     try {
-      await api.sendStageMessageAsync(release.id, userMsg);
-      setMessages((prev) => [...prev, { role: "agent", text: "Message sent. Continue the conversation or run gates when ready." }]);
+      await api.runStageAsync(release.id);
+      await refreshRelease();
     } catch (e) {
       setStageError(toErrorMessage(e));
     } finally {
-      setStageLoading(false);
+      setBusy(false);
     }
-  }, [api, release.id, input, activeStage]);
+  }, [api, release.id, refreshRelease]);
 
-  const handleRunGates = useCallback(async () => {
-    setStageLoading(true);
-    setStageError(null);
-    try {
-      const updated = await api.runStageGatesAsync(release.id);
-      onReleaseUpdated(updated);
-      setMessages((prev) => [...prev, { role: "agent", text: "Gates completed. Check results below." }]);
-      setActiveStage(null);
-    } catch (e) {
-      setStageError(toErrorMessage(e));
-    } finally {
-      setStageLoading(false);
-    }
-  }, [api, release.id, onReleaseUpdated]);
-
-  // If no active stage and no stage run in progress, show start button
-  if (!activeStage && !currentStageRun(release)) {
+  if (release.status === "Ready" || release.status === "Complete" || !role) {
     return (
       <div className={styles.stagePanel}>
-        <div className={styles.stageHeader}>
-          <h3>Current Stage: {release.flowPosition?.currentStageName ?? "—"}</h3>
-          <ZestButton
-            type="button"
-            onClick={handleStartStage}
-            disabled={stageLoading || release.status === "Ready"}
-            data-testid={`${testIdPrefix}-start-stage-btn`}
-            zest={{ semanticType: "submit", busyOptions: { preventRageClick: true } }}
-          >
-            {stageLoading ? "Starting..." : "Start Stage"}
-          </ZestButton>
+        <div className={styles.doneBanner}>
+          <strong>Release complete.</strong> All stages finished successfully.
         </div>
       </div>
     );
   }
 
-  // Show chat panel
+  const interactive = role.userInputRequired;
+
   return (
     <div className={styles.stagePanel}>
+      <div className={styles.stageHeader}>
+        <span className={styles.stageName}>Current Stage: {role.name}</span>
+        {run && (
+          <>
+            <span className={styles.phaseBadge}>{phaseLabel(run.phase)}</span>
+            <span className={styles.questionBadge}>attempt {run.attempt}</span>
+          </>
+        )}
+      </div>
+
       {stageError && <div className={styles.error}>{stageError}</div>}
 
-      <div className={styles.chatContainer}>
-        {messages.map((msg, i) => (
-          <div key={i} className={`${styles.chatMessage} ${msg.role === "user" ? styles.chatUser : styles.chatAgent}`}>
-            <div className={styles.chatRole}>{msg.role === "user" ? "You" : "Agent"}</div>
-            <div className={styles.chatText}>{msg.text}</div>
+      {!run && (
+        <div className={styles.noRun}>
+          <div className={styles.noRunHint}>
+            {interactive
+              ? "This stage runs as a conversation with the agent. Start it to begin the dialogue."
+              : "This stage runs autonomously in the workspace. Start it and watch the log below."}
           </div>
+          <ZestButton
+            type="button"
+            onClick={interactive ? handleStartStage : handleRunStage}
+            disabled={busy}
+            data-testid={`${testIdPrefix}-start-stage-btn`}
+            zest={{ semanticType: "submit", busyOptions: { preventRageClick: true } }}
+          >
+            {busy ? "Starting..." : interactive ? "Start Conversation" : "Run Stage"}
+          </ZestButton>
+        </div>
+      )}
+
+      {run && interactive && (
+        <ChatStage
+          key={run.id}
+          release={release}
+          stageRun={run}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          busy={busy}
+          runStage={handleRunStage}
+          refreshRelease={refreshRelease}
+        />
+      )}
+
+      {run && !interactive && (
+        <StageLog
+          key={run.id}
+          release={release}
+          stageRun={run}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          busy={busy}
+          runStage={handleRunStage}
+          refreshRelease={refreshRelease}
+        />
+      )}
+
+      {run?.status === "BlockedGate" && pipeline.length > 0 && (
+        <PushBackPanel
+          release={release}
+          api={api}
+          stageIndex={release.flowPosition?.currentStageIndex ?? 0}
+          pipeline={pipeline}
+          testIdPrefix={testIdPrefix}
+          refreshRelease={refreshRelease}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── interactive chat stage (mirrors the Chat tab for this stage) ──────────
+
+interface IChatStageProps {
+  release: ReleaseDto;
+  stageRun: ReleaseStageRunDto;
+  api: BrokerApi;
+  testIdPrefix: string;
+  busy: boolean;
+  runStage: () => void;
+  refreshRelease: () => Promise<void>;
+}
+
+function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refreshRelease }: IChatStageProps) {
+  const [messages, setMessages] = useState<MessageDto[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const loadMessages = useCallback(async () => {
+    try {
+      const msgs = await api.getStageMessagesAsync(release.id, stageRun.id);
+      setMessages(msgs);
+    } catch (e) {
+      setMessagesError(toErrorMessage(e));
+    }
+  }, [api, release.id, stageRun.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const tick = async () => {
+      try {
+        const msgs = await api.getStageMessagesAsync(release.id, stageRun.id);
+        if (!cancelled) {
+          setMessages(msgs);
+          setMessagesError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setMessagesError(toErrorMessage(e));
+      }
+    };
+    if (isRunning(stageRun.status) || stageRun.status === "BlockedSignoff" || stageRun.status === "BlockedGate") {
+      void tick();
+      timer = window.setInterval(tick, 2500);
+    }
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [api, release.id, stageRun.id, stageRun.status]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView?.({
+      block: "nearest",
+    });
+  }, [messages]);
+
+  const handleSend = useCallback(async () => {
+    const text = input.trim();
+    if (!text || sending) return;
+    setInput("");
+    setMessages((prev) => [
+      ...prev,
+      { id: `pending-${Date.now()}`, role: "user", bodyText: text, createdAt: new Date().toISOString(), parts: [] },
+    ]);
+    setSending(true);
+    setMessagesError(null);
+    try {
+      await api.sendStageMessageAsync(release.id, text);
+      await loadMessages();
+    } catch (e) {
+      setMessagesError(toErrorMessage(e));
+    } finally {
+      setSending(false);
+    }
+  }, [api, release.id, input, sending, loadMessages]);
+
+  const handleRunGates = useCallback(async () => {
+    setSending(true);
+    setMessagesError(null);
+    try {
+      await api.runStageGatesAsync(release.id);
+      await refreshRelease();
+      await loadMessages();
+    } catch (e) {
+      setMessagesError(toErrorMessage(e));
+    } finally {
+      setSending(false);
+    }
+  }, [api, release.id, refreshRelease, loadMessages]);
+
+  return (
+    <div className={styles.chatPanel}>
+      {messagesError && <div className={styles.error}>{messagesError}</div>}
+      <div className={styles.chatContainer}>
+        {messages.length === 0 && (
+          <div className={styles.chatIntro}>
+            Conversation with the {stageRun.stageName} agent will appear here.
+            {stageRun.status === "BlockedSignoff" && " Gates are done — awaiting signoff above."}
+          </div>
+        )}
+        {messages.map((message) => (
+          <MessageRow key={message.id} message={message} />
         ))}
         <div ref={messagesEndRef} />
       </div>
@@ -379,16 +609,16 @@ function StagePanel({ release, api, testIdPrefix, loading, onReleaseUpdated }: I
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Type your message..."
+          onKeyDown={(e) => { if (e.key === "Enter") void handleSend(); }}
+          placeholder="Message the agent…"
           className={styles.input}
-          onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
-          disabled={stageLoading}
+          disabled={sending || busy}
           data-testid={`${testIdPrefix}-chat-input`}
         />
         <ZestButton
           type="button"
-          onClick={handleSendMessage}
-          disabled={stageLoading || !input.trim()}
+          onClick={() => void handleSend()}
+          disabled={sending || busy || !input.trim()}
           data-testid={`${testIdPrefix}-send-btn`}
           zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
         >
@@ -396,8 +626,8 @@ function StagePanel({ release, api, testIdPrefix, loading, onReleaseUpdated }: I
         </ZestButton>
         <ZestButton
           type="button"
-          onClick={handleRunGates}
-          disabled={stageLoading}
+          onClick={() => void handleRunGates()}
+          disabled={sending || busy}
           data-testid={`${testIdPrefix}-run-gates-btn`}
           zest={{ semanticType: "confirm", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
         >
@@ -408,13 +638,186 @@ function StagePanel({ release, api, testIdPrefix, loading, onReleaseUpdated }: I
   );
 }
 
-function currentStageRun(release: ReleaseDto): StageRunDto | undefined {
-  return release.stageRuns
-    .filter((sr) => sr.status === "Active" || sr.status === "BlockedGate" || sr.status === "BlockedSignoff")
-    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
+// ─── autonomous stage log ──────────────────────────────────────────────────
+
+interface IStageLogProps {
+  release: ReleaseDto;
+  stageRun: ReleaseStageRunDto;
+  api: BrokerApi;
+  testIdPrefix: string;
+  busy: boolean;
+  runStage: () => void;
+  refreshRelease: () => Promise<void>;
 }
 
-// ─── signoff button with evidence ────────────────────────────────────────
+function StageLog({ stageRun, testIdPrefix, busy, runStage, refreshRelease }: IStageLogProps) {
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  const lines = useMemo(() => {
+    const out: { text: string; tone: "phase" | "ok" | "warn" | "err" | "plain" }[] = [
+      { text: `attempt ${stageRun.attempt} started — ${phaseLabel(stageRun.phase)}`, tone: "phase" },
+    ];
+
+    for (const note of stageRun.guidanceNotes ?? []) {
+      out.push({ text: `rework note: ${note.text}`, tone: "warn" });
+    }
+
+    for (const gc of stageRun.gateChecks) {
+      out.push({
+        text: `${gc.passed ? "✓" : "✗"} gate ${gc.name}${gc.evidenceText ? ` — ${gc.evidenceText}` : ""}`,
+        tone: gc.passed ? "ok" : "err",
+      });
+    }
+
+    for (const f of stageRun.findings) {
+      out.push({ text: `⚠ ${f.severity} ${f.target}: ${f.summary}`, tone: f.severity === "Blocker" ? "err" : "warn" });
+    }
+
+    if (stageRun.status === "BlockedGate") {
+      out.push({ text: "stage blocked — gates failed. Review findings and push back for rework.", tone: "err" });
+    } else if (stageRun.status === "BlockedSignoff") {
+      out.push({ text: "stage blocked — signoff required to continue.", tone: "warn" });
+    } else if (stageRun.status === "Complete") {
+      out.push({ text: "stage complete.", tone: "ok" });
+    } else {
+      out.push({ text: `${phaseLabel(stageRun.phase)}…`, tone: "phase" });
+    }
+    return out;
+  }, [stageRun]);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView?.({
+      block: "nearest",
+    });
+  }, [lines]);
+
+  const showRunButton = isRunning(stageRun.status) || stageRun.status === "BlockedGate";
+  const showRefreshButton = isRunning(stageRun.status);
+
+  return (
+    <div className={styles.logPanel}>
+      <div className={styles.logContainer} data-testid={`${testIdPrefix}-stage-log`}>
+        {lines.map((line, i) => (
+          <div
+            key={i}
+            className={`${styles.logLine} ${line.tone === "phase" ? styles.logPhase : line.tone === "ok" ? styles.logLineOk : line.tone === "err" ? styles.logLineBad : line.tone === "warn" ? styles.logLineWarn : ""}`}
+          >
+            {line.text}
+          </div>
+        ))}
+        <div ref={logEndRef} />
+      </div>
+
+      <div className={styles.logActions}>
+        {showRunButton && (
+          <ZestButton
+            type="button"
+            onClick={runStage}
+            disabled={busy}
+            data-testid={`${testIdPrefix}-run-stage-btn`}
+            zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
+          >
+            {busy ? "Running…" : isRunning(stageRun.status) ? "Run Stage Again" : "Run Stage"}
+          </ZestButton>
+        )}
+        {showRefreshButton && (
+          <ZestButton
+            type="button"
+            onClick={() => void refreshRelease()}
+            disabled={busy}
+            data-testid={`${testIdPrefix}-refresh-log-btn`}
+            zest={{ semanticType: "refresh", busyOptions: { preventRageClick: true }, buttonStyle: "text", visualOptions: { size: "sm" } }}
+          >
+            Refresh
+          </ZestButton>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── push-back panel ───────────────────────────────────────────────────────
+
+interface IPushBackPanelProps {
+  release: ReleaseDto;
+  api: BrokerApi;
+  stageIndex: number;
+  pipeline: PipelineStageDto[];
+  testIdPrefix: string;
+  refreshRelease: () => Promise<void>;
+}
+
+function PushBackPanel({ release, api, stageIndex, pipeline, testIdPrefix, refreshRelease }: IPushBackPanelProps) {
+  const [target, setTarget] = useState(pipeline[Math.max(0, stageIndex - 1)]?.name ?? "");
+  const [instructions, setInstructions] = useState("");
+  const [pushing, setPushing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const targets = pipeline.slice(0, stageIndex).map((p) => p.name);
+
+  useEffect(() => {
+    if (!target && targets.length > 0) setTarget(targets[targets.length - 1]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handlePushBack = useCallback(async () => {
+    if (!target || !instructions.trim()) return;
+    setPushing(true);
+    setError(null);
+    try {
+      await api.pushBackAsync(release.id, target, instructions.trim());
+      setInstructions("");
+      await refreshRelease();
+    } catch (e) {
+      setError(toErrorMessage(e));
+    } finally {
+      setPushing(false);
+    }
+  }, [api, release.id, target, instructions, refreshRelease]);
+
+  if (targets.length === 0) return null;
+
+  return (
+    <div className={styles.pushBack}>
+      {error && <div className={styles.error}>{error}</div>}
+      <div className={styles.pushBackTitle}>Push back to an earlier stage for rework</div>
+      <label className={styles.pushBackLabel}>
+        Target stage
+        <select
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          className={styles.pushBackSelect}
+          data-testid={`${testIdPrefix}-pushback-target`}
+        >
+          {targets.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+      </label>
+      <label className={styles.pushBackLabel}>
+        Instructions for the rework
+        <textarea
+          value={instructions}
+          onChange={(e) => setInstructions(e.target.value)}
+          placeholder="e.g. The login form is missing client-side validation. Add it and re-run the tests."
+          className={styles.pushBackTextarea}
+          data-testid={`${testIdPrefix}-pushback-instructions`}
+        />
+      </label>
+      <ZestButton
+        type="button"
+        onClick={() => void handlePushBack()}
+        disabled={pushing || !target || !instructions.trim()}
+        data-testid={`${testIdPrefix}-pushback-btn`}
+        zest={{ visualOptions: { variant: "danger", size: "sm" }, busyOptions: { preventRageClick: true } }}
+      >
+        {pushing ? "Pushing back…" : "Push Back"}
+      </ZestButton>
+    </div>
+  );
+}
+
+// ─── signoff button with evidence ──────────────────────────────────────────
 
 interface ISignoffButtonProps {
   release: ReleaseDto;
@@ -458,10 +861,10 @@ function SignoffButton({ release, signoff, api, testIdPrefix, onReleaseUpdated }
   );
 }
 
-// ─── stage history card ──────────────────────────────────────────────────
+// ─── stage history card ────────────────────────────────────────────────────
 
 interface IStageHistoryCardProps {
-  stageRun: StageRunDto;
+  stageRun: ReleaseStageRunDto;
   testIdPrefix: string;
 }
 
@@ -475,6 +878,7 @@ function StageHistoryCard({ stageRun, testIdPrefix }: IStageHistoryCardProps) {
         {stageRun.questionCount > 0 && (
           <span className={styles.questionBadge}>{stageRun.questionCount} messages</span>
         )}
+        <span className={styles.questionBadge}>attempt {stageRun.attempt}</span>
       </div>
       {stageRun.summary && <div className={styles.stageSummary}>{stageRun.summary}</div>}
       {stageRun.gateChecks.length > 0 && (
@@ -504,7 +908,7 @@ function StageHistoryCard({ stageRun, testIdPrefix }: IStageHistoryCardProps) {
   );
 }
 
-// ─── finding card ────────────────────────────────────────────────────────
+// ─── finding card ──────────────────────────────────────────────────────────
 
 function FindingCard({ finding }: { finding: ReviewFindingDto }) {
   return (
