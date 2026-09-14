@@ -152,8 +152,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await _coordinator.PromptWithSessionRecoveryAsync(
             session.SessionId,
             $"You are the {role.Name} for feature '{featureKey}' in workspace '{release.WorkspacePath}'. " +
-            $"Ask ONE question at a time. Follow each answer to its logical conclusion before asking the next. " +
-            $"When you have enough information to produce the required output, say DONE and provide the structured result." +
+            MultiQuestionDetector.SingleQuestionInstruction +
+            " Follow each answer to its logical conclusion before asking the next. " +
+            "When you have enough information to produce the required output, say DONE and provide the structured result." +
             requirementsAuthoring +
             guidanceContext,
             agentCts.Token);
@@ -190,6 +191,53 @@ public sealed class WorkflowEngine : IWorkflowEngine
             InputTokens: response.TotalTokens,
             OutputTokens: response.OutputTokens,
             TotalTokens: response.TotalTokens);
+    }
+
+    public async Task<StagePromptResult> SendMessageEnforcingSingleQuestionAsync(Guid releaseId, string text, CancellationToken ct)
+    {
+        var result = await SendMessageAsync(releaseId, text, ct);
+
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var release = await LoadReleaseAsync(db, releaseId, ct);
+        var workflow = LoadWorkflow();
+        var position = release.FlowPosition
+            ?? throw new InvalidOperationException("Release has no flow position.");
+        var role = workflow.Pipeline[position.CurrentStageIndex];
+        var stageRun = release.StageRuns
+            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
+            ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
+
+        if (stageRun.AcpSessionId is null)
+            return result;
+
+        var acpSessionId = Guid.Parse(stageRun.AcpSessionId);
+        var corrections = 0;
+        while (corrections < MultiQuestionDetector.MaxCorrections)
+        {
+            var latest = await GetLatestAssistantTextAsync(db, acpSessionId, ct);
+            if (!MultiQuestionDetector.ContainsMultipleQuestions(latest))
+                break;
+
+            using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            agentCts.CancelAfter(TimeSpan.FromMinutes(5));
+            var correction = await _coordinator.PromptWithSessionRecoveryAsync(
+                acpSessionId, MultiQuestionDetector.CorrectionPrompt, agentCts.Token);
+            result = new StagePromptResult(
+                Response: correction.StopReason,
+                InputTokens: correction.TotalTokens,
+                OutputTokens: correction.OutputTokens,
+                TotalTokens: correction.TotalTokens);
+            corrections++;
+        }
+
+        if (corrections > 0)
+        {
+            _logger.LogInformation(
+                "Applied {Corrections} single-question correction(s) for release {ReleaseId}",
+                corrections, releaseId);
+        }
+
+        return result;
     }
 
     public async Task<DevTeamRelease> RunGatesAsync(Guid releaseId, CancellationToken ct)
@@ -942,6 +990,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
     }
 
     private WorkflowDefinition LoadWorkflow() => _loader.LoadDefault();
+
+    private static async Task<string?> GetLatestAssistantTextAsync(
+        DevTeamDbContext db, Guid sessionId, CancellationToken ct)
+    {
+        var candidates = await db.Messages
+            .Where(m => m.SessionId == sessionId && m.Role == "assistant" && m.BodyText != null)
+            .ToListAsync(ct);
+        return candidates
+            .OrderByDescending(m => m.CreatedAt)
+            .FirstOrDefault()?.BodyText;
+    }
 
     private static string BuildGuidanceContext(DevTeamRelease release)
     {

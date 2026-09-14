@@ -9,6 +9,7 @@ public interface IWorkflowEngine
     Task<DevTeamRelease> AdvanceAsync(Guid releaseId, CancellationToken ct);
     Task<ReleaseStageRun> StartStageAsync(Guid releaseId, CancellationToken ct);
     Task<StagePromptResult> SendMessageAsync(Guid releaseId, string text, CancellationToken ct);
+    Task<StagePromptResult> SendMessageEnforcingSingleQuestionAsync(Guid releaseId, string text, CancellationToken ct);
     Task<DevTeamRelease> RunGatesAsync(Guid releaseId, CancellationToken ct);
     Task<DevTeamRelease> RunStageAsync(Guid releaseId, CancellationToken ct);
     Task<DevTeamRelease> PushBackAsync(Guid releaseId, string targetStageName, string? instructions, CancellationToken ct);

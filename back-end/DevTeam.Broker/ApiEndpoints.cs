@@ -96,7 +96,7 @@ public static class ApiEndpoints
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var result = await engine.SendMessageAsync(releaseId, request.Text, ctx.RequestAborted);
+                var result = await engine.SendMessageEnforcingSingleQuestionAsync(releaseId, request.Text, ctx.RequestAborted);
                 return Results.Ok(result);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }

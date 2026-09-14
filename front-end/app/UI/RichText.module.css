@@ -1,0 +1,108 @@
+.root {
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.root > *:first-child {
+  margin-top: 0;
+}
+
+.root > *:last-child {
+  margin-bottom: 0;
+}
+
+.root p {
+  margin: 0.5em 0;
+  white-space: pre-wrap;
+}
+
+.root h1,
+.root h2,
+.root h3,
+.root h4 {
+  margin: 0.75em 0 0.35em;
+  line-height: 1.3;
+  color: var(--text-heading);
+}
+
+.root h1 {
+  font-size: 1.25em;
+}
+
+.root h2 {
+  font-size: 1.12em;
+}
+
+.root h3,
+.root h4 {
+  font-size: 1em;
+}
+
+.root ul,
+.root ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+
+.root li {
+  margin: 0.2em 0;
+}
+
+.root strong {
+  font-weight: 600;
+}
+
+.root code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--surface-hover, rgba(0, 0, 0, 0.15));
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.root pre {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.root pre code {
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+
+.root blockquote {
+  margin: 0.5em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border, rgba(128, 128, 128, 0.35));
+  color: var(--text-muted);
+}
+
+.root a {
+  color: var(--accent, #1c7c54);
+  text-decoration: underline;
+}
+
+.root table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.95em;
+}
+
+.root th,
+.root td {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.root th {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.12));
+  font-weight: 600;
+}

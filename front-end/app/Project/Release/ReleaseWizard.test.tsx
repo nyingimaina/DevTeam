@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "@testing-library/jest-dom";
 import ReleaseWizard from "./ReleaseWizard";
@@ -117,13 +117,14 @@ describe("ReleaseWizard", () => {
     const release = makeRelease({ id: "r1" });
     await openDetail(release);
 
-    expect(screen.getByTestId("pipeline-step-business-analyst")).toHaveTextContent("1 business-analyst");
-    expect(screen.getByTestId("pipeline-step-developer")).toHaveTextContent("2 developer");
-    expect(screen.getByTestId("pipeline-step-qa")).toHaveTextContent("3 qa");
+    expect(screen.getByTestId("pipeline-step-business-analyst")).toHaveTextContent("1 Business Analyst");
+    expect(screen.getByTestId("pipeline-step-developer")).toHaveTextContent("2 Developer");
+    expect(screen.getByTestId("pipeline-step-qa")).toHaveTextContent("3 QA");
+    expect(screen.getByText("Advanced details")).toBeInTheDocument();
     expect(mockApi.getPipelineAsync).toHaveBeenCalledWith(release.id);
   });
 
-  it("starts an interactive stage and shows the real chat panel with run gates button", async () => {
+  it("starts an interactive stage and shows the real chat panel (gates run automatically)", async () => {
     const user = await openDetail(makeRelease());
     const started = makeRun({ id: "sr-live" });
 
@@ -146,7 +147,8 @@ describe("ReleaseWizard", () => {
       expect(screen.getByTestId("release-chat-input")).toBeInTheDocument();
     });
     expect(screen.getByTestId("release-send-btn")).toBeInTheDocument();
-    expect(screen.getByTestId("release-run-gates-btn")).toBeInTheDocument();
+    expect(screen.queryByTestId("release-run-gates-btn")).not.toBeInTheDocument();
+    expect(screen.getByText(/Answer the agent's prompts one at a time/)).toBeInTheDocument();
     expect(mockApi.startStageAsync).toHaveBeenCalledTimes(1);
   });
 
@@ -164,6 +166,8 @@ describe("ReleaseWizard", () => {
     });
     expect(screen.getByText("I added a validator. Say DONE when you want gates.")).toBeInTheDocument();
     expect(mockApi.getStageMessagesAsync).toHaveBeenCalledWith(release.id, "sr-live");
+    expect(screen.getByText("Stage history")).toBeInTheDocument();
+    expect(screen.getByText("Business Analyst")).toBeInTheDocument();
   });
 
   it("sends a stage message and reloads the conversation", async () => {
@@ -185,6 +189,49 @@ describe("ReleaseWizard", () => {
     });
     await waitFor(() => {
       expect(screen.getByText("Done.")).toBeInTheDocument();
+    });
+  });
+
+  it("auto-runs gates when the agent's latest message has a standalone DONE line", async () => {
+    const release = makeRelease({ stageRuns: [makeRun({ id: "sr-live" })] });
+    mockApi.getStageMessagesAsync
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: "m1", role: "user", bodyText: "Start the analysis.", createdAt: "2026-01-01T00:00:00Z", parts: [] },
+        { id: "m2", role: "assistant", bodyText: "Requirements settled.\nDONE\n\n### Notes", createdAt: "2026-01-01T00:00:01Z", parts: [] },
+      ]);
+    mockApi.sendStageMessageAsync.mockResolvedValue({ response: "ok", inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+    const user = await openDetail(release);
+
+    await user.type(screen.getByTestId("release-chat-input"), "Start the analysis.");
+    await user.click(screen.getByTestId("release-send-btn"));
+
+    await waitFor(() => {
+      expect(mockApi.runStageGatesAsync).toHaveBeenCalledWith(release.id);
+    });
+  });
+
+  it("shows a thinking indicator while a stage message is in flight", async () => {
+    const run = makeRun({ id: "sr-live" });
+    mockApi.getStageMessagesAsync.mockResolvedValue([]);
+    let resolveSend!: (value: { response: string; inputTokens: number; outputTokens: number; totalTokens: number }) => void;
+    mockApi.sendStageMessageAsync.mockImplementation(
+      () => new Promise((res) => { resolveSend = res; }),
+    );
+    const user = await openDetail(makeRelease({ stageRuns: [run] }));
+
+    await user.type(screen.getByTestId("release-chat-input"), "Start the analysis.");
+    await user.click(screen.getByTestId("release-send-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("release-thinking").textContent).toMatch(/thinking/i);
+    });
+
+    await act(async () => {
+      resolveSend({ response: "ok", inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("release-thinking")).not.toBeInTheDocument();
     });
   });
 
@@ -236,14 +283,14 @@ describe("ReleaseWizard", () => {
     });
   });
 
-  it("shows signoff button for a blocked release", async () => {
+  it("shows a review-and-continue panel for a blocked release", async () => {
     const release = makeRelease({
       status: "Blocked",
       signoffs: [{ id: "s1", releaseId: "r1", stageName: "requirements-approval", required: true, approved: false }],
     });
     await openDetail(release);
 
-    expect(screen.getByText("Signoff Required")).toBeInTheDocument();
-    expect(screen.getByText(/Approve requirements-approval/)).toBeInTheDocument();
+    expect(screen.getByText(/needs your signoff/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review & Continue" })).toBeInTheDocument();
   });
 });

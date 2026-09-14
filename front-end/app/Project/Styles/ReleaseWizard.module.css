@@ -353,6 +353,39 @@
   word-break: break-word;
 }
 
+/* ─── thinking indicator ───────────────────────────────────────────────── */
+
+.thinkingRow {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.thinkingBubble {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--text-muted, #888);
+  font-style: italic;
+  animation: thinkingPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes thinkingPulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinkingBubble {
+    animation: none;
+  }
+}
+
 /* ─── chat input ──────────────────────────────────────────────────────── */
 
 .chatInput {
@@ -390,6 +423,12 @@
   color: var(--text-muted, #aaa);
 }
 
+.signoffIntro {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  color: var(--text-body, #eee);
+}
+
 .signoffRow {
   display: flex;
   align-items: center;
@@ -400,6 +439,34 @@
 .signoffStage {
   font-weight: 500;
   flex: 1;
+}
+
+/* ─── what's next hint ─────────────────────────────────────────────────── */
+
+.whatsNext {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  line-height: 1.45;
+}
+
+/* ─── advanced details + timeline disclosures ──────────────────────────── */
+
+.advancedDetails,
+.timeline {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-color, #333);
+  padding: 12px 16px 4px;
+}
+
+.advancedDetails summary,
+.timeline summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted, #aaa);
+  padding-bottom: 4px;
+  user-select: none;
 }
 
 /* ─── phase badge ─────────────────────────────────────────────────────── */

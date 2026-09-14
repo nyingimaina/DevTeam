@@ -1,10 +1,34 @@
 /** @type {import('next').NextConfig} */
 const isDev = process.env.NODE_ENV === "development";
 
+/**
+ * react-markdown + the unified/remark/micromark family ship pure ESM, which jest (via next/jest)
+ * refuses to load unless the packages are listed in transpilePackages. Compute the transitive
+ * closure from node_modules so the list stays correct across version bumps.
+ */
+const fs = require("fs");
+const path = require("path");
+function esmTranspilePackages(entries) {
+  const seen = new Set();
+  const stack = [...entries];
+  while (stack.length) {
+    const name = stack.pop();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const manifest = path.join("node_modules", name, "package.json");
+    if (!fs.existsSync(manifest)) continue;
+    const deps = JSON.parse(fs.readFileSync(manifest, "utf8")).dependencies || {};
+    for (const dep of Object.keys(deps)) {
+      if (!dep.startsWith("@types/") && !seen.has(dep)) stack.push(dep);
+    }
+  }
+  return [...seen];
+}
+
 const nextConfig = {
   reactStrictMode: false,
   images: { unoptimized: true },
-  /** Static export is only for the production build; dev needs a real server so rewrites can proxy to the broker. */
+  transpilePackages: esmTranspilePackages(["react-markdown", "remark-gfm"]),
   ...(isDev
     ? {
         async rewrites() {

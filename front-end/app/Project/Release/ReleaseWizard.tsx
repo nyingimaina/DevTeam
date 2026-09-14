@@ -9,6 +9,7 @@ import {
 } from "../../Chat/Data/BrokerTypes";
 import MessageRow from "../../Chat/UI/MessageRow";
 import ZestButton from "jattac.libs.web.zest-button";
+import { phaseLabel, stageLabel, statusLabel, whatsNext } from "./labels";
 import styles from "../Styles/ReleaseWizard.module.css";
 
 interface IReleaseWizardProps {
@@ -32,17 +33,6 @@ function statusColor(status: string): string {
     case "BlockedSignoff": return styles.statusBlocked;
     case "Ready": return styles.statusReady;
     default: return "";
-  }
-}
-
-function phaseLabel(phase: string): string {
-  switch (phase) {
-    case "GuidedQA": return "Chat with agent";
-    case "Producing": return "Producing artifacts";
-    case "Gates": return "Running gates";
-    case "Challenge": return "Review in progress";
-    case "Signoff": return "Awaiting signoff";
-    default: return phase;
   }
 }
 
@@ -153,9 +143,9 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
                 data-testid={`${testIdPrefix}-item-${r.id}`}
               >
                 <span className={styles.releaseTitle}>{r.title ?? r.features[0]?.key ?? r.id.slice(0, 8)}</span>
-                <span className={`${styles.releaseStatus} ${statusColor(r.status)}`}>{r.status}</span>
+                <span className={`${styles.releaseStatus} ${statusColor(r.status)}`}>{statusLabel(r.status)}</span>
                 <span className={styles.releaseStages}>
-                  {r.flowPosition?.currentStageName ?? "—"}
+                  {r.flowPosition?.currentStageName ? stageLabel(r.flowPosition.currentStageName) : "—"}
                 </span>
               </div>
             ))}
@@ -279,18 +269,21 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
         <ZestButton type="button" onClick={onBack} disabled={loading}
           zest={{ buttonStyle: "text", visualOptions: { size: "sm" } }}>Back</ZestButton>
         <h2>{release.title ?? release.features[0]?.key}</h2>
-        <span className={`${styles.releaseStatus} ${statusColor(release.status)}`}>{release.status}</span>
+        <span className={`${styles.releaseStatus} ${statusColor(release.status)}`}>{statusLabel(release.status)}</span>
         <ZestButton type="button" onClick={onRefresh} disabled={loading}
           zest={{ semanticType: "refresh", busyOptions: { preventRageClick: true }, buttonStyle: "text", visualOptions: { size: "sm" } }}>
           Refresh
         </ZestButton>
       </div>
 
-      <div className={styles.detailInfo}>
-        <span>ID: {release.id.slice(0, 8)}...</span>
-        <span>Workspace: {release.workspacePath}</span>
-        <span>Version: {release.version}</span>
-      </div>
+      <details className={styles.advancedDetails}>
+        <summary>Advanced details</summary>
+        <div className={styles.detailInfo}>
+          <span>ID: {release.id.slice(0, 8)}...</span>
+          <span>Workspace: {release.workspacePath}</span>
+          <span>Version: {release.version}</span>
+        </div>
+      </details>
 
       {pipeline.length > 0 && (
         <PipelineStepper pipeline={pipeline} stageIndex={stageIndex} signoffs={release.signoffs} />
@@ -310,7 +303,10 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
 
       {pendingSignoffs.length > 0 && (
         <div className={styles.signoffSection}>
-          <h3>Signoff Required</h3>
+          <h3>Your review</h3>
+          <p className={styles.signoffIntro}>
+            The {stageLabel(pendingSignoffs[0].stageName)} stage finished and needs your signoff before moving on.
+          </p>
           {pendingSignoffs.map((s) => (
             <SignoffButton
               key={s.stageName}
@@ -325,12 +321,12 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
       )}
 
       {release.stageRuns.length > 0 && (
-        <div className={styles.stagesSection}>
-          <h3>Stage History</h3>
+        <details className={styles.timeline} open>
+          <summary>Stage history</summary>
           {release.stageRuns.map((sr) => (
             <StageHistoryCard key={sr.id} stageRun={sr} testIdPrefix={testIdPrefix} />
           ))}
-        </div>
+        </details>
       )}
     </div>
   );
@@ -360,8 +356,8 @@ function PipelineStepper({
             {i > 0 && <span className={styles.stepSeparator}>›</span>}
             <span className={cls} data-testid={`pipeline-step-${p.name}`}>
               {i < stageIndex && <span className={styles.stepTick}>✓ </span>}
-              {i + 1} {p.name}
-              {p.signoff && <span className={styles.stepSignoff}>{approvedSignoff ? " · approved" : ` · ${p.signoff}`}</span>}
+              {i + 1} {stageLabel(p.name)}
+              {p.signoff && <span className={styles.stepSignoff}>{approvedSignoff ? " · approved" : " · review needed"}</span>}
             </span>
           </React.Fragment>
         );
@@ -427,7 +423,7 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
   return (
     <div className={styles.stagePanel}>
       <div className={styles.stageHeader}>
-        <span className={styles.stageName}>Current Stage: {role.name}</span>
+        <span className={styles.stageName}>Current Stage: {stageLabel(role.name)}</span>
         {run && (
           <>
             <span className={styles.phaseBadge}>{phaseLabel(run.phase)}</span>
@@ -435,6 +431,7 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
           </>
         )}
       </div>
+      {whatsNext(role.name) && <div className={styles.whatsNext}>{whatsNext(role.name)}</div>}
 
       {stageError && <div className={styles.error}>{stageError}</div>}
 
@@ -513,17 +510,45 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [gatesRunning, setGatesRunning] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const gatesInFlight = useRef(false);
+  const lastAutoRunMsgId = useRef<string | null>(null);
+
+  const hasStandaloneDone = useCallback((text: string): boolean => {
+    return text.split("\n").some((line) => /^\s*done\s*$/i.test(line));
+  }, []);
+
+  const autoRunGates = useCallback(async (msgs: MessageDto[]) => {
+    if (gatesInFlight.current) return;
+    const latest = [...msgs].reverse().find((m) => m.role === "assistant" && m.bodyText);
+    if (!latest || !latest.bodyText) return;
+    if (latest.id === lastAutoRunMsgId.current) return;
+    if (!hasStandaloneDone(latest.bodyText)) return;
+    lastAutoRunMsgId.current = latest.id;
+    gatesInFlight.current = true;
+    setGatesRunning(true);
+    try {
+      await api.runStageGatesAsync(release.id);
+      await refreshRelease();
+    } catch (e) {
+      setMessagesError(toErrorMessage(e));
+    } finally {
+      gatesInFlight.current = false;
+      setGatesRunning(false);
+    }
+  }, [api, release.id, hasStandaloneDone, refreshRelease]);
 
   const loadMessages = useCallback(async () => {
     try {
       const msgs = await api.getStageMessagesAsync(release.id, stageRun.id);
       setMessages(msgs);
+      void autoRunGates(msgs);
     } catch (e) {
       setMessagesError(toErrorMessage(e));
     }
-  }, [api, release.id, stageRun.id]);
+  }, [api, release.id, stageRun.id, autoRunGates]);
 
   useEffect(() => {
     let cancelled = false;
@@ -534,6 +559,7 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
         if (!cancelled) {
           setMessages(msgs);
           setMessagesError(null);
+          void autoRunGates(msgs);
         }
       } catch (e) {
         if (!cancelled) setMessagesError(toErrorMessage(e));
@@ -547,7 +573,7 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
       cancelled = true;
       if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [api, release.id, stageRun.id, stageRun.status]);
+  }, [api, release.id, stageRun.id, stageRun.status, autoRunGates]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView?.({
@@ -575,20 +601,6 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
     }
   }, [api, release.id, input, sending, loadMessages]);
 
-  const handleRunGates = useCallback(async () => {
-    setSending(true);
-    setMessagesError(null);
-    try {
-      await api.runStageGatesAsync(release.id);
-      await refreshRelease();
-      await loadMessages();
-    } catch (e) {
-      setMessagesError(toErrorMessage(e));
-    } finally {
-      setSending(false);
-    }
-  }, [api, release.id, refreshRelease, loadMessages]);
-
   return (
     <div className={styles.chatPanel}>
       {messagesError && <div className={styles.error}>{messagesError}</div>}
@@ -602,6 +614,16 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
         {messages.map((message) => (
           <MessageRow key={message.id} message={message} />
         ))}
+        {sending && (
+          <div className={styles.thinkingRow} role="status" data-testid={`${testIdPrefix}-thinking`}>
+            <div className={styles.thinkingBubble}>thinking…</div>
+          </div>
+        )}
+        {gatesRunning && (
+          <div className={styles.thinkingRow} role="status" data-testid={`${testIdPrefix}-gates`}>
+            <div className={styles.thinkingBubble}>running gates…</div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -612,26 +634,17 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
           onKeyDown={(e) => { if (e.key === "Enter") void handleSend(); }}
           placeholder="Message the agent…"
           className={styles.input}
-          disabled={sending || busy}
+          disabled={sending || busy || gatesRunning}
           data-testid={`${testIdPrefix}-chat-input`}
         />
         <ZestButton
           type="button"
           onClick={() => void handleSend()}
-          disabled={sending || busy || !input.trim()}
+          disabled={sending || busy || gatesRunning || !input.trim()}
           data-testid={`${testIdPrefix}-send-btn`}
           zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
         >
           Send
-        </ZestButton>
-        <ZestButton
-          type="button"
-          onClick={() => void handleRunGates()}
-          disabled={sending || busy}
-          data-testid={`${testIdPrefix}-run-gates-btn`}
-          zest={{ semanticType: "confirm", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
-        >
-          Run Gates
         </ZestButton>
       </div>
     </div>
@@ -847,7 +860,7 @@ function SignoffButton({ release, signoff, api, testIdPrefix, onReleaseUpdated }
   return (
     <div className={styles.signoffRow}>
       {error && <div className={styles.error}>{error}</div>}
-      <span className={styles.signoffStage}>{signoff.stageName}</span>
+      <span className={styles.signoffStage}>{stageLabel(signoff.stageName)}</span>
       <ZestButton
         type="button"
         onClick={handleApprove}
@@ -855,7 +868,7 @@ function SignoffButton({ release, signoff, api, testIdPrefix, onReleaseUpdated }
         data-testid={`${testIdPrefix}-signoff-${signoff.stageName}`}
         zest={{ semanticType: "confirm", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
       >
-        {loading ? "Approving..." : `Approve ${signoff.stageName}`}
+        {loading ? "Reviewing…" : "Review & Continue"}
       </ZestButton>
     </div>
   );
@@ -872,8 +885,8 @@ function StageHistoryCard({ stageRun, testIdPrefix }: IStageHistoryCardProps) {
   return (
     <div className={styles.stageCard} data-testid={`${testIdPrefix}-stage-${stageRun.stageName}`}>
       <div className={styles.stageHeader}>
-        <span className={styles.stageName}>{stageRun.stageName}</span>
-        <span className={`${styles.releaseStatus} ${statusColor(stageRun.status)}`}>{stageRun.status}</span>
+        <span className={styles.stageName}>{stageLabel(stageRun.stageName)}</span>
+        <span className={`${styles.releaseStatus} ${statusColor(stageRun.status)}`}>{statusLabel(stageRun.status)}</span>
         <span className={styles.phaseBadge}>{phaseLabel(stageRun.phase)}</span>
         {stageRun.questionCount > 0 && (
           <span className={styles.questionBadge}>{stageRun.questionCount} messages</span>
