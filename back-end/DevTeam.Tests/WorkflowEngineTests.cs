@@ -347,6 +347,22 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task StartStage_PromptsBAgentToAuthorRequirementsArtifact()
+    {
+        using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        await engine.StartStageAsync(release.Id, CancellationToken.None);
+
+        var initialPrompt = Assert.Single(_coordinator.Prompts);
+        Assert.Contains("business-analyst", initialPrompt);
+        Assert.Contains("requirements.md", initialPrompt);
+        Assert.Contains("REQ-", initialPrompt);
+        Assert.Contains("Given", initialPrompt, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task RunGates_FeedsRequirementsFromDiskToRequirementGates()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
@@ -382,6 +398,39 @@ public class WorkflowEngineTests : IDisposable
 
         var gherkinRequest = _gateRunner.Requests.Single(r => r.Builtin == BuiltinRegistry.GherkinValidator);
         Assert.Equal("[]", gherkinRequest.Request.Inputs!["requirementsJson"]);
+    }
+
+    [Fact]
+    public async Task RunGates_SuppliesTestArtifactsToCoverageGate()
+    {
+        using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
+        var requirementsPath = ArtifactPaths.RequirementsPath(workspace.Path, "feat-001");
+        Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
+        File.WriteAllText(requirementsPath,
+            "## REQ-F01: Addition works" + Environment.NewLine +
+            "Given valid numbers, When they are combined, Then the sum is returned");
+        Directory.CreateDirectory(Path.Combine(workspace.Path, "CalculatorLib.Tests"));
+        File.WriteAllText(Path.Combine(workspace.Path, "CalculatorLib.Tests", "CalculatorTests.cs"), "REQ_F01_Add_ReturnsSum");
+        File.WriteAllText(ArtifactPaths.ManifestPath(workspace.Path, "feat-001"), "feature: feat-001" + Environment.NewLine + "testCommand: dotnet --version" + Environment.NewLine);
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+
+        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.SendMessageAsync(release.Id, "We need a calculator", CancellationToken.None);
+        await engine.RunGatesAsync(release.Id, CancellationToken.None);
+        await engine.SignoffAsync(release.Id, "business-analyst", "pm", null, CancellationToken.None);
+
+        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.RunGatesAsync(release.Id, CancellationToken.None);
+        await engine.SignoffAsync(release.Id, "developer", "tech-lead", null, CancellationToken.None);
+
+        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        await engine.RunGatesAsync(release.Id, CancellationToken.None);
+
+        var coverageRequest = _gateRunner.Requests.Single(r => r.Builtin == BuiltinRegistry.CoverageMatrix);
+        Assert.Contains("REQ_F01_Add_ReturnsSum", coverageRequest.Request.Inputs!["testFilesJson"]);
+        Assert.Contains("testOutput", coverageRequest.Request.Inputs!.Keys);
     }
 
     private sealed class TempDir(string path) : IDisposable

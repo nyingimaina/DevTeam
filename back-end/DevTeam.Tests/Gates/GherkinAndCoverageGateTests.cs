@@ -78,4 +78,58 @@ public class GherkinAndCoverageGateTests
         Assert.True(result.Passed);
         Assert.Contains("| REQ-001 | covered |", result.EvidenceText);
     }
+
+    [Fact]
+    public async Task Coverage_PassesWhenTestSourceFilesReferenceRequirement()
+    {
+        var gate = new CoverageMatrixGate();
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = RequirementsJson,
+                ["testOutput"] = "No test output captured.",
+                ["testFilesJson"] = """[{"path":"CalculatorLib.Tests/AuthTests.cs","content":"[Theory] REQ-001 login REQ-002 logout scenarios"}]""",
+            }),
+            CancellationToken.None);
+
+        Assert.True(result.Passed);
+        Assert.Contains("| REQ-002 | covered |", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Coverage_PassesWhenCompactIdVariantAppearsInTests()
+    {
+        var gate = new CoverageMatrixGate();
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = RequirementsJson,
+                ["testFilesJson"] = """[{"path":"CalculatorLib.Tests/AuthTests.cs","content":"REQ001_Login_Succeeds and REQ002_Logout_Succeeds"}]""",
+            }),
+            CancellationToken.None);
+
+        Assert.True(result.Passed);
+        Assert.Contains("| REQ-001 | covered |", result.EvidenceText);
+        Assert.Contains("| REQ-002 | covered |", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Coverage_FailsWhenTestSourceFilesDoNotReferenceRequirements()
+    {
+        var gate = new CoverageMatrixGate();
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = RequirementsJson,
+                ["testFilesJson"] = """[{"path":"CalculatorLib.Tests/AuthTests.cs","content":"no requirement ids anywhere"}]""",
+            }),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Contains("REQ-001", result.EvidenceText);
+        Assert.Contains("REQ-002", result.EvidenceText);
+    }
 }

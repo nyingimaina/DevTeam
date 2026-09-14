@@ -104,6 +104,10 @@ public sealed record SignoffRequest(string StageName, string Role, string? Comme
 
 public sealed record SendMessageRequest(string Text);
 
+public sealed record PushBackRequest(string TargetStageName, string? Instructions);
+
+public sealed record PipelineStageDto(string Name, bool UserInputRequired, string? Signoff);
+
 // ─── git endpoints ─────────────────────────────────────────────────────────
 
 public sealed record GitInitRequest(string WorkspacePath);

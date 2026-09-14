@@ -1,4 +1,5 @@
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Server;
 
 namespace DevTeam.Broker.Workflow;
 
@@ -9,6 +10,10 @@ public interface IWorkflowEngine
     Task<ReleaseStageRun> StartStageAsync(Guid releaseId, CancellationToken ct);
     Task<StagePromptResult> SendMessageAsync(Guid releaseId, string text, CancellationToken ct);
     Task<DevTeamRelease> RunGatesAsync(Guid releaseId, CancellationToken ct);
+    Task<DevTeamRelease> RunStageAsync(Guid releaseId, CancellationToken ct);
+    Task<DevTeamRelease> PushBackAsync(Guid releaseId, string targetStageName, string? instructions, CancellationToken ct);
+    Task<IReadOnlyList<MessageDto>> GetStageMessagesAsync(Guid releaseId, Guid stageRunId, CancellationToken ct);
+    Task<IReadOnlyList<PipelineStageDto>> GetPipelineAsync(Guid releaseId, CancellationToken ct);
     Task<DevTeamRelease> SignoffAsync(Guid releaseId, string stageName, string role, string? comment, CancellationToken ct);
     Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(CancellationToken ct);

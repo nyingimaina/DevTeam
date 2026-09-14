@@ -535,7 +535,7 @@ string acpSessionId;
         o.CurrentValue ?? string.Empty,
         o.Options.Select(v => new ModelOption(v.Value, v.Name, v.Description)).ToArray());
 
-    private static MessageDto ToMessageDto(Message m) => new(
+    internal static MessageDto ToMessageDto(Message m) => new(
         m.Id,
         m.Role,
         m.AcpMessageId,

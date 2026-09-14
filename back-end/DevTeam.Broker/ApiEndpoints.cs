@@ -115,6 +115,56 @@ public static class ApiEndpoints
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
+        app.MapPost("/api/releases/{releaseId:guid}/run-stage", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.RunStageAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapPost("/api/releases/{releaseId:guid}/push-back", async (Guid releaseId, PushBackRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.TargetStageName))
+                return Results.BadRequest("TargetStageName is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.PushBackAsync(
+                    releaseId, request.TargetStageName, request.Instructions, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapGet("/api/releases/{releaseId:guid}/pipeline", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var pipeline = await engine.GetPipelineAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(pipeline);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+
+        app.MapGet("/api/releases/{releaseId:guid}/stages/{stageRunId:guid}/messages", async (Guid releaseId, Guid stageRunId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var messages = await engine.GetStageMessagesAsync(releaseId, stageRunId, ctx.RequestAborted);
+                return Results.Ok(messages);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+
         // ─── release endpoints ────────────────────────────────────────────
         app.MapPost("/api/releases", async (CreateReleaseRequest request, HttpContext ctx) =>
         {

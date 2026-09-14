@@ -139,6 +139,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
         var guidanceContext = BuildGuidanceContext(release);
 
+        var requirementsAuthoring = role.Name == "business-analyst"
+            ? $" Author the agreed requirements into devteam/features/{featureKey}/requirements.md " +
+              $"using your file tools (create the directory if needed): one \"## REQ-N: <Title>\" section per requirement, " +
+              $"each followed by a Given/When/Then acceptance-criteria sentence. Every requirement MUST contain Given, When and Then. "
+            : string.Empty;
+
         // Use a separate cancellation for the agent prompt so HTTP timeouts don't kill it.
         // The agent may take time to process the initial prompt — that's expected.
         using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
@@ -148,6 +154,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             $"You are the {role.Name} for feature '{featureKey}' in workspace '{release.WorkspacePath}'. " +
             $"Ask ONE question at a time. Follow each answer to its logical conclusion before asking the next. " +
             $"When you have enough information to produce the required output, say DONE and provide the structured result." +
+            requirementsAuthoring +
             guidanceContext,
             agentCts.Token);
 
@@ -809,21 +816,56 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     private async Task<StepExecutionResult> ExecuteBuiltinAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
     {
-        var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: BuildBuiltinInputs(gateName, featureKey, workspacePath));
+        var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: await BuildBuiltinInputsAsync(gateName, featureKey, workspacePath, ct));
         var result = await _gateRunner.RunAsync(gateName, request, ct);
         return new StepExecutionResult { StepName = gateName, Passed = result.Passed, Evidence = result.EvidenceText };
     }
 
-    private static IReadOnlyDictionary<string, string> BuildBuiltinInputs(string gateName, string featureKey, string workspacePath)
+    private static async Task<IReadOnlyDictionary<string, string>> BuildBuiltinInputsAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
     {
-        if (gateName is not BuiltinRegistry.GherkinValidator and not BuiltinRegistry.CoverageMatrix and not BuiltinRegistry.ScaffoldSpecs)
+        if (gateName is not BuiltinRegistry.GherkinValidator
+            and not BuiltinRegistry.CoverageMatrix
+            and not BuiltinRegistry.ScaffoldSpecs
+            and not BuiltinRegistry.RenderPr)
             return new Dictionary<string, string>();
 
         var requirements = RequirementsExtractor.Extract(workspacePath, featureKey);
-        return new Dictionary<string, string>
+        var inputs = new Dictionary<string, string>
         {
             ["requirementsJson"] = System.Text.Json.JsonSerializer.Serialize(requirements),
         };
+
+        if (gateName is BuiltinRegistry.CoverageMatrix or BuiltinRegistry.RenderPr)
+        {
+            var testFiles = TestDiscovery.Discover(workspacePath);
+            if (testFiles.Count > 0)
+                inputs["testFilesJson"] = System.Text.Json.JsonSerializer.Serialize(testFiles);
+
+            var testCommand = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey))?.TestCommand
+                ?? "dotnet test DevTeam.slnx";
+            inputs["testOutput"] = await CaptureTestOutputAsync(testCommand, workspacePath, ct);
+        }
+
+        return inputs;
+    }
+
+    private static async Task<string> CaptureTestOutputAsync(string commandLine, string workspacePath, CancellationToken ct)
+    {
+        try
+        {
+            var trimmed = commandLine.Trim();
+            var separator = trimmed.IndexOf(' ');
+            var fileName = separator <= 0 ? trimmed : trimmed[..separator];
+            var arguments = separator <= 0 ? string.Empty : trimmed[(separator + 1)..];
+            var result = await new SystemProcessRunner().RunAsync(
+                new ProcessRunRequest(fileName, arguments, workspacePath),
+                ct);
+            return TestOutputNormalizer.Normalize(result.StandardOutput + "\n" + result.StandardError);
+        }
+        catch (Exception)
+        {
+            return TestOutputNormalizer.Normalize(string.Empty);
+        }
     }
 
     private async Task<StepExecutionResult> ExecuteLoopAsync(WorkflowStep step, string featureKey, string workspacePath, CancellationToken ct)

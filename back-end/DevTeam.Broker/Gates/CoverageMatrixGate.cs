@@ -11,8 +11,7 @@ public sealed class CoverageMatrixGate : IGate
     public Task<GateResult> RunAsync(GateRequest request, CancellationToken cancellationToken)
     {
         var requirements = RequirementDtos.ParseJson(GateInputs.GetOptional(request.Inputs, "requirementsJson"));
-        var testOutput = GateInputs.Get(request.Inputs, "testOutput", string.Empty);
-        var featureKey = GateInputs.Get(request.Inputs, "featureKey", request.FeatureKey ?? string.Empty);
+        var referenceCorpus = BuildReferenceCorpus(request);
 
         if (requirements.Count == 0)
             return Task.FromResult(GateResult.Fail("No requirements to cover", "Coverage matrix needs the requirement list."));
@@ -23,8 +22,9 @@ public sealed class CoverageMatrixGate : IGate
         matrix.Append("| --- | --- |").AppendLine();
         foreach (var requirement in requirements)
         {
-            var covered = TestCovers(testOutput, requirement.Id) ||
-                TestCovers(testOutput, Sanitize(requirement.Title));
+            var covered = TestCovers(referenceCorpus, requirement.Id) ||
+                TestCovers(referenceCorpus, Compact(requirement.Id)) ||
+                TestCovers(referenceCorpus, Sanitize(requirement.Title));
             matrix.Append($"| {requirement.Id} | {(covered ? "covered" : "UNCOVERED")} |").AppendLine();
             if (!covered)
                 uncovered.Add(requirement.Id);
@@ -48,12 +48,27 @@ public sealed class CoverageMatrixGate : IGate
             evidence.ToString().TrimEnd()));
     }
 
-    private static bool TestCovers(string testOutput, string token)
+    private static string BuildReferenceCorpus(GateRequest request)
+    {
+        var corpus = new StringBuilder();
+        var testOutput = GateInputs.Get(request.Inputs, "testOutput", string.Empty);
+        if (!string.IsNullOrWhiteSpace(testOutput))
+            corpus.Append(testOutput).AppendLine();
+        corpus.Append(TestFiles.Text(GateInputs.GetOptional(request.Inputs, "testFilesJson")));
+        return corpus.ToString();
+    }
+
+    private static bool TestCovers(string referenceCorpus, string token)
     {
         if (string.IsNullOrWhiteSpace(token))
             return false;
-        return testOutput.Contains(token, StringComparison.OrdinalIgnoreCase);
+        return referenceCorpus.Contains(token, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string Compact(string text)
+        => Sanitize(text).Replace("-", "", StringComparison.Ordinal)
+            .Replace("_", "", StringComparison.Ordinal)
+            .Replace(".", "", StringComparison.Ordinal);
 
     private static string Sanitize(string title)
         => title.Replace(" ", "", StringComparison.Ordinal).ToLowerInvariant();
