@@ -52,6 +52,11 @@ describe("statusLabel", () => {
     expect(statusLabel("Escalated")).toMatch(/error|retry/i);
   });
 
+  it("maps BlockedEntry to a name distinct from BlockedGate — it's the previous stage's problem, not this one's", () => {
+    expect(statusLabel("BlockedEntry")).toMatch(/entry|before|start/i);
+    expect(statusLabel("BlockedEntry")).not.toBe(statusLabel("BlockedGate"));
+  });
+
   it("passes through unknown statuses", () => {
     expect(statusLabel("Weird")).toBe("Weird");
   });

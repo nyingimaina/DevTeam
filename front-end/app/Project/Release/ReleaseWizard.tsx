@@ -40,6 +40,7 @@ function statusColor(status: string): string {
     case "InProgress": return styles.statusInProgress;
     case "Blocked": return styles.statusBlocked;
     case "BlockedGate": return styles.statusBlocked;
+    case "BlockedEntry": return styles.statusBlocked;
     case "BlockedSignoff": return styles.statusBlocked;
     case "Escalated": return styles.statusBlocked;
     case "Ready": return styles.statusReady;
@@ -48,7 +49,7 @@ function statusColor(status: string): string {
 }
 
 function shouldPollStage(status: string): boolean {
-  return status === "Active" || status === "GatesRunning" || status === "BlockedGate" || status === "BlockedSignoff" || status === "Escalated";
+  return status === "Active" || status === "GatesRunning" || status === "BlockedGate" || status === "BlockedEntry" || status === "BlockedSignoff" || status === "Escalated";
 }
 
 function latestRunFor(release: ReleaseDto, stageName: string): ReleaseStageRunDto | undefined {
@@ -651,7 +652,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
           testIdPrefix={testIdPrefix}
           steps={role.steps}
           gateChecks={run.gateChecks}
-          inProgress={!["BlockedGate", "BlockedSignoff", "Complete"].includes(run.status)}
+          inProgress={!["BlockedGate", "BlockedEntry", "BlockedSignoff", "Complete"].includes(run.status)}
         />
       )}
 
@@ -719,7 +720,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
         />
       )}
 
-      {run && run.status === "BlockedGate" && pipeline.length > 0 && (
+      {run && (run.status === "BlockedGate" || run.status === "BlockedEntry") && pipeline.length > 0 && (
         <PushBackPanel
           featureId={featureId}
           api={api}
@@ -737,7 +738,27 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
 
 // ─── stage diagnostics (on-demand full detail behind the status badge) ────
 
+function GateCheckItem({ gateCheck, currentStageName }: { gateCheck: ReleaseGateCheckDto; currentStageName: string }) {
+  // Only worth surfacing when it differs from the obvious default (the stage that ran the
+  // check owns fixing it) — that's the whole point of ResponsibleRole existing at all.
+  const ownedElsewhere = gateCheck.responsibleRole && gateCheck.responsibleRole !== currentStageName;
+  return (
+    <li>
+      <div>
+        {gateCheck.passed ? "✓" : "✗"} {gateCheck.name}
+        {ownedElsewhere && (
+          <span className={styles.diagnosticsOwner}> — owned by {stageLabel(gateCheck.responsibleRole!)}</span>
+        )}
+      </div>
+      {gateCheck.evidenceText && <pre className={styles.diagnosticsEvidence}>{gateCheck.evidenceText}</pre>}
+    </li>
+  );
+}
+
 function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
+  const entryChecks = run.gateChecks.filter((gc) => gc.isEntryGate);
+  const exitChecks = run.gateChecks.filter((gc) => !gc.isEntryGate);
+
   return (
     <div className={styles.diagnosticsContent}>
       <section>
@@ -748,19 +769,34 @@ function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
             {errorKindLabel(run.lastErrorKind) || run.lastErrorMessage || "The agent hit an error."}
           </p>
         )}
+        {run.status === "BlockedEntry" && (
+          <p className={styles.diagnosticsError}>
+            An entry check failed before this stage&apos;s turn started — see Entry checks below.
+          </p>
+        )}
       </section>
 
       <section>
-        <h4>Gate checks</h4>
-        {run.gateChecks.length === 0 ? (
-          <p>No gate checks yet.</p>
+        <h4>Entry checks</h4>
+        {entryChecks.length === 0 ? (
+          <p>No entry checks for this stage.</p>
         ) : (
           <ul className={styles.diagnosticsList}>
-            {run.gateChecks.map((gc) => (
-              <li key={gc.id}>
-                <div>{gc.passed ? "✓" : "✗"} {gc.name}</div>
-                {gc.evidenceText && <pre className={styles.diagnosticsEvidence}>{gc.evidenceText}</pre>}
-              </li>
+            {entryChecks.map((gc) => (
+              <GateCheckItem key={gc.id} gateCheck={gc} currentStageName={run.stageName} />
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h4>Exit checks</h4>
+        {exitChecks.length === 0 ? (
+          <p>No exit checks yet.</p>
+        ) : (
+          <ul className={styles.diagnosticsList}>
+            {exitChecks.map((gc) => (
+              <GateCheckItem key={gc.id} gateCheck={gc} currentStageName={run.stageName} />
             ))}
           </ul>
         )}
@@ -1333,7 +1369,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
   // heuristic stays as a fallback for the brief window before the backend's own error state
   // has been polled in, not as the primary signal.
   const looksStalled = turn === undefined && stageRun.status === "Active";
-  const inProgress = !["BlockedGate", "BlockedSignoff", "Complete", "Escalated"].includes(stageRun.status);
+  const inProgress = !["BlockedGate", "BlockedEntry", "BlockedSignoff", "Complete", "Escalated"].includes(stageRun.status);
 
   const lines = useMemo(() => {
     const out: { text: string; tone: "phase" | "ok" | "warn" | "err" | "plain" }[] = [
@@ -1360,6 +1396,8 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
       out.push({ text: `⚠ ${reason}`, tone: "err" });
     } else if (stageRun.status === "BlockedGate") {
       out.push({ text: "stage blocked — gates failed. Review findings and push back for rework.", tone: "err" });
+    } else if (stageRun.status === "BlockedEntry") {
+      out.push({ text: "stage blocked before it could start — an entry check failed (often something the previous stage needs to fix).", tone: "err" });
     } else if (stageRun.status === "BlockedSignoff") {
       out.push({ text: "stage blocked — signoff required to continue.", tone: "warn" });
     } else if (stageRun.status === "Complete") {
@@ -1378,7 +1416,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
     }
   }, [lines]);
 
-  const showRunButton = shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate" || stageRun.status === "Escalated";
+  const showRunButton = shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated";
   const showRefreshButton = shouldPollStage(stageRun.status);
 
   return (
@@ -1412,7 +1450,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
       </div>
 
       <div className={styles.logActions}>
-        {showRunButton && (stageRun.status === "BlockedGate" || stageRun.status === "Escalated") && (
+        {showRunButton && (stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated") && (
           <CountdownRunButton
             testIdPrefix={testIdPrefix}
             disabled={busy}
@@ -1422,7 +1460,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
             onRun={runStage}
           />
         )}
-        {showRunButton && stageRun.status !== "BlockedGate" && stageRun.status !== "Escalated" && (
+        {showRunButton && stageRun.status !== "BlockedGate" && stageRun.status !== "BlockedEntry" && stageRun.status !== "Escalated" && (
           <ZestButton
             type="button"
             onClick={runStage}

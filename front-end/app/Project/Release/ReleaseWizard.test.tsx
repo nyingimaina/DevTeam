@@ -684,7 +684,7 @@ describe("ReleaseWizard", () => {
       phase: "Gates",
       attempt: 1,
       gateChecks: [
-        { id: "g1", stageRunId: "sr-dev", name: "verify_code", passed: false, evidenceText: "tests failed", completedAt: "2026-01-01T00:00:10Z" },
+        { id: "g1", stageRunId: "sr-dev", name: "verify_code", passed: false, evidenceText: "tests failed", completedAt: "2026-01-01T00:00:10Z", isEntryGate: false },
       ],
       findings: [
         { id: "f1", stageRunId: "sr-dev", target: "src/app/login.tsx", kind: "code", severity: "Blocker", summary: "Missing validation", status: "Open" },
@@ -798,7 +798,7 @@ describe("ReleaseWizard", () => {
       stageName: "developer",
       status: "Active",
       gateChecks: [
-        { id: "g1", stageRunId: "sr-dev", name: "context_bundle", passed: true, completedAt: "2026-01-01T00:00:01Z" },
+        { id: "g1", stageRunId: "sr-dev", name: "context_bundle", passed: true, completedAt: "2026-01-01T00:00:01Z", isEntryGate: false },
       ],
     });
     const release = makeRelease({
@@ -819,7 +819,7 @@ describe("ReleaseWizard", () => {
       stageName: "developer",
       status: "BlockedGate",
       gateChecks: [
-        { id: "g1", stageRunId: "sr-dev", name: "code_hygiene", passed: false, evidenceText: "fail: Foo.cs: TODO" },
+        { id: "g1", stageRunId: "sr-dev", name: "code_hygiene", passed: false, evidenceText: "fail: Foo.cs: TODO", isEntryGate: false },
       ],
       guidanceNotes: [
         { id: "n1", stageRunId: "sr-dev", text: "Fix the TODO in Foo.cs", addedBy: "system:gate-failure", createdAt: "2026-01-01T00:00:00Z" },
@@ -841,14 +841,38 @@ describe("ReleaseWizard", () => {
     expect(screen.getByText("Auto-generated from gate failure")).toBeInTheDocument();
   });
 
+  it("groups entry vs exit checks in the diagnostics pane and shows who owns a gate assigned elsewhere", async () => {
+    const run = makeRun({
+      id: "sr-qa",
+      stageName: "qa",
+      status: "BlockedGate",
+      gateChecks: [
+        { id: "g1", stageRunId: "sr-qa", name: "prereqs_met", passed: false, evidenceText: "handoff.md missing", isEntryGate: true, responsibleRole: "business-analyst" },
+        { id: "g2", stageRunId: "sr-qa", name: "coverage_matrix", passed: false, evidenceText: "REQ-002 not covered", isEntryGate: false, responsibleRole: "developer" },
+      ],
+    });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 2, currentStageName: "qa" },
+      stageRuns: [run],
+    });
+    const user = await openDetail(release);
+
+    await user.click(await screen.findByTestId("release-diagnostics-btn"));
+
+    expect(await screen.findByText("Entry checks")).toBeInTheDocument();
+    expect(screen.getByText("Exit checks")).toBeInTheDocument();
+    expect(screen.getByText(/owned by Business Analyst/)).toBeInTheDocument();
+    expect(screen.getByText(/owned by Developer/)).toBeInTheDocument();
+  });
+
   it("does not spin the checklist's current step once the stage is blocked (nothing is actually running)", async () => {
     const run = makeRun({
       id: "sr-dev",
       stageName: "developer",
       status: "BlockedGate",
       gateChecks: [
-        { id: "g1", stageRunId: "sr-dev", name: "context_bundle", passed: true, completedAt: "2026-01-01T00:00:01Z" },
-        { id: "g2", stageRunId: "sr-dev", name: "verify_code", passed: false, completedAt: "2026-01-01T00:00:05Z" },
+        { id: "g1", stageRunId: "sr-dev", name: "context_bundle", passed: true, completedAt: "2026-01-01T00:00:01Z", isEntryGate: false },
+        { id: "g2", stageRunId: "sr-dev", name: "verify_code", passed: false, completedAt: "2026-01-01T00:00:05Z", isEntryGate: false },
       ],
     });
     const release = makeRelease({

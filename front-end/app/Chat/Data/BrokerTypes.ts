@@ -220,6 +220,8 @@ export interface ReleaseGateCheckDto {
   evidenceText?: string | null;
   evidencePath?: string | null;
   completedAt?: string | null;
+  isEntryGate: boolean;
+  responsibleRole?: string | null;
 }
 
 export interface ReleaseSignoffDto {

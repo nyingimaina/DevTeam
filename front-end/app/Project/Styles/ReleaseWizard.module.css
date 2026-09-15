@@ -594,6 +594,12 @@
   color: var(--text-muted, #888);
 }
 
+.diagnosticsOwner {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  font-style: italic;
+}
+
 .questionBadge {
   padding: 2px 8px;
   border-radius: 999px;

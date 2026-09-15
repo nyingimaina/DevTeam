@@ -27,6 +27,9 @@ const STATUS_LABELS: Record<string, string> = {
   Ready: "Ready",
   Complete: "Done",
   Escalated: "Agent error — needs retry",
+  // Distinct from BlockedGate: this stage's own gates never ran — an EntryGate checking
+  // something the *previous* stage produced failed first.
+  BlockedEntry: "Blocked before starting — check entry requirements",
 };
 
 // Distinct copy per failure kind so "needs retry" doesn't read as one generic error —
