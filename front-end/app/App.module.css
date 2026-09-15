@@ -3,6 +3,7 @@
   flex-direction: column;
   height: 100dvh;
   background: var(--bg-app);
+  animation: crossFade 200ms ease-out;
 }
 
 .tabBar {
@@ -29,10 +30,16 @@
   text-overflow: ellipsis;
   max-width: 160px;
   flex-shrink: 0;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
 }
 
 .projectName:hover {
   background: var(--accent-soft);
+}
+
+.projectName:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .viewPort {
@@ -53,6 +60,7 @@
   gap: 16px;
   padding: 24px;
   text-align: center;
+  animation: crossFade 200ms ease-out;
 }
 
 .openFolderIcon {
@@ -60,9 +68,28 @@
 }
 
 .openFolderText {
-  color: var(--text-muted);
-  font-size: 14px;
+  color: var(--text-heading);
+  font-size: 17px;
+  font-weight: 500;
   max-width: 360px;
+}
+
+@keyframes crossFade {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app,
+  .openFolder {
+    animation: none;
+  }
 }
 
 @media (min-width: 768px) {

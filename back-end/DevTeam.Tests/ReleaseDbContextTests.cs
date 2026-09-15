@@ -109,9 +109,10 @@ public class ReleaseDbContextTests : IDisposable
         using (var db = CreateDbContext())
         {
             var release = new DevTeamRelease { WorkspacePath = @"C:\work\proj" };
+            var feature = new ReleaseFeature { Release = release, Key = "feat-001", Title = "Login" };
             var parentStage = new ReleaseStageRun
             {
-                Release = release,
+                Feature = feature,
                 StageName = "business-analyst",
                 Status = ReleaseStageStatus.Complete,
                 Summary = "Specs written",
@@ -143,7 +144,7 @@ public class ReleaseDbContextTests : IDisposable
 
             db.ReleaseSignoffs.Add(new ReleaseSignoff
             {
-                Release = release,
+                Feature = feature,
                 StageName = "requirements-approval",
                 Approved = true,
                 ApprovedBy = "user",
@@ -151,7 +152,7 @@ public class ReleaseDbContextTests : IDisposable
             });
             db.ReleaseFlowPositions.Add(new ReleaseFlowPosition
             {
-                Release = release,
+                Feature = feature,
                 CurrentStageIndex = 1,
                 CurrentStageName = "developer",
             });

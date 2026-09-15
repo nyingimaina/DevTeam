@@ -33,7 +33,7 @@ public sealed class JsonRpcConnection : IDisposable
     public JsonRpcConnection(IAcpProcess process, TimeSpan? requestTimeout = null)
     {
         _process = process;
-        _requestTimeout = requestTimeout ?? TimeSpan.FromMinutes(5);
+        _requestTimeout = requestTimeout ?? TimeSpan.FromMinutes(30);
     }
 
     /// <summary>Spawns the read loop; idempotent.</summary>

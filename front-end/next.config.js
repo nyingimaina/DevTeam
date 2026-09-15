@@ -31,6 +31,11 @@ const nextConfig = {
   transpilePackages: esmTranspilePackages(["react-markdown", "remark-gfm"]),
   ...(isDev
     ? {
+        // Next's dev-mode rewrite proxy defaults to a 30s proxyTimeout, which is far
+        // shorter than an agent turn can legitimately take. Match the backend's own
+        // long-running-prompt budget (see AgentPromptTimeout in WorkflowEngine.cs) so
+        // the proxy doesn't kill the connection out from under a healthy backend call.
+        experimental: { proxyTimeout: 30 * 60 * 1000 },
         async rewrites() {
           const broker = process.env.DEVTEAM_BROKER_URL ?? "http://127.0.0.1:5202";
           return [

@@ -26,6 +26,7 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<ReleaseGuidanceNote> ReleaseGuidanceNotes => Set<ReleaseGuidanceNote>();
     public DbSet<ReleaseUsageLedger> ReleaseUsageLedgers => Set<ReleaseUsageLedger>();
     public DbSet<ReleaseFlowPosition> ReleaseFlowPositions => Set<ReleaseFlowPosition>();
+    public DbSet<WorkspaceGitSettings> WorkspaceGitSettings => Set<WorkspaceGitSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -78,6 +79,12 @@ public sealed class DevTeamDbContext : DbContext
         });
 
         ConfigureReleaseEntities(modelBuilder);
+
+        modelBuilder.Entity<WorkspaceGitSettings>(settings =>
+        {
+            settings.HasKey(e => e.WorkspacePath);
+            settings.Property(e => e.CredentialName).HasMaxLength(256);
+        });
     }
 
     private static void ConfigureReleaseEntities(ModelBuilder modelBuilder)
@@ -88,28 +95,21 @@ public sealed class DevTeamDbContext : DbContext
             release.Property(e => e.WorkspacePath).IsRequired();
             release.Property(e => e.Title).HasMaxLength(512);
             release.Property(e => e.Version).IsRequired().HasMaxLength(64);
+            release.Property(e => e.BranchName).HasMaxLength(256);
             release.HasMany(e => e.Features)
                 .WithOne(f => f.Release)
                 .HasForeignKey(f => f.ReleaseId)
-                .OnDelete(DeleteBehavior.Cascade);
-            release.HasMany(e => e.StageRuns)
-                .WithOne(r => r.Release)
-                .HasForeignKey(r => r.ReleaseId)
-                .OnDelete(DeleteBehavior.Cascade);
-            release.HasMany(e => e.Signoffs)
-                .WithOne(s => s.Release)
-                .HasForeignKey(s => s.ReleaseId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<ReleaseFlowPosition>(position =>
         {
             position.HasKey(e => e.Id);
-            position.HasIndex(e => e.ReleaseId).IsUnique();
+            position.HasIndex(e => e.ReleaseFeatureId).IsUnique();
             position.Property(e => e.CurrentStageName).HasMaxLength(128);
-            position.HasOne(e => e.Release)
-                .WithOne(r => r.FlowPosition)
-                .HasForeignKey<ReleaseFlowPosition>(e => e.ReleaseId)
+            position.HasOne(e => e.Feature)
+                .WithOne(f => f.FlowPosition)
+                .HasForeignKey<ReleaseFlowPosition>(e => e.ReleaseFeatureId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -119,10 +119,19 @@ public sealed class DevTeamDbContext : DbContext
             feature.Property(e => e.Key).IsRequired().HasMaxLength(128);
             feature.Property(e => e.Title).IsRequired().HasMaxLength(256);
             feature.Property(e => e.Description).HasColumnType("TEXT");
+            feature.Property(e => e.BranchName).HasMaxLength(256);
             feature.HasIndex(e => new { e.ReleaseId, e.Key }).IsUnique();
             feature.HasMany(e => e.Requirements)
                 .WithOne(r => r.Feature)
                 .HasForeignKey(r => r.FeatureId)
+                .OnDelete(DeleteBehavior.Cascade);
+            feature.HasMany(e => e.StageRuns)
+                .WithOne(r => r.Feature)
+                .HasForeignKey(r => r.ReleaseFeatureId)
+                .OnDelete(DeleteBehavior.Cascade);
+            feature.HasMany(e => e.Signoffs)
+                .WithOne(s => s.Feature)
+                .HasForeignKey(s => s.ReleaseFeatureId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -154,7 +163,7 @@ public sealed class DevTeamDbContext : DbContext
             stage.HasKey(e => e.Id);
             stage.Property(e => e.StageName).IsRequired().HasMaxLength(128);
             stage.Property(e => e.Summary).HasColumnType("TEXT");
-            stage.HasIndex(e => new { e.ReleaseId, e.StageName, e.Attempt }).IsUnique();
+            stage.HasIndex(e => new { e.ReleaseFeatureId, e.StageName, e.Attempt }).IsUnique();
             stage.HasOne(e => e.Session)
                 .WithMany()
                 .HasForeignKey(e => e.SessionId)
@@ -203,7 +212,7 @@ public sealed class DevTeamDbContext : DbContext
             signoff.Property(e => e.StageName).IsRequired().HasMaxLength(128);
             signoff.Property(e => e.ApprovedBy).HasMaxLength(256);
             signoff.Property(e => e.Comment).HasColumnType("TEXT");
-            signoff.HasIndex(e => new { e.ReleaseId, e.StageName }).IsUnique();
+            signoff.HasIndex(e => new { e.ReleaseFeatureId, e.StageName }).IsUnique();
         });
 
         modelBuilder.Entity<ReleaseGuidanceNote>(note =>

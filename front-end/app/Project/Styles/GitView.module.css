@@ -42,6 +42,10 @@
   background: var(--bg-surface);
 }
 
+.manageRepoBtn {
+  margin-left: auto;
+}
+
 .branchIcon { font-size: 14px; }
 
 .branchName {

@@ -28,6 +28,20 @@ public class FileSystemServiceTests : IDisposable
 
     private static IFileSystemService CreateService() => new FileSystemService();
 
+    private sealed class FakeProcessLauncher : IProcessLauncher
+    {
+        public int CallCount { get; private set; }
+        public string? LastFileName { get; private set; }
+        public string? LastArgument { get; private set; }
+
+        public void Launch(string fileName, string argument)
+        {
+            CallCount++;
+            LastFileName = fileName;
+            LastArgument = argument;
+        }
+    }
+
     [Fact]
     public void GetRoots_IncludesHomeAndPhysicalDrive()
     {
@@ -130,5 +144,29 @@ public class FileSystemServiceTests : IDisposable
     public void CreateDirectory_Existing_Throws()
     {
         Assert.Throws<InvalidOperationException>(() => CreateService().CreateDirectory(_root));
+    }
+
+    [Fact]
+    public void RevealInExplorer_ExistingDirectory_LaunchesExplorerWithFullPath()
+    {
+        var launcher = new FakeProcessLauncher();
+        var service = new FileSystemService(launcher);
+
+        service.RevealInExplorer(_root);
+
+        Assert.Equal(1, launcher.CallCount);
+        Assert.Equal("explorer.exe", launcher.LastFileName);
+        Assert.Equal(Path.GetFullPath(_root), launcher.LastArgument);
+    }
+
+    [Fact]
+    public void RevealInExplorer_MissingDirectory_ThrowsAndDoesNotLaunch()
+    {
+        var launcher = new FakeProcessLauncher();
+        var service = new FileSystemService(launcher);
+        var missing = Path.Combine(_root, "does-not-exist");
+
+        Assert.Throws<ArgumentException>(() => service.RevealInExplorer(missing));
+        Assert.Equal(0, launcher.CallCount);
     }
 }

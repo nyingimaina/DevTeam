@@ -58,6 +58,22 @@ public class JsonRpcConnectionTests : IDisposable
     }
 
     [Fact]
+    public async Task Send_CallerCancellation_SurfacesOperationCanceledNotTimeout()
+    {
+        var connection = new JsonRpcConnection(_harness.Process, requestTimeout: TimeSpan.FromMinutes(5));
+        connection.Start();
+
+        using var callerCts = new CancellationTokenSource();
+        var pending = connection.SendAsync("session/prompt", new { sessionId = "s1" }, callerCts.Token);
+
+        await _harness.ReadRequestAsync();
+        callerCts.Cancel();
+
+        // A caller-initiated cancel must surface as cancellation, not as an internal AcpTimeout.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+    }
+
+    [Fact]
     public async Task Notification_WithoutId_RaisesEvent()
     {
         var connection = new JsonRpcConnection(_harness.Process);

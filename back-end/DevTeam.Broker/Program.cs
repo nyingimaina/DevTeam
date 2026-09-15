@@ -33,10 +33,21 @@ public partial class Program
                     "opencode executable not found. Install opencode or set the path.");
             return new OpencodeAcpProcess(exe, ["acp"]);
         });
+        builder.Services.AddSingleton<IPermissionPolicy, WorkspaceScopedPermissionPolicy>();
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
+        builder.Services.AddSingleton<ActiveTurnTracker>();
         builder.Services.AddSingleton<BrokerCoordinator>();
         builder.Services.AddSingleton<IWorkflowCoordinator>(sp => sp.GetRequiredService<BrokerCoordinator>());
+        builder.Services.AddSingleton<ModelCatalogService>();
+        builder.Services.AddSingleton<IProcessLauncher, SystemProcessLauncher>();
         builder.Services.AddSingleton<IFileSystemService, FileSystemService>();
+#pragma warning disable CA1416 // App is Windows-only in practice; WmiProcessInspector is annotated accordingly.
+        builder.Services.AddSingleton<IOsProcessInspector, WmiProcessInspector>();
+#pragma warning restore CA1416
+        builder.Services.AddSingleton<IWorkspaceProcessCleanupService, WorkspaceProcessCleanupService>();
+#pragma warning disable CA1416 // App is Windows-only in practice; DpapiGitCredentialStore is annotated accordingly.
+        builder.Services.AddSingleton<IGitCredentialStore, DpapiGitCredentialStore>();
+#pragma warning restore CA1416
         builder.Services.AddSingleton<IProcessRunner, SystemProcessRunner>();
         builder.Services.AddSingleton<IGate[]>(sp =>
         {
@@ -54,6 +65,7 @@ public partial class Program
         builder.Services.ConfigureHttpJsonOptions(options =>
         {
             options.SerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
+            options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
         });
 
         var app = builder.Build();
@@ -64,6 +76,7 @@ public partial class Program
             db.Database.EnsureCreated();
         }
 
+        app.UseRequestDiagnostics();
         app.MapHub<BrokerHub>("/hub");
         app.MapApi();
 
@@ -102,12 +115,30 @@ public static class SpaFallbackExtensions
                 !Path.HasExtension(context.Request.Path) &&
                 context.Request.Path != "/hub")
             {
-                context.Response.ContentType = "text/html";
-                await context.Response.SendFileAsync(Path.Combine(app.Environment.WebRootPath, "index.html"));
-                return;
+                if (TryResolveIndexPath(app.Environment.WebRootPath) is { } indexPath)
+                {
+                    context.Response.ContentType = "text/html";
+                    await context.Response.SendFileAsync(indexPath);
+                    return;
+                }
             }
 
             await next();
         });
+    }
+
+    /// <summary>
+    /// Resolves <c>wwwroot/index.html</c> only when the web UI is actually
+    /// deployed next to the broker binary. Returns null (falling through to the
+    /// pipeline) when there is no web root or the index file is missing, instead
+    /// of throwing and surfacing a 500.
+    /// </summary>
+    internal static string? TryResolveIndexPath(string? webRootPath)
+    {
+        if (string.IsNullOrEmpty(webRootPath))
+            return null;
+
+        var indexPath = Path.Combine(webRootPath, "index.html");
+        return File.Exists(indexPath) ? indexPath : null;
     }
 }

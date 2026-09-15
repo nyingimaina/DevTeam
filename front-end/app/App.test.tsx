@@ -1,30 +1,8 @@
 import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import App from "./App";
 
-jest.mock("./Chat/State/ChatLogic", () => {
-  return {
-    __esModule: true,
-    default: class MockChatLogic {
-      repository = {
-        brokerReady: true,
-        agentName: "test-agent",
-        brokerVersion: "1.0",
-        activeSession: null,
-        sessions: [],
-        currentModelId: undefined,
-        currentModeId: undefined,
-        busy: false,
-        isPending: false,
-        error: null,
-        liveAssistant: undefined,
-      };
-      setRerender() {}
-      initializeAsync = jest.fn().mockResolvedValue(undefined);
-      disposeAsync = jest.fn().mockResolvedValue(undefined);
-    },
-  };
-});
+const cleanupWorkspaceAsync = jest.fn().mockResolvedValue([]);
 
 jest.mock("./Chat/Data/BrokerApi", () => {
   return {
@@ -32,30 +10,29 @@ jest.mock("./Chat/Data/BrokerApi", () => {
     default: jest.fn().mockImplementation(() => ({
       getHealthAsync: jest.fn().mockResolvedValue({ status: "ok", version: "1.0" }),
       getInfoAsync: jest.fn().mockResolvedValue({ agentName: "test", protocolVersion: "1" }),
-      listSessionsAsync: jest.fn().mockResolvedValue([]),
       listReleasesAsync: jest.fn().mockResolvedValue([]),
       listFileSystemRootsAsync: jest.fn().mockResolvedValue([]),
+      cleanupWorkspaceAsync,
+      getCurrentTurnAsync: jest.fn().mockResolvedValue(undefined),
+      cancelCurrentTurnAsync: jest.fn().mockResolvedValue(true),
     })),
   };
 });
 
 jest.mock("./Project/Release/ReleaseWizard", () => {
-  return {
-    __esModule: true,
-    default: ({ testIdPrefix, workspacePath }: { testIdPrefix?: string; workspacePath?: string }) => (
+  function ReleaseWizardMock({ testIdPrefix, workspacePath }: { testIdPrefix?: string; workspacePath?: string }) {
+    const [count, setCount] = React.useState(0);
+    return (
       <div data-testid={testIdPrefix ?? "release-wizard"}>
         ReleaseWizard Mock — {workspacePath}
+        <button onClick={() => setCount((c) => c + 1)}>Increment Release Count</button>
+        <span data-testid="release-count">{count}</span>
       </div>
-    ),
-  };
-});
-
-jest.mock("./Chat/UI/Chat", () => {
+    );
+  }
   return {
     __esModule: true,
-    default: ({ workspacePath }: { workspacePath?: string }) => (
-      <div data-testid="chat-mock">Chat Mock — {workspacePath}</div>
-    ),
+    default: ReleaseWizardMock,
   };
 });
 
@@ -81,6 +58,8 @@ jest.mock("./Project/UI/PathBrowser", () => {
 
 beforeEach(() => {
   localStorage.clear();
+  cleanupWorkspaceAsync.mockReset();
+  cleanupWorkspaceAsync.mockResolvedValue([]);
 });
 
 describe("App", () => {
@@ -88,7 +67,6 @@ describe("App", () => {
     render(<App />);
     expect(screen.getByTestId("path-browser")).toBeInTheDocument();
     expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("chat-mock")).not.toBeInTheDocument();
   });
 
   it("opens project when folder is picked", () => {
@@ -129,20 +107,15 @@ describe("App", () => {
     expect(localStorage.getItem("devteam-project")).toBeNull();
   });
 
-  it("switches to Chat tab", () => {
+  it("does not show a Chat tab", () => {
     render(<App />);
     fireEvent.click(screen.getByText("Pick"));
-    fireEvent.click(screen.getByText("Chat"));
-    expect(screen.getByTestId("chat-mock")).toBeInTheDocument();
-    expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
+    expect(screen.queryByText("Chat")).not.toBeInTheDocument();
   });
 
-  it("passes workspacePath to all three tabs", () => {
+  it("passes workspacePath to both tabs", () => {
     render(<App />);
     fireEvent.click(screen.getByText("Pick"));
-
-    fireEvent.click(screen.getByText("Chat"));
-    expect(screen.getByText(/Chat Mock/)).toHaveTextContent("C:\\work\\my-project");
 
     fireEvent.click(screen.getByText("Git"));
     expect(screen.getByText(/Git Mock/)).toHaveTextContent("C:\\work\\my-project");
@@ -151,12 +124,81 @@ describe("App", () => {
     expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\my-project");
   });
 
+  it("keeps a previously opened tab's state alive when switching away and back", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+
+    fireEvent.click(screen.getByText("Increment Release Count"));
+    expect(screen.getByTestId("release-count")).toHaveTextContent("1");
+
+    fireEvent.click(screen.getByText("Git"));
+    expect(screen.queryByTestId("release-wizard")).not.toBeVisible();
+
+    fireEvent.click(screen.getByText("Releases"));
+    expect(screen.getByTestId("release-count")).toHaveTextContent("1");
+  });
+
   it("switches to Git tab", () => {
     render(<App />);
     fireEvent.click(screen.getByText("Pick"));
     fireEvent.click(screen.getByText("Git"));
-    expect(screen.getByTestId("git-mock")).toBeInTheDocument();
-    expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("chat-mock")).not.toBeInTheDocument();
+    expect(screen.getByTestId("git-mock")).toBeVisible();
+    expect(screen.queryByTestId("release-wizard")).not.toBeVisible();
+  });
+
+  it("sweeps the newly opened path for stray processes", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+
+    await waitFor(() => {
+      expect(cleanupWorkspaceAsync).toHaveBeenCalledWith("C:\\work\\my-project");
+    });
+  });
+
+  it("sweeps the path being left when closing a project", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+    await waitFor(() => expect(cleanupWorkspaceAsync).toHaveBeenCalledTimes(1));
+    cleanupWorkspaceAsync.mockClear();
+
+    fireEvent.click(screen.getByText("my-project"));
+
+    await waitFor(() => {
+      expect(cleanupWorkspaceAsync).toHaveBeenCalledWith("C:\\work\\my-project");
+    });
+  });
+
+  it("shows a notice listing stopped processes after opening a project", async () => {
+    cleanupWorkspaceAsync.mockResolvedValue([
+      { processId: 1, name: "node.exe" },
+      { processId: 2, name: "GamePlay.Api.exe" },
+    ]);
+    render(<App />);
+
+    fireEvent.click(screen.getByText("Pick"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Stopped 2 processes from my-project: node.exe, GamePlay.Api.exe")).toBeInTheDocument();
+    });
+  });
+
+  it("shows no notice when the sweep finds nothing", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+
+    await waitFor(() => expect(cleanupWorkspaceAsync).toHaveBeenCalled());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("still opens the project normally when the cleanup sweep fails", async () => {
+    cleanupWorkspaceAsync.mockRejectedValue(new Error("boom"));
+    render(<App />);
+
+    fireEvent.click(screen.getByText("Pick"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });

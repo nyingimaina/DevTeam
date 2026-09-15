@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace DevTeam.Broker.Server;
 
 /// <summary>
@@ -14,10 +16,45 @@ public interface IFileSystemService
     FileSystemStatDto GetStat(string path);
 
     FileSystemStatDto CreateDirectory(string path);
+
+    void RevealInExplorer(string path);
+}
+
+/// <summary>Launches an OS-level executable. A seam so RevealInExplorer is testable without spawning real processes.</summary>
+public interface IProcessLauncher
+{
+    void Launch(string fileName, string argument);
+}
+
+public sealed class SystemProcessLauncher : IProcessLauncher
+{
+    public void Launch(string fileName, string argument)
+    {
+        var psi = new ProcessStartInfo(fileName) { UseShellExecute = false };
+        psi.ArgumentList.Add(argument);
+        Process.Start(psi);
+    }
 }
 
 public sealed class FileSystemService : IFileSystemService
 {
+    private readonly IProcessLauncher _launcher;
+
+    public FileSystemService() : this(new SystemProcessLauncher())
+    {
+    }
+
+    public FileSystemService(IProcessLauncher launcher)
+    {
+        _launcher = launcher;
+    }
+
+    public void RevealInExplorer(string path)
+    {
+        var full = NormalizeExistingDirectory(path);
+        _launcher.Launch("explorer.exe", full);
+    }
+
     public IReadOnlyList<FileSystemRootDto> GetRoots()
     {
         var roots = new List<FileSystemRootDto>();

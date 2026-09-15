@@ -32,6 +32,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     private readonly IDbContextFactory<DevTeamDbContext> _dbFactory;
     private readonly IEventBroadcaster _broadcaster;
     private readonly ILogger<BrokerCoordinator> _logger;
+    private readonly ActiveTurnTracker _turnTracker;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
@@ -42,12 +43,14 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         IAgentSpoke spoke,
         IDbContextFactory<DevTeamDbContext> dbFactory,
         IEventBroadcaster broadcaster,
-        ILogger<BrokerCoordinator> logger)
+        ILogger<BrokerCoordinator> logger,
+        ActiveTurnTracker turnTracker)
     {
         _spoke = spoke;
         _dbFactory = dbFactory;
         _broadcaster = broadcaster;
         _logger = logger;
+        _turnTracker = turnTracker;
         _spoke.EventReceived += OnEventReceived;
 
         try
@@ -101,7 +104,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     }
 
     public async Task<SessionSummary> NewSessionAsync(
-        string workspacePath, string? modelId, CancellationToken cancellationToken)
+        string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken cancellationToken)
     {
         await EnsureInitializedAsync(cancellationToken);
         var acpSession = await _spoke.NewSessionAsync(workspacePath, cancellationToken);
@@ -116,6 +119,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             AcpSessionId = acpSession.SessionId,
             ModelId = effectiveModelId,
             ModeId = effectiveModeId,
+            AllowedWritePrefixesJson = allowedWritePrefixes is null ? null : JsonSerializer.Serialize(allowedWritePrefixes),
         };
 
         await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
@@ -127,16 +131,6 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         var session = ToSummary(entity, acpSession.ConfigOptions);
         _logger.LogInformation("Created session {SessionId} for {Workspace}", entity.Id, workspacePath);
         return session;
-    }
-
-    public async Task<IReadOnlyList<SessionSummary>> ListSessionsAsync(CancellationToken cancellationToken)
-    {
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var sessions = await db.Sessions.ToListAsync(cancellationToken);
-        return sessions
-            .OrderByDescending(s => s.UpdatedAt)
-            .Select(s => ToSummary(s, []))
-            .ToArray();
     }
 
     public async Task<SessionDetail?> GetSessionDetailAsync(Guid sessionId, CancellationToken cancellationToken)
@@ -166,71 +160,11 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                 .ToArray());
     }
 
-    public async Task<PromptResponse> PromptAsync(
-        Guid sessionId, string text, CancellationToken cancellationToken)
-    {
-        await EnsureInitializedAsync(cancellationToken);
-        await _turnLock.WaitAsync(cancellationToken);
-        try
-        {
-            string acpSessionId;
-            await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
-            {
-                var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
-                    ?? throw new KeyNotFoundException($"Session {sessionId} not found.");
-                acpSessionId = session.AcpSessionId;
-                db.Messages.Add(new Message
-                {
-                    SessionId = session.Id,
-                    Role = "user",
-                    BodyText = text,
-                });
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                await db.SaveChangesAsync(cancellationToken);
-            }
-
-            _turn = new TurnCollector(sessionId);
-
-            var result = await _spoke.PromptAsync(
-                acpSessionId,
-                [new AgentPromptPart(PromptPartTypeText, text)],
-                cancellationToken);
-
-            _turn!.SetUsage(result.Usage);
-            await PersistAssistantTurnAsync(sessionId, _turn, cancellationToken);
-            await FireAsync(sessionId, EventTurnEnd, new
-            {
-                result.StopReason,
-                Usage = result.Usage is null ? null : new UsageDto(
-                    result.Usage.InputTokens, result.Usage.OutputTokens,
-                    result.Usage.TotalTokens, result.Usage.CachedReadTokens),
-            }, cancellationToken);
-
-            return new PromptResponse(
-                sessionId,
-                result.StopReason,
-                result.Usage?.InputTokens ?? 0,
-                result.Usage?.OutputTokens ?? 0,
-                result.Usage?.TotalTokens ?? 0);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Prompt failed for session {SessionId}.", sessionId);
-            await FireAsync(sessionId, EventPromptError, new { ex.Message }, CancellationToken.None);
-            throw;
-        }
-        finally
-        {
-            _turn = null;
-            _turnLock.Release();
-        }
-    }
-
     /// <summary>
-    /// Same as <see cref="PromptAsync"/>, but recovers when the agent process no longer
-    /// recognizes the session's stored ACP id (e.g. the broker restarted and respawned
-    /// opencode since this session was created): it transparently opens a fresh ACP
-    /// session for the same workspace, persists the new id, and retries once.
+    /// Recovers when the agent process no longer recognizes the session's stored ACP id
+    /// (e.g. the broker restarted and respawned opencode since this session was created):
+    /// it transparently opens a fresh ACP session for the same workspace, persists the
+    /// new id, and retries once.
     /// </summary>
     public async Task<PromptResponse> PromptWithSessionRecoveryAsync(
         Guid sessionId, string text, CancellationToken cancellationToken)
@@ -259,13 +193,16 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
 
             _turn = new TurnCollector(sessionId);
 
+            using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var turnScope = _turnTracker.Begin(sessionId, acpSessionId, text, turnCts);
+
             AgentPromptResult result;
             try
             {
                 result = await _spoke.PromptAsync(
                     acpSessionId,
                     [new AgentPromptPart(PromptPartTypeText, text)],
-                    cancellationToken);
+                    turnCts.Token);
             }
             catch (RpcException ex) when (IsAcpSessionNotFound(ex))
             {
@@ -274,12 +211,12 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                     "(likely a broker restart); opening a new agent session and retrying.",
                     acpSessionId, sessionId);
 
-                acpSessionId = await RecreateAcpSessionAsync(sessionId, workspacePath, cancellationToken);
+                acpSessionId = await RecreateAcpSessionAsync(sessionId, workspacePath, turnCts.Token);
                 _turn = new TurnCollector(sessionId);
                 result = await _spoke.PromptAsync(
                     acpSessionId,
                     [new AgentPromptPart(PromptPartTypeText, text)],
-                    cancellationToken);
+                    turnCts.Token);
             }
 
             _turn!.SetUsage(result.Usage);
@@ -312,6 +249,30 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         }
     }
 
+    /// <summary>Gets whatever agent turn is currently running (or stuck), if any.</summary>
+    public ActiveTurnInfo? GetCurrentTurn() => _turnTracker.Current;
+
+    /// <summary>
+    /// Cancels whatever agent turn is currently running (or stuck), freeing the turn
+    /// lock for the next queued caller. Best-effort tells the agent to stop too.
+    /// </summary>
+    public async Task<bool> CancelCurrentTurnAsync(CancellationToken cancellationToken)
+    {
+        if (!_turnTracker.TryCancelCurrent(out var info) || info is null)
+            return false;
+
+        try
+        {
+            await _spoke.CancelAsync(info.AcpSessionId, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to notify the agent of cancellation for session {AcpSessionId}.", info.AcpSessionId);
+        }
+
+        return true;
+    }
+
     private static bool IsAcpSessionNotFound(RpcException ex)
         => ex.Message.Contains("session not found", StringComparison.OrdinalIgnoreCase);
 
@@ -332,18 +293,33 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     public async Task<string> SetModelAsync(
         Guid sessionId, string modelId, CancellationToken cancellationToken)
     {
-string acpSessionId;
-            await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
-            {
-                var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
-                    ?? throw new KeyNotFoundException($"Session {sessionId} not found.");
-                acpSessionId = session.AcpSessionId;
-                session.ModelId = modelId;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                await db.SaveChangesAsync(cancellationToken);
-            }
+        string acpSessionId;
+        string workspacePath;
+        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        {
+            var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
+                ?? throw new KeyNotFoundException($"Session {sessionId} not found.");
+            acpSessionId = session.AcpSessionId;
+            workspacePath = session.WorkspacePath;
+            session.ModelId = modelId;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+        }
 
-        await _spoke.SetModelAsync(acpSessionId, modelId, cancellationToken);
+        try
+        {
+            await _spoke.SetModelAsync(acpSessionId, modelId, cancellationToken);
+        }
+        catch (RpcException ex) when (IsAcpSessionNotFound(ex))
+        {
+            _logger.LogWarning(
+                "ACP session {AcpSessionId} for {SessionId} was not recognized by the agent " +
+                "(likely a broker restart); opening a new agent session and retrying.",
+                acpSessionId, sessionId);
+            var recreated = await RecreateAcpSessionAsync(sessionId, workspacePath, cancellationToken);
+            await _spoke.SetModelAsync(recreated, modelId, cancellationToken);
+        }
+
         _logger.LogInformation("Session {SessionId} switched to model {Model}", sessionId, modelId);
         return modelId;
     }
@@ -352,32 +328,34 @@ string acpSessionId;
         Guid sessionId, string modeId, CancellationToken cancellationToken)
     {
         string acpSessionId;
+        string workspacePath;
         await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
         {
             var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
                 ?? throw new KeyNotFoundException($"Session {sessionId} not found.");
             acpSessionId = session.AcpSessionId;
+            workspacePath = session.WorkspacePath;
             session.ModeId = modeId;
             session.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
         }
 
-        await _spoke.SetModeAsync(acpSessionId, modeId, cancellationToken);
+        try
+        {
+            await _spoke.SetModeAsync(acpSessionId, modeId, cancellationToken);
+        }
+        catch (RpcException ex) when (IsAcpSessionNotFound(ex))
+        {
+            _logger.LogWarning(
+                "ACP session {AcpSessionId} for {SessionId} was not recognized by the agent " +
+                "(likely a broker restart); opening a new agent session and retrying.",
+                acpSessionId, sessionId);
+            var recreated = await RecreateAcpSessionAsync(sessionId, workspacePath, cancellationToken);
+            await _spoke.SetModeAsync(recreated, modeId, cancellationToken);
+        }
+
         _logger.LogInformation("Session {SessionId} switched to mode {Mode}", sessionId, modeId);
         return modeId;
-    }
-
-    public async Task<bool> DeleteSessionAsync(Guid sessionId, CancellationToken cancellationToken)
-    {
-        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken);
-        if (session is null)
-            return false;
-
-        db.Sessions.Remove(session);
-        await db.SaveChangesAsync(cancellationToken);
-        _logger.LogInformation("Deleted session {SessionId}", sessionId);
-        return true;
     }
 
     // ─── event handling ───────────────────────────────────────────────────────

@@ -21,6 +21,8 @@ internal sealed class ScriptedAcpProcess : IAcpProcess
         _writer = new StreamWriter(output, new UTF8Encoding(false)) { NewLine = "\n", AutoFlush = true };
     }
 
+    public int ProcessId => -1;
+
     public Task<string?> ReadLineAsync(CancellationToken cancellationToken) => _reader.ReadLineAsync(cancellationToken).AsTask();
 
     public Task WriteLineAsync(string line, CancellationToken cancellationToken)

@@ -62,7 +62,9 @@ public record GitRequest(
     [property: JsonPropertyName("branchName")] string? BranchName = null,
     [property: JsonPropertyName("message")] string? Message = null,
     [property: JsonPropertyName("sourceBranch")] string? SourceBranch = null,
-    [property: JsonPropertyName("targetBranch")] string? TargetBranch = null);
+    [property: JsonPropertyName("targetBranch")] string? TargetBranch = null,
+    [property: JsonPropertyName("remoteUrl")] string? RemoteUrl = null,
+    [property: JsonPropertyName("authToken")] string? AuthToken = null);
 
 public record GitResponse(
     [property: JsonPropertyName("success")] bool Success,
@@ -74,7 +76,10 @@ public record GitResponse(
     [property: JsonPropertyName("isClean")] bool IsClean = true,
     [property: JsonPropertyName("ahead")] int Ahead = 0,
     [property: JsonPropertyName("behind")] int Behind = 0,
-    [property: JsonPropertyName("commits")] GitCommit[]? Commits = null);
+    [property: JsonPropertyName("commits")] GitCommit[]? Commits = null,
+    [property: JsonPropertyName("hasRemote")] bool HasRemote = false,
+    [property: JsonPropertyName("remoteUrl")] string? RemoteUrl = null,
+    [property: JsonPropertyName("changedFiles")] string[]? ChangedFiles = null);
 
 public record GitCommit(
     [property: JsonPropertyName("hash")] string Hash,

@@ -64,6 +64,10 @@ body {
   line-height: 1.5;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 button {
   font: inherit;
   color: inherit;

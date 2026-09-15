@@ -1,6 +1,8 @@
+using DevTeam.Broker.Domain;
 using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
+using Microsoft.EntityFrameworkCore;
 
 namespace DevTeam.Broker;
 
@@ -75,20 +77,83 @@ public static class ApiEndpoints
             return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
         });
 
-        // ─── stage endpoints ─────────────────────────────────────────────
-        app.MapPost("/api/releases/{releaseId:guid}/start-stage", async (Guid releaseId, HttpContext ctx) =>
+        // ─── git remote management ──────────────────────────────────────
+        app.MapGet("/api/git/remote", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            var result = await git.GetRemoteAsync(workspacePath, ctx.RequestAborted);
+            if (!result.Success) return Results.BadRequest(result.Message);
+
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var settings = await context.WorkspaceGitSettings.FindAsync([workspacePath], ctx.RequestAborted);
+            return Results.Ok(new GitRemoteResponse(result.RemoteUrl, settings?.CredentialName));
+        });
+
+        app.MapPost("/api/git/remote", async (SetGitRemoteRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+            if (string.IsNullOrWhiteSpace(request.Url))
+                return Results.BadRequest("Url is required.");
+
+            var git = ctx.RequestServices.GetRequiredService<IGitService>();
+            var result = await git.SetRemoteAsync(request.WorkspacePath, request.Url, ctx.RequestAborted);
+            if (!result.Success) return Results.BadRequest(result.Message);
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var settings = await context.WorkspaceGitSettings.FindAsync([request.WorkspacePath], ctx.RequestAborted);
+            if (settings is null)
+            {
+                settings = new WorkspaceGitSettings { WorkspacePath = request.WorkspacePath };
+                context.WorkspaceGitSettings.Add(settings);
+            }
+            settings.CredentialName = request.CredentialName;
+            await context.SaveChangesAsync(ctx.RequestAborted);
+
+            return Results.Ok(new GitRemoteResponse(result.RemoteUrl, settings.CredentialName));
+        });
+
+        app.MapPost("/api/git/credential", (SetGitCredentialRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return Results.BadRequest("Name is required.");
+            if (string.IsNullOrWhiteSpace(request.Token))
+                return Results.BadRequest("Token is required.");
+
+            var store = ctx.RequestServices.GetRequiredService<IGitCredentialStore>();
+            store.SetToken(request.Name, request.Token);
+            return Results.Ok(new { ok = true });
+        });
+
+        app.MapGet("/api/git/credentials", (HttpContext ctx) =>
+        {
+            var store = ctx.RequestServices.GetRequiredService<IGitCredentialStore>();
+            return Results.Ok(new GitCredentialsResponse(store.ListNames()));
+        });
+
+        // ─── feature-scoped pipeline endpoints (GitFlow) ───────────────────
+        app.MapPost("/api/features/{featureId:guid}/start-stage", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var stageRun = await engine.StartStageAsync(releaseId, ctx.RequestAborted);
+                var stageRun = await engine.StartStageAsync(featureId, ctx.RequestAborted);
                 return Results.Ok(stageRun);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
+            {
+                return Results.Conflict("The agent turn was cancelled.");
+            }
         });
 
-        app.MapPost("/api/releases/{releaseId:guid}/send-message", async (Guid releaseId, SendMessageRequest request, HttpContext ctx) =>
+        app.MapPost("/api/features/{featureId:guid}/send-message", async (Guid featureId, SendMessageRequest request, HttpContext ctx) =>
         {
             if (string.IsNullOrWhiteSpace(request.Text))
                 return Results.BadRequest("Text is required.");
@@ -96,38 +161,42 @@ public static class ApiEndpoints
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var result = await engine.SendMessageEnforcingSingleQuestionAsync(releaseId, request.Text, ctx.RequestAborted);
+                var result = await engine.SendMessageEnforcingSingleQuestionAsync(featureId, request.Text, ctx.RequestAborted);
                 return Results.Ok(result);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
+            {
+                return Results.Conflict("The agent turn was cancelled.");
+            }
         });
 
-        app.MapPost("/api/releases/{releaseId:guid}/run-gates", async (Guid releaseId, HttpContext ctx) =>
+        app.MapPost("/api/features/{featureId:guid}/run-gates", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var release = await engine.RunGatesAsync(releaseId, ctx.RequestAborted);
+                var release = await engine.RunGatesAsync(featureId, ctx.RequestAborted);
                 return Results.Ok(release);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
-        app.MapPost("/api/releases/{releaseId:guid}/run-stage", async (Guid releaseId, HttpContext ctx) =>
+        app.MapPost("/api/features/{featureId:guid}/run-stage", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var release = await engine.RunStageAsync(releaseId, ctx.RequestAborted);
+                var release = await engine.RunStageAsync(featureId, ctx.RequestAborted);
                 return Results.Ok(release);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
-        app.MapPost("/api/releases/{releaseId:guid}/push-back", async (Guid releaseId, PushBackRequest request, HttpContext ctx) =>
+        app.MapPost("/api/features/{featureId:guid}/push-back", async (Guid featureId, PushBackRequest request, HttpContext ctx) =>
         {
             if (string.IsNullOrWhiteSpace(request.TargetStageName))
                 return Results.BadRequest("TargetStageName is required.");
@@ -136,33 +205,111 @@ public static class ApiEndpoints
             try
             {
                 var release = await engine.PushBackAsync(
-                    releaseId, request.TargetStageName, request.Instructions, ctx.RequestAborted);
+                    featureId, request.TargetStageName, request.Instructions, ctx.RequestAborted);
                 return Results.Ok(release);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
-        app.MapGet("/api/releases/{releaseId:guid}/pipeline", async (Guid releaseId, HttpContext ctx) =>
+        app.MapGet("/api/features/{featureId:guid}/pipeline", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var pipeline = await engine.GetPipelineAsync(releaseId, ctx.RequestAborted);
+                var pipeline = await engine.GetPipelineAsync(featureId, ctx.RequestAborted);
                 return Results.Ok(pipeline);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         });
 
-        app.MapGet("/api/releases/{releaseId:guid}/stages/{stageRunId:guid}/messages", async (Guid releaseId, Guid stageRunId, HttpContext ctx) =>
+        app.MapGet("/api/features/{featureId:guid}/stages/{stageRunId:guid}/messages", async (Guid featureId, Guid stageRunId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             try
             {
-                var messages = await engine.GetStageMessagesAsync(releaseId, stageRunId, ctx.RequestAborted);
+                var messages = await engine.GetStageMessagesAsync(featureId, stageRunId, ctx.RequestAborted);
                 return Results.Ok(messages);
             }
             catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+
+        app.MapGet("/api/features/{featureId:guid}/stages/{stageRunId:guid}/artifacts", async (Guid featureId, Guid stageRunId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var artifacts = await engine.GetStageArtifactsAsync(featureId, stageRunId, ctx.RequestAborted);
+                return Results.Ok(artifacts);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapGet("/api/features/{featureId:guid}/workspace-changes", async (Guid featureId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var changes = await engine.GetWorkspaceChangesAsync(featureId, ctx.RequestAborted);
+                return Results.Ok(changes);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+
+        app.MapPost("/api/features/{featureId:guid}/advance", async (Guid featureId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.AdvanceAsync(featureId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Feature {featureId} not found."); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapPost("/api/features/{featureId:guid}/signoff", async (Guid featureId, SignoffRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.StageName))
+                return Results.BadRequest("StageName is required.");
+            if (string.IsNullOrWhiteSpace(request.Role))
+                return Results.BadRequest("Role is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.SignoffAsync(featureId, request.StageName, request.Role, request.Comment, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Feature {featureId} not found."); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        app.MapGet("/api/releases/{releaseId:guid}/models", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var models = await engine.GetAvailableModelsAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(models);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+        });
+
+        app.MapPost("/api/releases/{releaseId:guid}/features", async (Guid releaseId, CreateFeatureRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.FeatureKey))
+                return Results.BadRequest("FeatureKey is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var feature = await engine.CreateFeatureAsync(releaseId, request.FeatureKey, ctx.RequestAborted);
+                return Results.Created($"/api/features/{feature.Id}", feature);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
         // ─── release endpoints ────────────────────────────────────────────
@@ -178,10 +325,10 @@ public static class ApiEndpoints
             return Results.Created($"/api/releases/{release.Id}", release);
         });
 
-        app.MapGet("/api/releases", async (HttpContext ctx) =>
+        app.MapGet("/api/releases", async (string? workspacePath, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            var releases = await engine.ListReleasesAsync(ctx.RequestAborted);
+            var releases = await engine.ListReleasesAsync(workspacePath, ctx.RequestAborted);
             return Results.Ok(releases);
         });
 
@@ -199,47 +346,6 @@ public static class ApiEndpoints
             }
         });
 
-        app.MapPost("/api/releases/{releaseId:guid}/advance", async (Guid releaseId, HttpContext ctx) =>
-        {
-            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.AdvanceAsync(releaseId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Release {releaseId} not found.");
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
-        });
-
-        app.MapPost("/api/releases/{releaseId:guid}/signoff", async (Guid releaseId, SignoffRequest request, HttpContext ctx) =>
-        {
-            if (string.IsNullOrWhiteSpace(request.StageName))
-                return Results.BadRequest("StageName is required.");
-            if (string.IsNullOrWhiteSpace(request.Role))
-                return Results.BadRequest("Role is required.");
-
-            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.SignoffAsync(releaseId, request.StageName, request.Role, request.Comment, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Release {releaseId} not found.");
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
-        });
-
         app.MapGet("/healthz", (HttpContext ctx) =>
         {
             var appInfo = ctx.RequestServices.GetRequiredService<IAppInfo>();
@@ -252,52 +358,14 @@ public static class ApiEndpoints
             return Results.Ok(await coordinator.GetAgentInfoAsync(ctx.RequestAborted));
         });
 
-        app.MapGet("/api/sessions", async (HttpContext ctx) =>
-        {
-            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
-            return Results.Ok(await coordinator.ListSessionsAsync(ctx.RequestAborted));
-        });
-
-        app.MapPost("/api/sessions", async (NewSessionRequest request, HttpContext ctx) =>
-        {
-            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
-                return Results.BadRequest("WorkspacePath is required.");
-
-            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
-            var session = await coordinator.NewSessionAsync(
-                request.WorkspacePath, request.ModelId, ctx.RequestAborted);
-            return Results.Created($"/api/sessions/{session.SessionId}", session);
-        });
-
+        // GET (read the current model/mode) plus /model and /mode themselves are the only
+        // session routes left — ReleaseWizard's stage-header ModelPicker uses all three for
+        // the session opened by start-stage.
         app.MapGet("/api/sessions/{sessionId:guid}", async (Guid sessionId, HttpContext ctx) =>
         {
             var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
             var detail = await coordinator.GetSessionDetailAsync(sessionId, ctx.RequestAborted);
             return detail is null ? Results.NotFound() : Results.Ok(detail);
-        });
-
-        app.MapDelete("/api/sessions/{sessionId:guid}", async (Guid sessionId, HttpContext ctx) =>
-        {
-            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
-            var deleted = await coordinator.DeleteSessionAsync(sessionId, ctx.RequestAborted);
-            return deleted ? Results.NoContent() : Results.NotFound();
-        });
-
-        app.MapPost("/api/sessions/{sessionId:guid}/prompt", async (Guid sessionId, PromptRequest request, HttpContext ctx) =>
-        {
-            if (string.IsNullOrWhiteSpace(request.Text))
-                return Results.BadRequest("Text is required.");
-
-            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
-            try
-            {
-                var result = await coordinator.PromptWithSessionRecoveryAsync(sessionId, request.Text, ctx.RequestAborted);
-                return Results.Ok(result);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Session {sessionId} not found.");
-            }
         });
 
         app.MapPost("/api/sessions/{sessionId:guid}/model", async (Guid sessionId, SetModelRequest request, HttpContext ctx) =>
@@ -391,6 +459,47 @@ public static class ApiEndpoints
             {
                 return Results.Conflict(ex.Message);
             }
+        });
+
+        app.MapPost("/api/fs/reveal", (RevealInExplorerRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Path))
+                return Results.BadRequest("Path is required.");
+
+            var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
+            try
+            {
+                fs.RevealInExplorer(request.Path);
+                return Results.NoContent();
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+
+        app.MapPost("/api/fs/cleanup", (CleanupWorkspaceRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath) || !Path.IsPathRooted(request.WorkspacePath))
+                return Results.BadRequest("An absolute WorkspacePath is required.");
+
+            var cleanup = ctx.RequestServices.GetRequiredService<IWorkspaceProcessCleanupService>();
+            return Results.Ok(cleanup.CleanupWorkspace(request.WorkspacePath));
+        });
+
+        // ─── active turn (the one agent turn the broker can run at a time) ────
+        app.MapGet("/api/turns/current", (HttpContext ctx) =>
+        {
+            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
+            var turn = coordinator.GetCurrentTurn();
+            return turn is null ? Results.NoContent() : Results.Ok(turn);
+        });
+
+        app.MapPost("/api/turns/current/cancel", async (HttpContext ctx) =>
+        {
+            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
+            var cancelled = await coordinator.CancelCurrentTurnAsync(ctx.RequestAborted);
+            return cancelled ? Results.Ok() : Results.NotFound();
         });
     }
 }

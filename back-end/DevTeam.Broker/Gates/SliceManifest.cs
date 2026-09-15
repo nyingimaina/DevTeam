@@ -1,3 +1,4 @@
+using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -66,7 +67,17 @@ public static class SliceManifestIO
             .IgnoreUnmatchedProperties()
             .WithNamingConvention(CamelCaseNamingConvention.Instance)
             .Build();
-        return deserializer.Deserialize<SliceManifest>(File.ReadAllText(path));
+        try
+        {
+            return deserializer.Deserialize<SliceManifest>(File.ReadAllText(path));
+        }
+        catch (YamlException)
+        {
+            // The manifest is hand-editable by any role's agent (it lives under the feature's
+            // own artifacts directory), so malformed YAML on disk is an expected failure mode,
+            // not a bug — treat it the same as "no manifest yet" rather than crashing the caller.
+            return null;
+        }
     }
 }
 

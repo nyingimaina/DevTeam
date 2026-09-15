@@ -6,19 +6,6 @@ export interface ModelOption {
   description?: string | null;
 }
 
-export interface SessionSummary {
-  sessionId: string;
-  acpSessionId: string;
-  workspacePath: string;
-  title?: string | null;
-  modelId?: string | null;
-  modeId?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  models: ModelOption[];
-  modes: ModelOption[];
-}
-
 export interface PartDto {
   id: string;
   kind: string;
@@ -53,14 +40,6 @@ export interface SessionDetail {
   models: ModelOption[];
   modes: ModelOption[];
   messages: MessageDto[];
-}
-
-export interface PromptResponse {
-  sessionId: string;
-  stopReason: string;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
 }
 
 export interface HealthResponse {
@@ -142,6 +121,18 @@ export interface FileSystemStatDto {
   isGitRepository: boolean;
 }
 
+export interface StoppedProcessDto {
+  processId: number;
+  name: string;
+}
+
+export interface ActiveTurnInfo {
+  sessionId: string;
+  acpSessionId: string;
+  preview: string;
+  startedAt: string;
+}
+
 // ─── release types ─────────────────────────────────────────────────────────
 
 export interface ReleaseDto {
@@ -150,9 +141,13 @@ export interface ReleaseDto {
   title?: string | null;
   version: string;
   status: string;
+  branchName: string;
+  currentFeatureId?: string | null;
   createdAt: string;
   updatedAt: string;
   features: ReleaseFeatureDto[];
+  // Proxy of the current feature's own pipeline state — see DevTeamRelease's
+  // computed properties on the backend. Empty/null once no feature is active.
   stageRuns: ReleaseStageRunDto[];
   signoffs: ReleaseSignoffDto[];
   flowPosition?: ReleaseFlowPositionDto | null;
@@ -164,14 +159,18 @@ export interface ReleaseFeatureDto {
   key: string;
   title: string;
   description?: string | null;
+  branchName: string;
   status: string;
   createdAt: string;
   updatedAt: string;
+  stageRuns?: ReleaseStageRunDto[];
+  signoffs?: ReleaseSignoffDto[];
+  flowPosition?: ReleaseFlowPositionDto | null;
 }
 
 export interface ReleaseStageRunDto {
   id: string;
-  releaseId: string;
+  releaseFeatureId: string;
   stageName: string;
   status: string;
   phase: string;
@@ -182,6 +181,7 @@ export interface ReleaseStageRunDto {
   startedAt?: string | null;
   finishedAt?: string | null;
   attempt: number;
+  readyToProceed: boolean;
   gateChecks: ReleaseGateCheckDto[];
   findings: ReviewFindingDto[];
   guidanceNotes: ReleaseGuidanceNoteDto[];
@@ -199,6 +199,13 @@ export interface PipelineStageDto {
   name: string;
   userInputRequired: boolean;
   signoff?: string | null;
+  expectedArtifacts: string[];
+  steps: string[];
+}
+
+export interface StageArtifactDto {
+  relativePath: string;
+  content?: string | null;
 }
 
 export interface ReleaseGateCheckDto {
@@ -213,7 +220,7 @@ export interface ReleaseGateCheckDto {
 
 export interface ReleaseSignoffDto {
   id: string;
-  releaseId: string;
+  releaseFeatureId: string;
   stageName: string;
   required: boolean;
   approved: boolean;
@@ -224,7 +231,7 @@ export interface ReleaseSignoffDto {
 
 export interface ReleaseFlowPositionDto {
   id: string;
-  releaseId: string;
+  releaseFeatureId: string;
   currentStageIndex: number;
   currentStageName: string;
 }
@@ -252,6 +259,15 @@ export interface GitCommitDto {
   parents: string[];
   branch?: string | null;
   tags?: string[] | null;
+}
+
+export interface GitRemoteDto {
+  url?: string | null;
+  credentialName?: string | null;
+}
+
+export interface GitCredentialsDto {
+  names: string[];
 }
 
 // ─── stage types ─────────────────────────────────────────────────────────

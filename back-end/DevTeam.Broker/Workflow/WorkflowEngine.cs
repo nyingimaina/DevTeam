@@ -1,3 +1,5 @@
+using System.Text;
+
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
 using DevTeam.Broker.Git;
@@ -14,8 +16,54 @@ public sealed class WorkflowEngine : IWorkflowEngine
     private readonly IWorkflowCoordinator _coordinator;
     private readonly IEventBroadcaster _broadcaster;
     private readonly IGitService _gitService;
+    private readonly IGitCredentialStore _credentialStore;
     private readonly WorkflowDefinitionLoader _loader;
     private readonly ILogger<WorkflowEngine> _logger;
+    private readonly ModelCatalogService _modelCatalog;
+
+    // Agent prompts run on a dedicated long-lived budget so an aborted HTTP
+    // request (or client disconnect) can never kill an in-flight opencode turn.
+    // Used for autonomous work (RunStageAsync, challenges) where there's no one
+    // waiting live and a long dev/test cycle is expected.
+    private static readonly TimeSpan AgentPromptTimeout = TimeSpan.FromMinutes(30);
+
+    // Interactive turns (the user is watching a chat panel right now) get a much
+    // shorter budget: a genuinely stuck turn should surface as "something's wrong"
+    // within minutes, not 30 of them. The broker also exposes a manual cancel
+    // (BrokerCoordinator.CancelCurrentTurnAsync / POST /api/turns/current/cancel)
+    // for a turn that's legitimately just slow and needs more time.
+    private static readonly TimeSpan InteractiveTurnTimeout = TimeSpan.FromMinutes(5);
+
+    // Without this, a role's agent has no self-knowledge of DevTeam's own orchestration:
+    // if asked how work reaches the next role, it has nothing to go on but its own
+    // guesswork and can confidently assert the next role/agent isn't configured — even
+    // though the handoff (context.md/manifest.yaml bundle + automatic session start) is
+    // already fully wired in BuildArtifactContext/StartStageAsync/RunStageAsync.
+    private const string HandoffAutomationClause =
+        " DevTeam automatically starts the next role's agent session once this stage's gates " +
+        "and any required signoff are approved — you do not need to know how the next role is " +
+        "invoked, and you must never tell the user their opencode config or repo is missing a " +
+        "role or agent. If asked how to proceed, tell them to use the stage's signoff controls in the UI.";
+
+    // Leaving modelId null lets opencode fall back to its own ambient "current" model,
+    // which can silently drift to something far slower than intended (observed: an
+    // unpinned session took 20+ minutes per turn vs. ~15s pinned to this model).
+    // Always request a known-good default explicitly instead.
+    private const string DefaultModelId = "opencode/big-pickle";
+
+    private static CancellationTokenSource AgentPromptCts()
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+        cts.CancelAfter(AgentPromptTimeout);
+        return cts;
+    }
+
+    private static CancellationTokenSource InteractiveTurnCts()
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+        cts.CancelAfter(InteractiveTurnTimeout);
+        return cts;
+    }
 
     public WorkflowEngine(
         IDbContextFactory<DevTeamDbContext> dbFactory,
@@ -24,7 +72,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         IEventBroadcaster broadcaster,
         IGitService gitService,
         WorkflowDefinitionLoader loader,
-        ILogger<WorkflowEngine> logger)
+        ILogger<WorkflowEngine> logger,
+        ModelCatalogService modelCatalog,
+        IGitCredentialStore credentialStore)
     {
         _dbFactory = dbFactory;
         _gateRunner = gateRunner;
@@ -33,6 +83,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         _gitService = gitService;
         _loader = loader;
         _logger = logger;
+        _modelCatalog = modelCatalog;
+        _credentialStore = credentialStore;
     }
 
     public async Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct)
@@ -40,11 +92,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var workflow = _loader.LoadDefault();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
+        var releaseBranch = $"release/{featureKey}";
+        var featureBranch = $"feature/{featureKey}";
+
         var release = new DevTeamRelease
         {
             WorkspacePath = workspacePath,
             Title = $"Release {featureKey}",
             Status = ReleaseStatus.InProgress,
+            BranchName = releaseBranch,
         };
 
         var feature = new ReleaseFeature
@@ -52,6 +108,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             Release = release,
             Key = featureKey,
             Title = featureKey,
+            BranchName = featureBranch,
             Status = ReleaseFeatureStatus.InProgress,
         };
         release.Features.Add(feature);
@@ -60,9 +117,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         {
             if (role.Signoff is not null)
             {
-                release.Signoffs.Add(new ReleaseSignoff
+                feature.Signoffs.Add(new ReleaseSignoff
                 {
-                    Release = release,
+                    Feature = feature,
                     StageName = role.Name,
                     Required = true,
                     Approved = false,
@@ -73,43 +130,117 @@ public sealed class WorkflowEngine : IWorkflowEngine
         db.Releases.Add(release);
         await db.SaveChangesAsync(ct);
 
+        release.CurrentFeatureId = feature.Id;
+
         var position = new ReleaseFlowPosition
         {
-            Release = release,
+            Feature = feature,
             CurrentStageIndex = 0,
             CurrentStageName = workflow.Pipeline[0].Name,
         };
         db.ReleaseFlowPositions.Add(position);
         await db.SaveChangesAsync(ct);
 
-        release.FlowPosition = position;
+        feature.FlowPosition = position;
 
         try
         {
-            var releaseBranch = $"release/{featureKey}";
             await _gitService.InitAsync(workspacePath, ct);
             await _gitService.EnsureBranchAsync(workspacePath, releaseBranch, ct);
-            _logger.LogInformation("Created git branch {Branch} for release {ReleaseId}", releaseBranch, release.Id);
+            await _gitService.EnsureBranchAsync(workspacePath, featureBranch, ct);
+            _logger.LogInformation("Created git branches {ReleaseBranch}/{FeatureBranch} for release {ReleaseId}",
+                releaseBranch, featureBranch, release.Id);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to create git branch for release {ReleaseId}", release.Id);
+            _logger.LogWarning(ex, "Failed to create git branches for release {ReleaseId}", release.Id);
         }
 
         _logger.LogInformation("Started release {ReleaseId} for feature {FeatureKey}", release.Id, featureKey);
         return release;
     }
 
-    // ─── interactive stage lifecycle ───────────────────────────────────────
+    // ─── feature lifecycle (GitFlow) ────────────────────────────────────────
 
-    public async Task<ReleaseStageRun> StartStageAsync(Guid releaseId, CancellationToken ct)
+    public async Task<ReleaseFeature> CreateFeatureAsync(Guid releaseId, string featureKey, CancellationToken ct)
     {
         var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var release = await db.Releases
+            .Include(r => r.Features)
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
+            ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
+
+        if (release.CurrentFeatureId is not null)
+            throw new InvalidOperationException(
+                "This release already has a feature in progress. Complete it before starting another.");
+
+        var featureBranch = $"feature/{featureKey}";
+        var feature = new ReleaseFeature
+        {
+            ReleaseId = release.Id,
+            Release = release,
+            Key = featureKey,
+            Title = featureKey,
+            BranchName = featureBranch,
+            Status = ReleaseFeatureStatus.InProgress,
+        };
+
+        foreach (var role in workflow.Pipeline)
+        {
+            if (role.Signoff is not null)
+            {
+                feature.Signoffs.Add(new ReleaseSignoff
+                {
+                    Feature = feature,
+                    StageName = role.Name,
+                    Required = true,
+                    Approved = false,
+                });
+            }
+        }
+
+        db.ReleaseFeatures.Add(feature);
+        await db.SaveChangesAsync(ct);
+
+        var position = new ReleaseFlowPosition
+        {
+            Feature = feature,
+            CurrentStageIndex = 0,
+            CurrentStageName = workflow.Pipeline[0].Name,
+        };
+        db.ReleaseFlowPositions.Add(position);
+        release.CurrentFeatureId = feature.Id;
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        feature.FlowPosition = position;
+
+        try
+        {
+            await _gitService.CheckoutAsync(release.WorkspacePath, release.BranchName, ct);
+            await _gitService.EnsureBranchAsync(release.WorkspacePath, featureBranch, ct);
+            _logger.LogInformation("Created git branch {Branch} for feature {FeatureId}", featureBranch, feature.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to create git branch for feature {FeatureId}", feature.Id);
+        }
+
+        return feature;
+    }
+
+    // ─── interactive stage lifecycle ───────────────────────────────────────
+
+    public async Task<ReleaseStageRun> StartStageAsync(Guid featureId, CancellationToken ct)
+    {
+        var workflow = LoadWorkflow();
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var currentStageIndex = position.CurrentStageIndex;
         if (currentStageIndex >= workflow.Pipeline.Count)
@@ -117,18 +248,21 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var role = workflow.Pipeline[currentStageIndex];
 
-        var existingActive = release.StageRuns
+        var existingActive = feature.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
         if (existingActive is not null)
             return existingActive;
 
-        var session = await _coordinator.NewSessionAsync(release.WorkspacePath, null, ct);
+        var featureKey = feature.Key;
+        var workspacePath = feature.Release.WorkspacePath;
+        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.Name, workspacePath, featureKey);
+        var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
 
         var stageRun = new ReleaseStageRun
         {
-            Release = release,
+            Feature = feature,
             StageName = role.Name,
-            Attempt = release.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
+            Attempt = feature.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
             Status = ReleaseStageStatus.Active,
             Phase = StagePhase.GuidedQA,
             AcpSessionId = session.SessionId.ToString(),
@@ -136,8 +270,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
         db.ReleaseStageRuns.Add(stageRun);
         await db.SaveChangesAsync(ct);
 
-        var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
-        var guidanceContext = BuildGuidanceContext(release);
+        // Run this role's leading builtins (e.g. scaffold_specs/context_bundle for
+        // business-analyst) before the very first chat message goes out, so the agent
+        // starts with a scaffold already in place instead of discovering it mid-conversation.
+        await RunLeadingBuiltinsAsync(role, featureKey, workspacePath, stageRun, db, ct);
+        await db.SaveChangesAsync(ct);
+
+        var guidanceContext = BuildGuidanceContext(feature);
+        var artifactContext = BuildArtifactContext(workspacePath, featureKey, role.Name);
 
         var requirementsAuthoring = role.Name == "business-analyst"
             ? $" Author the agreed requirements into devteam/features/{featureKey}/requirements.md " +
@@ -147,33 +287,34 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         // Use a separate cancellation for the agent prompt so HTTP timeouts don't kill it.
         // The agent may take time to process the initial prompt — that's expected.
-        using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
-        agentCts.CancelAfter(TimeSpan.FromMinutes(10));
+        using var agentCts = InteractiveTurnCts();
         await _coordinator.PromptWithSessionRecoveryAsync(
             session.SessionId,
-            $"You are the {role.Name} for feature '{featureKey}' in workspace '{release.WorkspacePath}'. " +
+            $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
             MultiQuestionDetector.SingleQuestionInstruction +
             " Follow each answer to its logical conclusion before asking the next. " +
             "When you have enough information to produce the required output, say DONE and provide the structured result." +
             requirementsAuthoring +
-            guidanceContext,
+            HandoffAutomationClause +
+            guidanceContext +
+            artifactContext,
             agentCts.Token);
 
-        _logger.LogInformation("Started stage {StageName} for release {ReleaseId}, session {SessionId}",
-            role.Name, releaseId, session.SessionId);
+        _logger.LogInformation("Started stage {StageName} for feature {FeatureId}, session {SessionId}",
+            role.Name, featureId, session.SessionId);
         return stageRun;
     }
 
-    public async Task<StagePromptResult> SendMessageAsync(Guid releaseId, string text, CancellationToken ct)
+    public async Task<StagePromptResult> SendMessageAsync(Guid featureId, string text, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        var release = await LoadReleaseAsync(db, releaseId, ct);
+        var feature = await LoadFeatureAsync(db, featureId, ct);
         var workflow = LoadWorkflow();
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var role = workflow.Pipeline[position.CurrentStageIndex];
-        var stageRun = release.StageRuns
+        var stageRun = feature.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
 
@@ -181,10 +322,16 @@ public sealed class WorkflowEngine : IWorkflowEngine
             throw new InvalidOperationException("Stage run has no linked session.");
 
         var acpSessionId = Guid.Parse(stageRun.AcpSessionId);
-        var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, ct);
+
+        // A new human message always invalidates a prior "ready to proceed" signal — the
+        // conversation isn't over until the agent says DONE again and gates re-pass.
+        stageRun.ReadyToProceed = false;
+
+        using var agentCts = InteractiveTurnCts();
+        var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, agentCts.Token);
 
         stageRun.QuestionCount++;
-        await db.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(agentCts.Token);
 
         return new StagePromptResult(
             Response: response.StopReason,
@@ -193,17 +340,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
             TotalTokens: response.TotalTokens);
     }
 
-    public async Task<StagePromptResult> SendMessageEnforcingSingleQuestionAsync(Guid releaseId, string text, CancellationToken ct)
+    public async Task<StagePromptResult> SendMessageEnforcingSingleQuestionAsync(Guid featureId, string text, CancellationToken ct)
     {
-        var result = await SendMessageAsync(releaseId, text, ct);
+        var result = await SendMessageAsync(featureId, text, ct);
 
-        await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        var release = await LoadReleaseAsync(db, releaseId, ct);
+        using var agentCts = InteractiveTurnCts();
+        var token = agentCts.Token;
+        await using var db = await _dbFactory.CreateDbContextAsync(token);
+        var feature = await LoadFeatureAsync(db, featureId, token);
         var workflow = LoadWorkflow();
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
         var role = workflow.Pipeline[position.CurrentStageIndex];
-        var stageRun = release.StageRuns
+        var stageRun = feature.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
 
@@ -214,14 +363,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var corrections = 0;
         while (corrections < MultiQuestionDetector.MaxCorrections)
         {
-            var latest = await GetLatestAssistantTextAsync(db, acpSessionId, ct);
+            var latest = await GetLatestAssistantTextAsync(db, acpSessionId, token);
             if (!MultiQuestionDetector.ContainsMultipleQuestions(latest))
                 break;
 
-            using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            agentCts.CancelAfter(TimeSpan.FromMinutes(5));
             var correction = await _coordinator.PromptWithSessionRecoveryAsync(
-                acpSessionId, MultiQuestionDetector.CorrectionPrompt, agentCts.Token);
+                acpSessionId, MultiQuestionDetector.CorrectionPrompt, token);
             result = new StagePromptResult(
                 Response: correction.StopReason,
                 InputTokens: correction.TotalTokens,
@@ -233,27 +380,27 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (corrections > 0)
         {
             _logger.LogInformation(
-                "Applied {Corrections} single-question correction(s) for release {ReleaseId}",
-                corrections, releaseId);
+                "Applied {Corrections} single-question correction(s) for feature {FeatureId}",
+                corrections, featureId);
         }
 
         return result;
     }
 
-    public async Task<DevTeamRelease> RunGatesAsync(Guid releaseId, CancellationToken ct)
+    public async Task<DevTeamRelease> RunGatesAsync(Guid featureId, CancellationToken ct)
     {
         var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var role = workflow.Pipeline[position.CurrentStageIndex];
-        var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
+        var featureKey = feature.Key;
         var currentIndex = position.CurrentStageIndex;
 
-        var stageRun = release.StageRuns
+        var stageRun = feature.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
 
@@ -265,7 +412,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
 
         // Check expected artifacts (warn but don't block)
-        var workspacePath = release.WorkspacePath;
+        var workspacePath = feature.Release.WorkspacePath;
         var missingArtifacts = new List<string>();
         foreach (var artifactPattern in role.ExpectedArtifacts)
         {
@@ -287,11 +434,23 @@ public sealed class WorkflowEngine : IWorkflowEngine
         stageRun.Status = ReleaseStageStatus.GatesRunning;
         await db.SaveChangesAsync(ct);
 
-        var allPassed = true;
+        // Leading builtins (e.g. scaffold_specs/context_bundle) already ran in StartStageAsync
+        // before the chat started, and are already recorded on stageRun.GateChecks. Re-running
+        // them here would trip ScaffoldSpecsGate's "don't overwrite an existing scaffold" guard,
+        // so skip every step up to and including the first Agent/Loop step, and seed allPassed
+        // from those already-recorded results instead of assuming success.
+        var allPassed = stageRun.GateChecks.All(gc => gc.Passed);
+        var pastLeadingSteps = false;
         foreach (var step in role.Steps)
         {
+            if (!pastLeadingSteps)
+            {
+                if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
+                    pastLeadingSteps = true;
+                continue;
+            }
             if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, featureKey, release.WorkspacePath, ct);
+            var result = await ExecuteStepAsync(step, featureKey, workspacePath, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -308,13 +467,23 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
         if (challenge is not null)
         {
-            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, release.WorkspacePath, db, ct);
+            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
             if (!challengeResult.Passed) allPassed = false;
         }
 
+        // Passing gates is the authoritative "this stage's work is technically complete" signal.
+        // Requiring the agent to also say a literal standalone "DONE" line on top of that was too
+        // fragile in practice (real replies rarely match that exact shape) and left the human with
+        // no way to advance even once the gates had genuinely passed.
+        stageRun.ReadyToProceed = allPassed;
+
+        if (allPassed)
+            await CommitStageWorkAsync(workspacePath, role.Name, featureKey, ct);
+
+        var isLastStage = false;
         if (allPassed)
         {
-            var needsSignoff = release.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
+            var needsSignoff = feature.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
             stageRun.Status = needsSignoff ? ReleaseStageStatus.BlockedSignoff : ReleaseStageStatus.Complete;
             stageRun.Phase = StagePhase.Signoff;
 
@@ -326,15 +495,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     : "done";
                 position.UpdatedAt = DateTimeOffset.UtcNow;
 
-                if (position.CurrentStageIndex >= workflow.Pipeline.Count)
-                {
-                    release.Status = ReleaseStatus.Ready;
-                    release.Features.ForEach(f => f.Status = ReleaseFeatureStatus.Complete);
-                }
+                isLastStage = position.CurrentStageIndex >= workflow.Pipeline.Count;
+                feature.Release.Status = isLastStage ? ReleaseStatus.Ready : feature.Release.Status;
             }
             else
             {
-                release.Status = ReleaseStatus.Blocked;
+                feature.Release.Status = ReleaseStatus.Blocked;
             }
         }
         else
@@ -347,10 +513,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ? $"Stage {role.Name} passed all gates and challenge."
             : $"Stage {role.Name} failed gates or challenge.";
 
-        release.UpdatedAt = DateTimeOffset.UtcNow;
+        feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        await BroadcastEventAsync(release.Id, "stageStateChanged", new
+        if (isLastStage)
+        {
+            await FinalizeFeatureCompletionAsync(db, feature, ct);
+        }
+
+        await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
         {
             StageName = role.Name,
             Status = stageRun.Status.ToString(),
@@ -358,19 +529,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
             AllPassed = allPassed,
         }, ct);
 
-        return release;
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
     // ─── autonomous stage execution ─────────────────────────────────────────
 
-    public async Task<DevTeamRelease> RunStageAsync(Guid releaseId, CancellationToken ct)
+    public async Task<DevTeamRelease> RunStageAsync(Guid featureId, CancellationToken ct)
     {
         var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var currentIndex = position.CurrentStageIndex;
         if (currentIndex >= workflow.Pipeline.Count)
@@ -384,19 +555,21 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 "Use StartStageAsync → SendMessageAsync → RunGatesAsync for interactive stages.");
         }
 
-        var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
-        var guidanceContext = BuildGuidanceContext(release);
+        var featureKey = feature.Key;
+        var workspacePath = feature.Release.WorkspacePath;
+        var guidanceContext = BuildGuidanceContext(feature);
 
-        var stageRun = release.StageRuns
+        var stageRun = feature.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
         if (stageRun is null)
         {
-            var session = await _coordinator.NewSessionAsync(release.WorkspacePath, null, ct);
+            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.Name, workspacePath, featureKey);
+            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
             stageRun = new ReleaseStageRun
             {
-                Release = release,
+                Feature = feature,
                 StageName = role.Name,
-                Attempt = release.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
+                Attempt = feature.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
                 Status = ReleaseStageStatus.Active,
                 Phase = StagePhase.GuidedQA,
                 AcpSessionId = session.SessionId.ToString(),
@@ -414,12 +587,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 throw new InvalidOperationException("Stage run has no linked session.");
             var acpSessionId = Guid.Parse(stageRun.AcpSessionId);
 
-            using var agentCts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
-            agentCts.CancelAfter(TimeSpan.FromMinutes(15));
+            using var agentCts = AgentPromptCts();
+            var artifactContext = BuildArtifactContext(workspacePath, featureKey, role.Name);
             var prompt =
-                $"You are the {role.Name} for feature '{featureKey}' in workspace '{release.WorkspacePath}'. " +
+                $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
                 "Work autonomously and do not ask the user for input. Produce the required artifacts." +
+                HandoffAutomationClause +
                 guidanceContext +
+                artifactContext +
                 "When you are done, say DONE and provide a summary of what you changed.";
             await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, agentCts.Token);
         }
@@ -433,7 +608,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     await PromptRoleAsync();
                     break;
                 case WorkflowStepKind.Builtin:
-                    var builtin = await ExecuteStepAsync(step, featureKey, release.WorkspacePath, ct);
+                    var builtin = await ExecuteStepAsync(step, featureKey, workspacePath, ct);
                     db.ReleaseGateChecks.Add(new ReleaseGateCheck
                     {
                         StageRun = stageRun,
@@ -441,6 +616,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
                         Passed = builtin.Passed,
                         EvidenceText = builtin.Evidence,
                     });
+                    // Flushed immediately (not just at phase boundaries) so a concurrent poll —
+                    // the frontend's live step checklist — can see progress as it happens.
+                    await db.SaveChangesAsync(ct);
                     if (!builtin.Passed) allPassed = false;
                     break;
                 case WorkflowStepKind.Loop:
@@ -457,7 +635,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                                 continue;
                             }
 
-                            var inner = await ExecuteStepAsync(innerStep, featureKey, release.WorkspacePath, ct);
+                            var inner = await ExecuteStepAsync(innerStep, featureKey, workspacePath, ct);
                             db.ReleaseGateChecks.Add(new ReleaseGateCheck
                             {
                                 StageRun = stageRun,
@@ -465,6 +643,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                                 Passed = inner.Passed,
                                 EvidenceText = inner.Evidence,
                             });
+                            await db.SaveChangesAsync(ct);
                             if (!inner.Passed) attemptPassed = false;
                         }
 
@@ -483,13 +662,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
         if (challenge is not null)
         {
-            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, release.WorkspacePath, db, ct);
+            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
             if (!challengeResult.Passed) allPassed = false;
         }
 
+        stageRun.ReadyToProceed = allPassed;
+
+        if (allPassed)
+            await CommitStageWorkAsync(workspacePath, role.Name, featureKey, ct);
+
+        var isLastStage = false;
         if (allPassed)
         {
-            var needsSignoff = release.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
+            var needsSignoff = feature.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
             stageRun.Status = needsSignoff ? ReleaseStageStatus.BlockedSignoff : ReleaseStageStatus.Complete;
             stageRun.Phase = StagePhase.Signoff;
 
@@ -501,15 +686,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     : "done";
                 position.UpdatedAt = DateTimeOffset.UtcNow;
 
-                if (position.CurrentStageIndex >= workflow.Pipeline.Count)
-                {
-                    release.Status = ReleaseStatus.Ready;
-                    release.Features.ForEach(f => f.Status = ReleaseFeatureStatus.Complete);
-                }
+                isLastStage = position.CurrentStageIndex >= workflow.Pipeline.Count;
+                feature.Release.Status = isLastStage ? ReleaseStatus.Ready : feature.Release.Status;
             }
             else
             {
-                release.Status = ReleaseStatus.Blocked;
+                feature.Release.Status = ReleaseStatus.Blocked;
             }
         }
         else
@@ -522,10 +704,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ? $"Stage {role.Name} passed all gates and challenge."
             : $"Stage {role.Name} failed gates or challenge.";
 
-        release.UpdatedAt = DateTimeOffset.UtcNow;
+        feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        await BroadcastEventAsync(release.Id, "stageStateChanged", new
+        if (isLastStage)
+        {
+            await FinalizeFeatureCompletionAsync(db, feature, ct);
+        }
+
+        await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
         {
             StageName = role.Name,
             Status = stageRun.Status.ToString(),
@@ -533,18 +720,18 @@ public sealed class WorkflowEngine : IWorkflowEngine
             AllPassed = allPassed,
         }, ct);
 
-        return release;
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
     public async Task<DevTeamRelease> PushBackAsync(
-        Guid releaseId, string targetStageName, string? instructions, CancellationToken ct)
+        Guid featureId, string targetStageName, string? instructions, CancellationToken ct)
     {
         var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var currentIndex = position.CurrentStageIndex;
         var targetIndex = -1;
@@ -562,11 +749,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (targetIndex >= currentIndex)
             throw new InvalidOperationException("Push back is only allowed to a previous stage.");
 
-        var notesTarget = release.StageRuns
+        var notesTarget = feature.StageRuns
             .Where(sr => sr.StageName == workflow.Pipeline[currentIndex].Name)
             .OrderByDescending(sr => sr.StartedAt)
             .FirstOrDefault()
-            ?? release.StageRuns.OrderByDescending(sr => sr.StartedAt).FirstOrDefault();
+            ?? feature.StageRuns.OrderByDescending(sr => sr.StartedAt).FirstOrDefault();
 
         if (notesTarget is not null && !string.IsNullOrWhiteSpace(instructions))
         {
@@ -583,7 +770,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         position.CurrentStageName = targetStageName;
         position.UpdatedAt = DateTimeOffset.UtcNow;
 
-        var signoff = release.Signoffs.FirstOrDefault(s => s.StageName == targetStageName);
+        var signoff = feature.Signoffs.FirstOrDefault(s => s.StageName == targetStageName);
         if (signoff is not null && signoff.Approved)
         {
             signoff.Approved = false;
@@ -591,26 +778,26 @@ public sealed class WorkflowEngine : IWorkflowEngine
             signoff.ApprovedAt = null;
         }
 
-        release.Status = ReleaseStatus.InProgress;
-        release.UpdatedAt = DateTimeOffset.UtcNow;
+        feature.Release.Status = ReleaseStatus.InProgress;
+        feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        await BroadcastEventAsync(release.Id, "pushedBack", new
+        await BroadcastEventAsync(feature.ReleaseId, "pushedBack", new
         {
             TargetStage = targetStageName,
             Instructions = instructions,
         }, ct);
 
-        return release;
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
     public async Task<IReadOnlyList<MessageDto>> GetStageMessagesAsync(
-        Guid releaseId, Guid stageRunId, CancellationToken ct)
+        Guid featureId, Guid stageRunId, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var stageRun = release.StageRuns.FirstOrDefault(sr => sr.Id == stageRunId)
-            ?? throw new KeyNotFoundException($"Stage run {stageRunId} not found for release {releaseId}.");
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var stageRun = feature.StageRuns.FirstOrDefault(sr => sr.Id == stageRunId)
+            ?? throw new KeyNotFoundException($"Stage run {stageRunId} not found for feature {featureId}.");
 
         if (string.IsNullOrWhiteSpace(stageRun.AcpSessionId))
             return [];
@@ -629,39 +816,111 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .ToArray();
     }
 
-    public async Task<IReadOnlyList<PipelineStageDto>> GetPipelineAsync(Guid releaseId, CancellationToken ct)
+    public async Task<IReadOnlyList<PipelineStageDto>> GetPipelineAsync(Guid featureId, CancellationToken ct)
     {
         var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        _ = await LoadReleaseAsync(db, releaseId, ct);
+        _ = await LoadFeatureAsync(db, featureId, ct);
 
         return workflow.Pipeline
-            .Select(r => new PipelineStageDto(r.Name, r.UserInputRequired, r.Signoff))
+            .Select(r => new PipelineStageDto(r.Name, r.UserInputRequired, r.Signoff, r.ExpectedArtifacts, FlattenStepNames(r.Steps)))
             .ToArray();
+    }
+
+    // A role's steps are fully known ahead of time — this exposes them as display identifiers
+    // for a live checklist (ticked off as ReleaseGateChecks/agent turns complete). A Loop's
+    // inner steps are flattened in once: the checklist shows each distinct step, not one entry
+    // per retry attempt.
+    private static IReadOnlyList<string> FlattenStepNames(IReadOnlyList<WorkflowStep> steps)
+    {
+        var names = new List<string>();
+        foreach (var step in steps)
+        {
+            switch (step.Kind)
+            {
+                case WorkflowStepKind.Builtin:
+                    names.Add(step.Builtin ?? "builtin");
+                    break;
+                case WorkflowStepKind.Agent:
+                    names.Add($"agent:{step.AgentMode}");
+                    break;
+                case WorkflowStepKind.Loop:
+                    names.AddRange(FlattenStepNames(step.LoopSteps ?? []));
+                    break;
+            }
+        }
+        return names;
+    }
+
+    private const int StageArtifactMaxChars = 20 * 1024;
+
+    public async Task<IReadOnlyList<StageArtifactDto>> GetStageArtifactsAsync(Guid featureId, Guid stageRunId, CancellationToken ct)
+    {
+        var workflow = LoadWorkflow();
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var stageRun = feature.StageRuns.FirstOrDefault(sr => sr.Id == stageRunId)
+            ?? throw new InvalidOperationException($"No stage run '{stageRunId}' for feature '{featureId}'.");
+        var role = workflow.Pipeline.FirstOrDefault(r => r.Name == stageRun.StageName)
+            ?? throw new InvalidOperationException($"Unknown role '{stageRun.StageName}'.");
+
+        var workspacePath = feature.Release.WorkspacePath;
+        var featureKey = feature.Key;
+
+        var results = new List<StageArtifactDto>();
+        foreach (var pattern in role.ExpectedArtifacts)
+        {
+            var relativePath = pattern.Replace("<F>", featureKey);
+            var fullPath = Path.Combine(workspacePath, relativePath);
+
+            if (File.Exists(fullPath))
+            {
+                var content = File.ReadAllText(fullPath);
+                if (content.Length > StageArtifactMaxChars)
+                    content = content[..StageArtifactMaxChars] + "…(truncated)";
+                results.Add(new StageArtifactDto(relativePath, content));
+            }
+            else
+            {
+                // Directory-shaped artifacts (and anything not yet produced) are reported by
+                // path only — this is a skim/confirm card, not a document viewer.
+                results.Add(new StageArtifactDto(relativePath, null));
+            }
+        }
+        return results;
+    }
+
+    public async Task<IReadOnlyList<string>> GetWorkspaceChangesAsync(Guid featureId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+
+        var status = await _gitService.StatusAsync(feature.Release.WorkspacePath, ct);
+        return status.ChangedFiles ?? [];
     }
 
     // ─── legacy advance (runs all steps synchronously) ─────────────────────
 
-    public async Task<DevTeamRelease> AdvanceAsync(Guid releaseId, CancellationToken ct)
+    public async Task<DevTeamRelease> AdvanceAsync(Guid featureId, CancellationToken ct)
     {
         var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var position = release.FlowPosition
-            ?? throw new InvalidOperationException("Release has no flow position.");
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var currentIndex = position.CurrentStageIndex;
         if (currentIndex >= workflow.Pipeline.Count)
         {
-            release.Status = ReleaseStatus.Ready;
-            release.UpdatedAt = DateTimeOffset.UtcNow;
+            feature.Release.Status = ReleaseStatus.Ready;
+            feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(ct);
-            return release;
+            return await LoadReleaseAsync(db, feature.ReleaseId, ct);
         }
 
         var role = workflow.Pipeline[currentIndex];
-        var featureKey = release.Features.FirstOrDefault()?.Key ?? "unknown";
+        var featureKey = feature.Key;
 
         // Check user input requirement for legacy advance
         if (role.UserInputRequired)
@@ -676,7 +935,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         foreach (var artifactPattern in role.ExpectedArtifacts)
         {
             var artifactPath = artifactPattern.Replace("<F>", featureKey);
-            var fullPath = Path.Combine(release.WorkspacePath, artifactPath);
+            var fullPath = Path.Combine(feature.Release.WorkspacePath, artifactPath);
             if (!Directory.Exists(fullPath) && !File.Exists(fullPath))
             {
                 missingArtifacts.Add(artifactPattern);
@@ -691,7 +950,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var stageRun = new ReleaseStageRun
         {
-            Release = release,
+            Feature = feature,
             StageName = role.Name,
             Status = ReleaseStageStatus.Active,
             Phase = StagePhase.Gates,
@@ -703,7 +962,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         foreach (var step in role.Steps)
         {
             if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, featureKey, release.WorkspacePath, ct);
+            var result = await ExecuteStepAsync(step, featureKey, feature.Release.WorkspacePath, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -721,14 +980,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ? $"Stage {role.Name} passed all gates."
             : $"Stage {role.Name} failed gates.";
 
+        var isLastStage = false;
         if (allPassed)
         {
-            var needsSignoff = release.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
+            var needsSignoff = feature.Signoffs.Any(s => s.StageName == role.Name && !s.Approved);
             if (needsSignoff)
             {
                 stageRun.Status = ReleaseStageStatus.BlockedSignoff;
                 stageRun.Phase = StagePhase.Signoff;
-                release.Status = ReleaseStatus.Blocked;
+                feature.Release.Status = ReleaseStatus.Blocked;
             }
             else
             {
@@ -738,22 +998,20 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     : "done";
                 position.UpdatedAt = DateTimeOffset.UtcNow;
 
-                if (position.CurrentStageIndex >= workflow.Pipeline.Count)
-                {
-                    release.Status = ReleaseStatus.Ready;
-                    release.Features.ForEach(f => f.Status = ReleaseFeatureStatus.Complete);
-                }
-                else
-                {
-                    release.Status = ReleaseStatus.InProgress;
-                }
+                isLastStage = position.CurrentStageIndex >= workflow.Pipeline.Count;
+                feature.Release.Status = isLastStage ? ReleaseStatus.Ready : ReleaseStatus.InProgress;
             }
         }
 
-        release.UpdatedAt = DateTimeOffset.UtcNow;
+        feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        await BroadcastEventAsync(release.Id, "stageStateChanged", new
+        if (isLastStage)
+        {
+            await FinalizeFeatureCompletionAsync(db, feature, ct);
+        }
+
+        await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
         {
             StageName = role.Name,
             Status = stageRun.Status.ToString(),
@@ -761,15 +1019,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
             AllPassed = allPassed,
         }, ct);
 
-        return release;
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
-    public async Task<DevTeamRelease> SignoffAsync(Guid releaseId, string stageName, string role, string? comment, CancellationToken ct)
+    public async Task<DevTeamRelease> SignoffAsync(Guid featureId, string stageName, string role, string? comment, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var release = await LoadReleaseAsync(db, releaseId, ct);
-        var signoff = release.Signoffs.FirstOrDefault(s => s.StageName == stageName)
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var signoff = feature.Signoffs.FirstOrDefault(s => s.StageName == stageName)
             ?? throw new InvalidOperationException($"No signoff required for stage '{stageName}'.");
 
         signoff.Approved = true;
@@ -777,24 +1035,25 @@ public sealed class WorkflowEngine : IWorkflowEngine
         signoff.Comment = comment;
         signoff.ApprovedAt = DateTimeOffset.UtcNow;
 
-        var allSignoffsComplete = release.Signoffs
+        var allSignoffsComplete = feature.Signoffs
             .Where(s => s.StageName == stageName)
             .All(s => s.Approved);
 
         if (allSignoffsComplete)
         {
-            release.Status = ReleaseStatus.InProgress;
-            release.UpdatedAt = DateTimeOffset.UtcNow;
+            feature.Release.Status = ReleaseStatus.InProgress;
+            feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         }
 
         await db.SaveChangesAsync(ct);
 
         // When the current stage's signoff is approved, move the flow forward so
-        // the release can continue to the next stage (e.g. after autonomous run).
+        // the feature can continue to the next stage (e.g. after autonomous run).
+        var isLastStage = false;
         if (allSignoffsComplete)
         {
             var workflow = LoadWorkflow();
-            var position = release.FlowPosition;
+            var position = feature.FlowPosition;
             if (position is not null && position.CurrentStageName == stageName)
             {
                 var workflowIndex = -1;
@@ -810,28 +1069,35 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 if (workflowIndex >= 0 && workflowIndex < workflow.Pipeline.Count)
                 {
                     position.CurrentStageIndex = workflowIndex + 1;
-                    position.CurrentStageName = workflowIndex + 1 < workflow.Pipeline.Count
-                        ? workflow.Pipeline[workflowIndex + 1].Name
-                        : "done";
+                    isLastStage = workflowIndex + 1 >= workflow.Pipeline.Count;
+                    position.CurrentStageName = isLastStage
+                        ? "done"
+                        : workflow.Pipeline[workflowIndex + 1].Name;
                     position.UpdatedAt = DateTimeOffset.UtcNow;
 
-                    release.Status = workflowIndex + 1 >= workflow.Pipeline.Count
-                        ? ReleaseStatus.Ready
-                        : ReleaseStatus.InProgress;
-                    release.UpdatedAt = DateTimeOffset.UtcNow;
+                    feature.Release.Status = isLastStage ? ReleaseStatus.Ready : ReleaseStatus.InProgress;
+                    feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
                     await db.SaveChangesAsync(ct);
                 }
             }
         }
 
-        await BroadcastEventAsync(releaseId, "signoffApproved", new
+        if (isLastStage)
+        {
+            // Throws on a genuine merge conflict — the signoff itself still stands
+            // (a human did approve this stage), but the feature is not marked
+            // complete and the release keeps its CurrentFeatureId until resolved.
+            await FinalizeFeatureCompletionAsync(db, feature, ct);
+        }
+
+        await BroadcastEventAsync(feature.ReleaseId, "signoffApproved", new
         {
             StageName = stageName,
             Role = role,
             AllComplete = allSignoffsComplete,
         }, ct);
 
-        return release;
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
     public async Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct)
@@ -840,15 +1106,202 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return await LoadReleaseAsync(db, releaseId, ct);
     }
 
-    public async Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var releases = await db.Releases
-            .Include(r => r.Features)
-            .Include(r => r.StageRuns)
-            .Include(r => r.Signoffs)
+            .Include(r => r.Features).ThenInclude(f => f.StageRuns)
+            .Include(r => r.Features).ThenInclude(f => f.Signoffs)
+            .Include(r => r.Features).ThenInclude(f => f.FlowPosition)
             .ToListAsync(ct);
+
+        if (!string.IsNullOrWhiteSpace(workspacePath))
+            releases = releases.Where(r => IsSameWorkspace(r.WorkspacePath, workspacePath)).ToList();
+
         return releases.OrderByDescending(r => r.CreatedAt).ToList();
+    }
+
+    // Two path strings can refer to the same workspace while differing in slash
+    // style or trailing separator (e.g. "C:\proj" vs "C:/proj/") — normalize
+    // before comparing, the same way PathContainment does for containment checks.
+    private static bool IsSameWorkspace(string a, string b)
+    {
+        try
+        {
+            var normalizedA = Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var normalizedB = Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return normalizedA.Equals(normalizedB, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    public async Task<IReadOnlyList<ModelOption>> GetAvailableModelsAsync(Guid releaseId, CancellationToken ct)
+    {
+        var release = await GetReleaseAsync(releaseId, ct);
+        return await _modelCatalog.GetAvailableModelsAsync(release.WorkspacePath, ct);
+    }
+
+    // ─── GitFlow: merge a completed feature into its release ───────────────
+
+    private async Task FinalizeFeatureCompletionAsync(DevTeamDbContext db, ReleaseFeature feature, CancellationToken ct)
+    {
+        var release = feature.Release;
+
+        var checkoutResult = await _gitService.CheckoutAsync(release.WorkspacePath, release.BranchName, ct);
+        if (!checkoutResult.Success)
+            throw new InvalidOperationException(
+                $"Could not check out release branch '{release.BranchName}': {checkoutResult.Message}");
+
+        var mergeResult = await _gitService.MergeAsync(release.WorkspacePath, feature.BranchName, release.BranchName, ct);
+        if (!mergeResult.Success)
+            throw new InvalidOperationException(
+                $"Could not merge '{feature.BranchName}' into '{release.BranchName}': {mergeResult.Message}");
+
+        var authToken = await TryGetCredentialForWorkspaceAsync(db, release.WorkspacePath, ct);
+
+        var remoteCheck = await _gitService.HasRemoteAsync(release.WorkspacePath, ct);
+        if (remoteCheck.HasRemote)
+        {
+            var pushResult = await _gitService.PushAsync(release.WorkspacePath, release.BranchName, authToken, ct);
+            if (!pushResult.Success)
+                _logger.LogWarning("Push of release branch '{Branch}' failed: {Message}", release.BranchName, pushResult.Message);
+        }
+        else
+        {
+            _logger.LogInformation("No remote configured for '{Workspace}'; skipping push of release branch.", release.WorkspacePath);
+        }
+
+        var deleteResult = await _gitService.DeleteBranchAsync(release.WorkspacePath, feature.BranchName, authToken, ct);
+        if (!deleteResult.Success)
+            _logger.LogWarning("Deleting feature branch '{Branch}' failed: {Message}", feature.BranchName, deleteResult.Message);
+
+        feature.Status = ReleaseFeatureStatus.Complete;
+        release.CurrentFeatureId = null;
+        release.Status = ReleaseStatus.Ready;
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<string?> TryGetCredentialForWorkspaceAsync(DevTeamDbContext db, string workspacePath, CancellationToken ct)
+    {
+        var settings = await db.WorkspaceGitSettings.FindAsync([workspacePath], ct);
+        if (settings?.CredentialName is null) return null;
+        return _credentialStore.TryGetToken(settings.CredentialName);
+    }
+
+    // ─── pipeline discipline: write scoping, leading builtins, artifact handoff ─
+
+    /// <summary>
+    /// Commits whatever the role's agent wrote to the workspace once its gates and challenge
+    /// have passed. Without this, a stage's file writes are only working-tree changes — GitFlow's
+    /// merge-on-signoff and push later in the pipeline would have no actual history to carry
+    /// forward, silently merging nothing.
+    /// </summary>
+    private async Task CommitStageWorkAsync(string workspacePath, string roleName, string featureKey, CancellationToken ct)
+    {
+        var result = await _gitService.CommitAsync(workspacePath, $"{roleName}: {featureKey} stage complete", ct);
+        if (!result.Success)
+            _logger.LogWarning("Commit after stage '{Role}' for feature '{FeatureKey}' failed: {Message}", roleName, featureKey, result.Message);
+    }
+
+    /// <summary>
+    /// Computes which workspace-relative directories a role's session may write within.
+    /// business-analyst is confined to its own feature docs directory (never source code);
+    /// developer/qa additionally get the feature's actual code paths, read from the manifest
+    /// scaffold_specs already produced. Falls back to the docs-only scope (never unrestricted)
+    /// if the manifest is unexpectedly missing.
+    /// </summary>
+    private IReadOnlyList<string> ResolveAllowedWritePrefixes(string roleName, string workspacePath, string featureKey)
+    {
+        var featureDir = ArtifactPaths.FeatureDirRelative(featureKey);
+        if (roleName is not ("developer" or "qa"))
+            return [featureDir];
+
+        var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
+        if (manifest is null)
+        {
+            _logger.LogWarning(
+                "No slice manifest found for feature '{FeatureKey}' when scoping role '{Role}'; " +
+                "restricting write access to the feature docs directory only.", featureKey, roleName);
+            return [featureDir];
+        }
+
+        var prefixes = new List<string> { featureDir, manifest.CodePathBack, manifest.CodePathFront };
+        prefixes.AddRange(manifest.Shared);
+        return prefixes;
+    }
+
+    /// <summary>
+    /// Runs a role's steps up to (but not including) the first Agent/Loop step — the builtins
+    /// that must produce scaffolding/context before the interactive or autonomous conversation
+    /// starts (e.g. scaffold_specs/context_bundle for business-analyst). Records a gate check
+    /// per executed step so RunGatesAsync doesn't need to re-run them afterward.
+    /// </summary>
+    private async Task<bool> RunLeadingBuiltinsAsync(
+        WorkflowRole role, string featureKey, string workspacePath, ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
+    {
+        var allPassed = true;
+        foreach (var step in role.Steps)
+        {
+            if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
+                break;
+
+            var result = await ExecuteStepAsync(step, featureKey, workspacePath, ct);
+            db.ReleaseGateChecks.Add(new ReleaseGateCheck
+            {
+                StageRun = stageRun,
+                Name = result.StepName,
+                Passed = result.Passed,
+                EvidenceText = result.Evidence,
+            });
+            if (!result.Passed) allPassed = false;
+        }
+        return allPassed;
+    }
+
+    /// <summary>
+    /// Builds the verbatim artifact content to splice into a stage's opening prompt, so the
+    /// next role starts from what the previous stage actually produced instead of discovering
+    /// (or ignoring) it on its own initiative. developer/qa get context.md verbatim (written by
+    /// the context_bundle builtin); business-analyst has no upstream stage, so it gets its own
+    /// just-scaffolded manifest + requirements skeleton instead.
+    /// </summary>
+    private static string BuildArtifactContext(string workspacePath, string featureKey, string roleName)
+    {
+        if (roleName == "business-analyst")
+        {
+            var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
+            var requirementsPath = ArtifactPaths.RequirementsPath(workspacePath, featureKey);
+            var hasRequirements = File.Exists(requirementsPath);
+            if (manifest is null && !hasRequirements)
+                return string.Empty;
+
+            var scaffold = new StringBuilder();
+            scaffold.AppendLine();
+            scaffold.AppendLine();
+            scaffold.AppendLine("--- Feature scaffold (from scaffold_specs) ---");
+            if (manifest is not null)
+            {
+                scaffold.AppendLine($"Title: {manifest.Title}");
+                scaffold.AppendLine($"Backend path: {manifest.CodePathBack}");
+                scaffold.AppendLine($"Frontend path: {manifest.CodePathFront}");
+            }
+            if (hasRequirements)
+            {
+                scaffold.AppendLine();
+                scaffold.Append(File.ReadAllText(requirementsPath));
+            }
+            return scaffold.ToString();
+        }
+
+        var contextPath = ArtifactPaths.ContextPath(workspacePath, featureKey);
+        if (!File.Exists(contextPath))
+            return string.Empty;
+
+        return "\n\n--- Context from the previous stage (context.md) ---\n" + File.ReadAllText(contextPath);
     }
 
     // ─── internal execution ────────────────────────────────────────────────
@@ -938,7 +1391,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         try
         {
             var antagonistMode = challenge.AntagonistMode ?? "build";
-            var session = await _coordinator.NewSessionAsync(workspacePath, null, ct);
+            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, null, ct);
 
             var prompt = $"You are reviewing the {challenge.Producer}'s work for feature '{featureKey}'. " +
                          $"Review for completeness, correctness, and quality. " +
@@ -1002,9 +1455,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .FirstOrDefault()?.BodyText;
     }
 
-    private static string BuildGuidanceContext(DevTeamRelease release)
+    private static string BuildGuidanceContext(ReleaseFeature feature)
     {
-        var notes = release.StageRuns
+        var notes = feature.StageRuns
             .SelectMany(sr => sr.GuidanceNotes)
             .Where(n => !string.IsNullOrWhiteSpace(n.Text))
             .Select(n => n.Text)
@@ -1017,14 +1470,24 @@ public sealed class WorkflowEngine : IWorkflowEngine
               string.Join(Environment.NewLine, notes.Select(n => "  - " + n));
     }
 
+    private static async Task<ReleaseFeature> LoadFeatureAsync(DevTeamDbContext db, Guid featureId, CancellationToken ct)
+        => await db.ReleaseFeatures
+            .Include(f => f.Release)
+            .Include(f => f.StageRuns).ThenInclude(sr => sr.GateChecks)
+            .Include(f => f.StageRuns).ThenInclude(sr => sr.Findings)
+            .Include(f => f.StageRuns).ThenInclude(sr => sr.GuidanceNotes)
+            .Include(f => f.Signoffs)
+            .Include(f => f.FlowPosition)
+            .SingleOrDefaultAsync(f => f.Id == featureId, ct)
+            ?? throw new KeyNotFoundException($"Feature {featureId} not found.");
+
     private static async Task<DevTeamRelease> LoadReleaseAsync(DevTeamDbContext db, Guid releaseId, CancellationToken ct)
         => await db.Releases
-            .Include(r => r.Features)
-            .Include(r => r.StageRuns).ThenInclude(sr => sr.GateChecks)
-            .Include(r => r.StageRuns).ThenInclude(sr => sr.Findings)
-            .Include(r => r.StageRuns).ThenInclude(sr => sr.GuidanceNotes)
-            .Include(r => r.Signoffs)
-            .Include(r => r.FlowPosition)
+            .Include(r => r.Features).ThenInclude(f => f.StageRuns).ThenInclude(sr => sr.GateChecks)
+            .Include(r => r.Features).ThenInclude(f => f.StageRuns).ThenInclude(sr => sr.Findings)
+            .Include(r => r.Features).ThenInclude(f => f.StageRuns).ThenInclude(sr => sr.GuidanceNotes)
+            .Include(r => r.Features).ThenInclude(f => f.Signoffs)
+            .Include(r => r.Features).ThenInclude(f => f.FlowPosition)
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
             ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
 }

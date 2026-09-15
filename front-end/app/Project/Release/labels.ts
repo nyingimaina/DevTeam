@@ -48,3 +48,16 @@ export function statusLabel(status: string): string {
 export function whatsNext(stageName: string): string {
   return WHATS_NEXT[stageName] ?? "";
 }
+
+// This button only re-checks the current stage's gates — it never advances the
+// pipeline — so its label must not read as a transition (that was the source of
+// user confusion: "Move to Developer" implied a move that never happened).
+export function moveOnButtonLabel(nextStageName: string | null): string {
+  return nextStageName ? `Check readiness for ${stageLabel(nextStageName)}` : "Check readiness to finish";
+}
+
+// This is the only button that both approves signoff and advances the pipeline,
+// so its label should say so instead of the generic, non-committal "Proceed".
+export function proceedButtonLabel(nextStageName: string | null): string {
+  return nextStageName ? `Approve & move to ${stageLabel(nextStageName)}` : "Approve & finish release";
+}

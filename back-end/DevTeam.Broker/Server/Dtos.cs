@@ -59,8 +59,6 @@ public sealed record SessionDetail(
     IReadOnlyList<ModelOption> Modes,
     IReadOnlyList<MessageDto> Messages);
 
-public sealed record PromptRequest(string Text, string? ModelId = null);
-
 public sealed record PromptResponse(
     Guid SessionId,
     string StopReason,
@@ -71,8 +69,6 @@ public sealed record PromptResponse(
 public sealed record SetModelRequest(string ModelId);
 
 public sealed record SetModeRequest(string ModeId);
-
-public sealed record NewSessionRequest(string WorkspacePath, string? ModelId = null);
 
 public sealed record HealthResponse(string Status, string? Version = null);
 
@@ -94,9 +90,15 @@ public sealed record FileSystemStatDto(string Name, string Kind, bool Exists, bo
 
 public sealed record CreateDirectoryRequest(string Path);
 
+public sealed record RevealInExplorerRequest(string Path);
+
+public sealed record CleanupWorkspaceRequest(string WorkspacePath);
+
 // ─── release endpoints ─────────────────────────────────────────────────────
 
 public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePath);
+
+public sealed record CreateFeatureRequest(string FeatureKey);
 
 public sealed record SignoffRequest(string StageName, string Role, string? Comment);
 
@@ -106,7 +108,9 @@ public sealed record SendMessageRequest(string Text);
 
 public sealed record PushBackRequest(string TargetStageName, string? Instructions);
 
-public sealed record PipelineStageDto(string Name, bool UserInputRequired, string? Signoff);
+public sealed record PipelineStageDto(string Name, bool UserInputRequired, string? Signoff, IReadOnlyList<string> ExpectedArtifacts, IReadOnlyList<string> Steps);
+
+public sealed record StageArtifactDto(string RelativePath, string? Content);
 
 // ─── git endpoints ─────────────────────────────────────────────────────────
 
@@ -117,3 +121,11 @@ public sealed record GitBranchRequest(string WorkspacePath, string BranchName);
 public sealed record GitCommitRequest(string WorkspacePath, string Message);
 
 public sealed record GitMergeRequest(string WorkspacePath, string SourceBranch, string? TargetBranch = null);
+
+public sealed record GitRemoteResponse(string? Url, string? CredentialName = null);
+
+public sealed record SetGitRemoteRequest(string WorkspacePath, string Url, string? CredentialName = null);
+
+public sealed record SetGitCredentialRequest(string Name, string Token);
+
+public sealed record GitCredentialsResponse(IReadOnlyList<string> Names);

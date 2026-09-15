@@ -2,8 +2,11 @@ namespace DevTeam.Broker.Gates;
 
 public static class ArtifactPaths
 {
+    public static string FeatureDirRelative(string featureKey)
+        => Path.Combine("devteam", "features", featureKey);
+
     public static string FeatureDir(string workspacePath, string featureKey)
-        => Path.Combine(workspacePath, "devteam", "features", featureKey);
+        => Path.Combine(workspacePath, FeatureDirRelative(featureKey));
 
     public static string ManifestPath(string workspacePath, string featureKey)
         => Path.Combine(FeatureDir(workspacePath, featureKey), "manifest.yaml");

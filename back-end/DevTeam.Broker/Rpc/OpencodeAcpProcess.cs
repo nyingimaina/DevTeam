@@ -42,6 +42,8 @@ public sealed class OpencodeAcpProcess : IAcpProcess
         };
     }
 
+    public int ProcessId => _process.Id;
+
     public Task<string?> ReadLineAsync(CancellationToken cancellationToken)
         => _reader.ReadLineAsync(cancellationToken).AsTask();
 

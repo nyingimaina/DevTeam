@@ -69,6 +69,25 @@ public class GitCommandHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task Status_ReportsRelativePathsOfCreatedAndModifiedFiles()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "committed.txt"), "v1");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "initial"));
+
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "committed.txt"), "v2");
+        Directory.CreateDirectory(Path.Combine(_tempDir, "sub"));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "sub", "new.txt"), "new");
+
+        var result = await _handler.HandleAsync(new GitRequest("status", _tempDir));
+
+        Assert.True(result.Success);
+        Assert.NotNull(result.ChangedFiles);
+        Assert.Contains("committed.txt", result.ChangedFiles!);
+        Assert.Contains("sub/new.txt", result.ChangedFiles!);
+    }
+
+    [Fact]
     public async Task Branch_CreatesNewBranch()
     {
         await _handler.HandleAsync(new GitRequest("init", _tempDir));
@@ -143,6 +162,175 @@ public class GitCommandHandlerTests : IDisposable
 
         Assert.True(result.Success);
         Assert.Contains("Checked out", result.Message!);
+    }
+
+    [Fact]
+    public async Task HasRemote_NoRemoteConfigured_ReturnsFalse()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var result = await _handler.HandleAsync(new GitRequest("has-remote", _tempDir));
+
+        Assert.True(result.Success);
+        Assert.False(result.HasRemote);
+    }
+
+    [Fact]
+    public async Task GetRemote_NoRemoteConfigured_ReturnsNullUrl()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var result = await _handler.HandleAsync(new GitRequest("get-remote", _tempDir));
+
+        Assert.True(result.Success);
+        Assert.Null(result.RemoteUrl);
+    }
+
+    [Fact]
+    public async Task SetRemote_ThenGetRemote_RoundTrips()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var bareDir = Path.Combine(Path.GetTempPath(), "gitcli-bare-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(bareDir);
+        try
+        {
+            var setResult = await _handler.HandleAsync(new GitRequest("set-remote", _tempDir, RemoteUrl: bareDir));
+            Assert.True(setResult.Success);
+
+            var hasRemote = await _handler.HandleAsync(new GitRequest("has-remote", _tempDir));
+            Assert.True(hasRemote.HasRemote);
+
+            var getResult = await _handler.HandleAsync(new GitRequest("get-remote", _tempDir));
+            Assert.Equal(bareDir, getResult.RemoteUrl);
+
+            // Setting again should update, not fail, an existing remote.
+            var otherDir = Path.Combine(Path.GetTempPath(), "gitcli-bare2-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(otherDir);
+            try
+            {
+                var updateResult = await _handler.HandleAsync(new GitRequest("set-remote", _tempDir, RemoteUrl: otherDir));
+                Assert.True(updateResult.Success);
+                var reGet = await _handler.HandleAsync(new GitRequest("get-remote", _tempDir));
+                Assert.Equal(otherDir, reGet.RemoteUrl);
+            }
+            finally
+            {
+                Directory.Delete(otherDir, recursive: true);
+            }
+        }
+        finally
+        {
+            TryDeleteDirectory(bareDir);
+        }
+    }
+
+    [Fact]
+    public async Task Push_NoRemoteConfigured_ReturnsFailureWithoutThrowing()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var result = await _handler.HandleAsync(new GitRequest("push", _tempDir, BranchName: "develop"));
+
+        Assert.False(result.Success);
+    }
+
+    [Fact]
+    public async Task Push_WithRemoteConfigured_PushesBranchToRemote()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var bareDir = Path.Combine(Path.GetTempPath(), "gitcli-bare-" + Guid.NewGuid().ToString("N"));
+        RunGitRaw(bareDir, "init", "--bare");
+        try
+        {
+            await _handler.HandleAsync(new GitRequest("set-remote", _tempDir, RemoteUrl: bareDir));
+            var result = await _handler.HandleAsync(new GitRequest("push", _tempDir, BranchName: "develop"));
+
+            Assert.True(result.Success);
+        }
+        finally
+        {
+            TryDeleteDirectory(bareDir);
+        }
+    }
+
+    [Fact]
+    public async Task DeleteBranch_LocalOnly_NoRemote_DeletesLocalBranch()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        await _handler.HandleAsync(new GitRequest("branch", _tempDir, BranchName: "feature/gone"));
+
+        var result = await _handler.HandleAsync(new GitRequest("delete-branch", _tempDir, BranchName: "feature/gone"));
+
+        Assert.True(result.Success);
+        var branchList = await _handler.HandleAsync(new GitRequest("branch", _tempDir, BranchName: "throwaway-probe"));
+        Assert.DoesNotContain("feature/gone", branchList.Branches!);
+    }
+
+    [Fact]
+    public async Task DeleteBranch_WithRemote_DeletesLocalAndRemoteBranch()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var bareDir = Path.Combine(Path.GetTempPath(), "gitcli-bare-" + Guid.NewGuid().ToString("N"));
+        RunGitRaw(bareDir, "init", "--bare");
+        try
+        {
+            await _handler.HandleAsync(new GitRequest("set-remote", _tempDir, RemoteUrl: bareDir));
+            await _handler.HandleAsync(new GitRequest("branch", _tempDir, BranchName: "feature/gone"));
+            await _handler.HandleAsync(new GitRequest("push", _tempDir, BranchName: "feature/gone"));
+
+            var result = await _handler.HandleAsync(new GitRequest("delete-branch", _tempDir, BranchName: "feature/gone"));
+
+            Assert.True(result.Success);
+            var remoteBranches = RunGitRaw(_tempDir, "ls-remote", "--heads", "origin");
+            Assert.DoesNotContain("feature/gone", remoteBranches);
+        }
+        finally
+        {
+            TryDeleteDirectory(bareDir);
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            try
+            {
+                ClearReadOnlyAttributes(path);
+                Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch when (i < 4)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Thread.Sleep(200);
+            }
+        }
+    }
+
+    private static void ClearReadOnlyAttributes(string path)
+    {
+        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        {
+            var attrs = File.GetAttributes(file);
+            if (attrs.HasFlag(FileAttributes.ReadOnly))
+                File.SetAttributes(file, attrs & ~FileAttributes.ReadOnly);
+        }
+    }
+
+    private static string RunGitRaw(string workingDir, params string[] args)
+    {
+        Directory.CreateDirectory(workingDir);
+        var psi = new System.Diagnostics.ProcessStartInfo("git", args)
+        {
+            WorkingDirectory = workingDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        var output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        return output;
     }
 
     [Fact]

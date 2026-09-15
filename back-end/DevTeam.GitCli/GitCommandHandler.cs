@@ -13,6 +13,11 @@ public class GitCommandHandler
             "merge" => await MergeAsync(request),
             "log" => await LogAsync(request),
             "ensure-branch" => await EnsureBranchAsync(request),
+            "push" => await PushAsync(request),
+            "delete-branch" => await DeleteBranchAsync(request),
+            "has-remote" => await HasRemoteAsync(request),
+            "get-remote" => await GetRemoteAsync(request),
+            "set-remote" => await SetRemoteAsync(request),
             _ => new GitResponse(false, $"Unknown command: {request.Command}"),
         };
 
@@ -59,7 +64,7 @@ public class GitCommandHandler
         var status = await GetStatusAsync(request.WorkspacePath);
         return new GitResponse(true, "OK",
             IsRepo: true, Branch: status.branch, IsClean: status.isClean,
-            Ahead: status.ahead, Behind: status.behind);
+            Ahead: status.ahead, Behind: status.behind, ChangedFiles: status.changedFiles);
     }
 
     private static async Task<GitResponse> BranchAsync(GitRequest request)
@@ -219,13 +224,105 @@ public class GitCommandHandler
             Branch: status.branch, IsClean: status.isClean);
     }
 
-    private static async Task<(string branch, bool isClean, int ahead, int behind)> GetStatusAsync(string workspacePath)
+    private static async Task<GitResponse> PushAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+        if (request.BranchName is null)
+            return new GitResponse(false, "branchName required");
+
+        var (hasRemote, _) = await GetRemoteUrlAsync(request.WorkspacePath);
+        if (!hasRemote)
+            return new GitResponse(false, "No remote configured");
+
+        var authArgs = BuildAuthArgs(request.AuthToken);
+        var (exit, _, err) = await RunGitAsync(request.WorkspacePath,
+            [.. authArgs, "push", "-u", "origin", request.BranchName]);
+        if (exit != 0) return new GitResponse(false, $"git push failed: {err}");
+
+        return new GitResponse(true, $"Pushed '{request.BranchName}' to origin");
+    }
+
+    private static async Task<GitResponse> DeleteBranchAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+        if (request.BranchName is null)
+            return new GitResponse(false, "branchName required");
+
+        var (exit, _, err) = await RunGitAsync(request.WorkspacePath, "branch", "-d", request.BranchName);
+        if (exit != 0) return new GitResponse(false, $"git branch -d failed: {err}");
+
+        var (hasRemote, _) = await GetRemoteUrlAsync(request.WorkspacePath);
+        if (hasRemote)
+        {
+            var authArgs = BuildAuthArgs(request.AuthToken);
+            var (remoteExit, _, remoteErr) = await RunGitAsync(request.WorkspacePath,
+                [.. authArgs, "push", "origin", "--delete", request.BranchName]);
+            if (remoteExit != 0)
+                return new GitResponse(true, $"Deleted local branch '{request.BranchName}'; remote deletion failed: {remoteErr}");
+        }
+
+        return new GitResponse(true, $"Deleted branch '{request.BranchName}'");
+    }
+
+    private static async Task<GitResponse> HasRemoteAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+
+        var (hasRemote, url) = await GetRemoteUrlAsync(request.WorkspacePath);
+        return new GitResponse(true, "OK", HasRemote: hasRemote, RemoteUrl: url);
+    }
+
+    private static async Task<GitResponse> GetRemoteAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+
+        var (hasRemote, url) = await GetRemoteUrlAsync(request.WorkspacePath);
+        return new GitResponse(true, "OK", HasRemote: hasRemote, RemoteUrl: url);
+    }
+
+    private static async Task<GitResponse> SetRemoteAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+        if (string.IsNullOrWhiteSpace(request.RemoteUrl))
+            return new GitResponse(false, "remoteUrl required");
+
+        var (hasRemote, _) = await GetRemoteUrlAsync(request.WorkspacePath);
+        var (exit, _, err) = hasRemote
+            ? await RunGitAsync(request.WorkspacePath, "remote", "set-url", "origin", request.RemoteUrl)
+            : await RunGitAsync(request.WorkspacePath, "remote", "add", "origin", request.RemoteUrl);
+        if (exit != 0) return new GitResponse(false, $"git remote failed: {err}");
+
+        return new GitResponse(true, "Remote set", HasRemote: true, RemoteUrl: request.RemoteUrl);
+    }
+
+    private static async Task<(bool hasRemote, string? url)> GetRemoteUrlAsync(string workspacePath)
+    {
+        var (exit, out_, _) = await RunGitAsync(workspacePath, "remote", "get-url", "origin");
+        if (exit != 0) return (false, null);
+        var url = out_.Trim();
+        return (!string.IsNullOrEmpty(url), string.IsNullOrEmpty(url) ? null : url);
+    }
+
+    private static string[] BuildAuthArgs(string? authToken)
+    {
+        if (string.IsNullOrEmpty(authToken)) return [];
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"x-access-token:{authToken}"));
+        return ["-c", $"http.extraHeader=AUTHORIZATION: basic {encoded}"];
+    }
+
+    private static async Task<(string branch, bool isClean, int ahead, int behind, string[] changedFiles)> GetStatusAsync(string workspacePath)
     {
         var (_, branchOut, _) = await RunGitAsync(workspacePath, "rev-parse", "--abbrev-ref", "HEAD");
         var branch = branchOut.Trim();
 
-        var (exitCode, statusOut, _) = await RunGitAsync(workspacePath, "status", "--porcelain");
+        var (exitCode, statusOut, _) = await RunGitAsync(workspacePath, "status", "--porcelain", "--untracked-files=all");
         var isClean = string.IsNullOrWhiteSpace(statusOut);
+        var changedFiles = ParsePorcelainPaths(statusOut);
 
         var (__, aheadOut, _) = await RunGitAsync(workspacePath, "rev-list", "--count", "--left-right", $"@{{upstream}}...HEAD");
         int ahead = 0, behind = 0;
@@ -239,7 +336,24 @@ public class GitCommandHandler
             }
         }
 
-        return (branch, isClean, ahead, behind);
+        return (branch, isClean, ahead, behind, changedFiles);
+    }
+
+    // Each porcelain line is "XY path" or, for a rename, "XY oldPath -> newPath" — take the
+    // path itself (git always uses forward slashes in porcelain output, even on Windows).
+    private static string[] ParsePorcelainPaths(string statusOut)
+    {
+        if (string.IsNullOrWhiteSpace(statusOut)) return [];
+
+        var paths = new List<string>();
+        foreach (var line in statusOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.Length < 4) continue;
+            var pathPart = line[3..].Trim();
+            var arrowIndex = pathPart.IndexOf(" -> ", StringComparison.Ordinal);
+            paths.Add(arrowIndex >= 0 ? pathPart[(arrowIndex + 4)..] : pathPart);
+        }
+        return [.. paths];
     }
 
     private static async Task<string[]> ListBranchesAsync(string workspacePath)

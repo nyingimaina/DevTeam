@@ -10,6 +10,12 @@ public sealed class DevTeamSession
     public string? Title { get; set; }
     public string? ModelId { get; set; }
     public string? ModeId { get; set; }
+    /// <summary>
+    /// JSON array of workspace-relative directory prefixes this session's agent may write
+    /// within (e.g. ["devteam/features/login-form"]) — enforced by WorkspaceScopedPermissionPolicy.
+    /// Null means unrestricted (today's behavior): full workspace write access.
+    /// </summary>
+    public string? AllowedWritePrefixesJson { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<Message> Messages { get; set; } = [];

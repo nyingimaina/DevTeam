@@ -1,18 +1,23 @@
 import {
+  ActiveTurnInfo,
   AgentViewModel,
   FileSystemEntryDto,
   FileSystemRootDto,
   FileSystemStatDto,
+  GitCredentialsDto,
+  GitRemoteDto,
   GitStatusDto,
   HealthResponse,
   MessageDto,
+  ModelOption,
   PipelineStageDto,
-  PromptResponse,
   ReleaseDto,
+  ReleaseFeatureDto,
   SessionDetail,
-  SessionSummary,
+  StageArtifactDto,
   StagePromptResult,
   StageRunDto,
+  StoppedProcessDto,
 } from "./BrokerTypes";
 
 export default class BrokerApi {
@@ -37,30 +42,8 @@ export default class BrokerApi {
     return this.requestAsync<AgentViewModel>("/api/info");
   }
 
-  listSessionsAsync(): Promise<SessionSummary[]> {
-    return this.requestAsync<SessionSummary[]>("/api/sessions");
-  }
-
-  createSessionAsync(workspacePath: string, modelId?: string | null): Promise<SessionSummary> {
-    return this.requestAsync<SessionSummary>("/api/sessions", {
-      method: "POST",
-      body: JSON.stringify({ workspacePath, modelId }),
-    });
-  }
-
   getSessionAsync(sessionId: string): Promise<SessionDetail> {
     return this.requestAsync<SessionDetail>(`/api/sessions/${sessionId}`);
-  }
-
-  deleteSessionAsync(sessionId: string): Promise<void> {
-    return this.requestAsync<void>(`/api/sessions/${sessionId}`, { method: "DELETE" });
-  }
-
-  promptAsync(sessionId: string, text: string): Promise<PromptResponse> {
-    return this.requestAsync<PromptResponse>(`/api/sessions/${sessionId}/prompt`, {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
   }
 
   setModelAsync(sessionId: string, modelId: string): Promise<{ modelId: string }> {
@@ -96,6 +79,32 @@ export default class BrokerApi {
     });
   }
 
+  revealInExplorerAsync(path: string): Promise<void> {
+    return this.requestAsync<void>("/api/fs/reveal", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+  }
+
+  cleanupWorkspaceAsync(workspacePath: string): Promise<StoppedProcessDto[]> {
+    return this.requestAsync<StoppedProcessDto[]>("/api/fs/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath }),
+    });
+  }
+
+  getCurrentTurnAsync(): Promise<ActiveTurnInfo | undefined> {
+    return this.requestAsync<ActiveTurnInfo | undefined>("/api/turns/current");
+  }
+
+  // A 404 here just means the turn already finished before the cancel arrived —
+  // an expected race, not an error, so this reports success/failure via the
+  // return value instead of throwing like requestAsync would.
+  async cancelCurrentTurnAsync(): Promise<boolean> {
+    const response = await fetch("/api/turns/current/cancel", { method: "POST" });
+    return response.ok;
+  }
+
   // ─── release endpoints ────────────────────────────────────────────────
 
   createReleaseAsync(featureKey: string, workspacePath: string): Promise<ReleaseDto> {
@@ -105,24 +114,32 @@ export default class BrokerApi {
     });
   }
 
-  listReleasesAsync(): Promise<ReleaseDto[]> {
-    return this.requestAsync<ReleaseDto[]>("/api/releases");
+  listReleasesAsync(workspacePath?: string): Promise<ReleaseDto[]> {
+    const query = workspacePath ? `?workspacePath=${encodeURIComponent(workspacePath)}` : "";
+    return this.requestAsync<ReleaseDto[]>(`/api/releases${query}`);
   }
 
   getReleaseAsync(releaseId: string): Promise<ReleaseDto> {
     return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}`);
   }
 
-  advanceReleaseAsync(releaseId: string): Promise<ReleaseDto> {
-    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/advance`, {
+  advanceFeatureAsync(featureId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/advance`, {
       method: "POST",
     });
   }
 
-  signoffReleaseAsync(releaseId: string, stageName: string, role: string, comment?: string): Promise<ReleaseDto> {
-    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/signoff`, {
+  signoffFeatureAsync(featureId: string, stageName: string, role: string, comment?: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/signoff`, {
       method: "POST",
       body: JSON.stringify({ stageName, role, comment }),
+    });
+  }
+
+  createFeatureAsync(releaseId: string, featureKey: string): Promise<ReleaseFeatureDto> {
+    return this.requestAsync<ReleaseFeatureDto>(`/api/releases/${releaseId}/features`, {
+      method: "POST",
+      body: JSON.stringify({ featureKey }),
     });
   }
 
@@ -164,43 +181,77 @@ export default class BrokerApi {
     return this.requestAsync<GitStatusDto>(`/api/git/log?workspacePath=${encodeURIComponent(workspacePath)}`);
   }
 
+  getGitRemoteAsync(workspacePath: string): Promise<GitRemoteDto> {
+    return this.requestAsync<GitRemoteDto>(`/api/git/remote?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  setGitRemoteAsync(workspacePath: string, url: string, credentialName?: string | null): Promise<GitRemoteDto> {
+    return this.requestAsync<GitRemoteDto>("/api/git/remote", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, url, credentialName }),
+    });
+  }
+
+  setGitCredentialAsync(name: string, token: string): Promise<{ ok: boolean }> {
+    return this.requestAsync<{ ok: boolean }>("/api/git/credential", {
+      method: "POST",
+      body: JSON.stringify({ name, token }),
+    });
+  }
+
+  listGitCredentialsAsync(): Promise<GitCredentialsDto> {
+    return this.requestAsync<GitCredentialsDto>("/api/git/credentials");
+  }
+
   // ─── stage endpoints ────────────────────────────────────────────────────
 
-  startStageAsync(releaseId: string): Promise<StageRunDto> {
-    return this.requestAsync<StageRunDto>(`/api/releases/${releaseId}/start-stage`, {
+  startStageAsync(featureId: string): Promise<StageRunDto> {
+    return this.requestAsync<StageRunDto>(`/api/features/${featureId}/start-stage`, {
       method: "POST",
     });
   }
 
-  sendStageMessageAsync(releaseId: string, text: string): Promise<StagePromptResult> {
-    return this.requestAsync<StagePromptResult>(`/api/releases/${releaseId}/send-message`, {
+  sendStageMessageAsync(featureId: string, text: string): Promise<StagePromptResult> {
+    return this.requestAsync<StagePromptResult>(`/api/features/${featureId}/send-message`, {
       method: "POST",
       body: JSON.stringify({ text }),
     });
   }
 
-  runStageGatesAsync(releaseId: string): Promise<ReleaseDto> {
-    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/run-gates`, {
+  runStageGatesAsync(featureId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/run-gates`, {
       method: "POST",
     });
   }
 
-  getPipelineAsync(releaseId: string): Promise<PipelineStageDto[]> {
-    return this.requestAsync<PipelineStageDto[]>(`/api/releases/${releaseId}/pipeline`);
+  getPipelineAsync(featureId: string): Promise<PipelineStageDto[]> {
+    return this.requestAsync<PipelineStageDto[]>(`/api/features/${featureId}/pipeline`);
   }
 
-  getStageMessagesAsync(releaseId: string, stageRunId: string): Promise<MessageDto[]> {
-    return this.requestAsync<MessageDto[]>(`/api/releases/${releaseId}/stages/${stageRunId}/messages`);
+  getAvailableModelsAsync(releaseId: string): Promise<ModelOption[]> {
+    return this.requestAsync<ModelOption[]>(`/api/releases/${releaseId}/models`);
   }
 
-  runStageAsync(releaseId: string): Promise<ReleaseDto> {
-    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/run-stage`, {
+  getStageMessagesAsync(featureId: string, stageRunId: string): Promise<MessageDto[]> {
+    return this.requestAsync<MessageDto[]>(`/api/features/${featureId}/stages/${stageRunId}/messages`);
+  }
+
+  getStageArtifactsAsync(featureId: string, stageRunId: string): Promise<StageArtifactDto[]> {
+    return this.requestAsync<StageArtifactDto[]>(`/api/features/${featureId}/stages/${stageRunId}/artifacts`);
+  }
+
+  getWorkspaceChangesAsync(featureId: string): Promise<string[]> {
+    return this.requestAsync<string[]>(`/api/features/${featureId}/workspace-changes`);
+  }
+
+  runStageAsync(featureId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/run-stage`, {
       method: "POST",
     });
   }
 
-  pushBackAsync(releaseId: string, targetStageName: string, instructions: string): Promise<ReleaseDto> {
-    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/push-back`, {
+  pushBackAsync(featureId: string, targetStageName: string, instructions: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/push-back`, {
       method: "POST",
       body: JSON.stringify({ targetStageName, instructions }),
     });

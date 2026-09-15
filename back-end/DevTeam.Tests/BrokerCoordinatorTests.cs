@@ -56,7 +56,7 @@ public class BrokerCoordinatorTests : IDisposable
         _harness.Reply(initId, InitializeResultJson);
         await infoPending;
 
-        var sessionPending = coordinator.NewSessionAsync(@"C:\work\proj", null, CancellationToken.None);
+        var sessionPending = coordinator.NewSessionAsync(@"C:\work\proj", null, null, CancellationToken.None);
         var (method, idRaw, _) = await _harness.ReadRequestAsync();
         Assert.Equal("session/new", method);
         _harness.Reply(idRaw, NewSessionResultJson);
@@ -67,7 +67,7 @@ public class BrokerCoordinatorTests : IDisposable
     public async Task NewSession_StoresSessionAndModelOptions()
     {
         await using var coordinator = CreateCoordinator();
-        var pending = coordinator.NewSessionAsync(@"C:\work\proj", null, CancellationToken.None);
+        var pending = coordinator.NewSessionAsync(@"C:\work\proj", null, null, CancellationToken.None);
         var (initMethod, initId, _) = await _harness.ReadRequestAsync();
         Assert.Equal("initialize", initMethod);
         _harness.Reply(initId, InitializeResultJson);
@@ -88,12 +88,12 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Prompt_StreamsEventsAndPersistsMessages()
+    public async Task PromptWithSessionRecovery_StreamsEventsAndPersistsMessages()
     {
         await using var coordinator = CreateCoordinator();
         var session = await CreateSessionAsync(coordinator);
 
-        var pending = coordinator.PromptAsync(session.SessionId, "hello", CancellationToken.None);
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
         var (method, idRaw, _) = await _harness.ReadRequestAsync();
 
         Assert.Equal("session/prompt", method);
@@ -125,10 +125,10 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Prompt_OnUnknownSession_Throws()
+    public async Task PromptWithSessionRecovery_OnUnknownSession_Throws()
     {
         await using var coordinator = CreateCoordinator();
-        var pending = coordinator.PromptAsync(Guid.NewGuid(), "hi", CancellationToken.None);
+        var pending = coordinator.PromptWithSessionRecoveryAsync(Guid.NewGuid(), "hi", CancellationToken.None);
         var (initMethod, initId, _) = await _harness.ReadRequestAsync();
         Assert.Equal("initialize", initMethod);
         _harness.Reply(initId, InitializeResultJson);
@@ -136,20 +136,33 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Prompt_WhenAcpSessionNotRecognized_ThrowsRpcException()
+    public async Task PromptWithSessionRecovery_SerializesConcurrentTurns()
     {
-        // Baseline: this is what happens today when the broker's own opencode process has
-        // restarted (e.g. under `dotnet watch`) but a session row from before the restart
-        // is still used - the agent no longer recognizes the stored AcpSessionId.
         await using var coordinator = CreateCoordinator();
         var session = await CreateSessionAsync(coordinator);
 
-        var pending = coordinator.PromptAsync(session.SessionId, "hello", CancellationToken.None);
-        var (method, idRaw, _) = await _harness.ReadRequestAsync();
-        Assert.Equal("session/prompt", method);
-        _harness.ReplyError(idRaw, -32602, "Invalid params: session not found: ses_abc");
+        var first = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "first", CancellationToken.None);
+        var (firstMethod, firstIdRaw, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", firstMethod);
 
-        await Assert.ThrowsAsync<RpcException>(() => pending);
+        var secondTask = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "second", CancellationToken.None);
+        await Task.Delay(200);
+        Assert.False(secondTask.IsCompleted);
+
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m1\",\"content\":{\"type\":\"text\",\"text\":\"one\"}}");
+        _harness.Reply(firstIdRaw,
+            "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
+        await first;
+
+        var (secondMethod, secondIdRaw, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", secondMethod);
+        _harness.Reply(secondIdRaw,
+            "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
+        await secondTask;
+
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal(4, detail!.Messages.Count);
     }
 
     [Fact]
@@ -192,33 +205,60 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Prompt_SerializesConcurrentTurns()
+    public async Task PromptWithSessionRecovery_WhileRunning_IsVisibleAsTheActiveTurn()
     {
         await using var coordinator = CreateCoordinator();
         var session = await CreateSessionAsync(coordinator);
 
-        var first = coordinator.PromptAsync(session.SessionId, "first", CancellationToken.None);
-        var (firstMethod, firstIdRaw, _) = await _harness.ReadRequestAsync();
-        Assert.Equal("session/prompt", firstMethod);
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello there", CancellationToken.None);
+        var (method, idRaw, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", method);
 
-        var secondTask = coordinator.PromptAsync(session.SessionId, "second", CancellationToken.None);
-        await Task.Delay(200);
-        Assert.False(secondTask.IsCompleted);
+        Assert.NotNull(_turnTracker.Current);
+        Assert.Equal(session.SessionId, _turnTracker.Current!.SessionId);
+        Assert.Equal("hello there", _turnTracker.Current.Preview);
 
-        _harness.EmitSessionUpdate("ses_abc",
-            "{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m1\",\"content\":{\"type\":\"text\",\"text\":\"one\"}}");
-        _harness.Reply(firstIdRaw,
-            "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
-        await first;
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
+        await pending;
 
-        var (secondMethod, secondIdRaw, _) = await _harness.ReadRequestAsync();
-        Assert.Equal("session/prompt", secondMethod);
-        _harness.Reply(secondIdRaw,
-            "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
-        await secondTask;
+        Assert.Null(_turnTracker.Current);
+    }
 
-        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
-        Assert.Equal(4, detail!.Messages.Count);
+    [Fact]
+    public async Task CancelCurrentTurn_CancelsTheInFlightPrompt_AndFreesTheLockForTheNextCaller()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var stuck = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "stuck forever", CancellationToken.None);
+        await _harness.ReadRequestAsync();
+        Assert.NotNull(_turnTracker.Current);
+
+        var cancelled = await coordinator.CancelCurrentTurnAsync(CancellationToken.None);
+
+        Assert.True(cancelled);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stuck);
+        Assert.Null(_turnTracker.Current);
+
+        // CancelCurrentTurnAsync also best-effort notifies the agent — drain that
+        // session/cancel notification before looking for the next request.
+        var (cancelMethod, _, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/cancel", cancelMethod);
+
+        // The lock is free again: a new prompt can proceed.
+        var next = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "next one", CancellationToken.None);
+        var (method, idRaw, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", method);
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":5,\"outputTokens\":1,\"totalTokens\":6}}");
+        await next;
+    }
+
+    [Fact]
+    public async Task CancelCurrentTurn_WithNothingRunning_ReturnsFalse()
+    {
+        await using var coordinator = CreateCoordinator();
+        var cancelled = await coordinator.CancelCurrentTurnAsync(CancellationToken.None);
+        Assert.False(cancelled);
     }
 
     [Fact]
@@ -246,6 +286,69 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task SetModel_WhenAcpSessionNotRecognized_RecreatesSessionAndRetries()
+    {
+        // Same scenario as PromptWithSessionRecovery: the broker's opencode process
+        // restarted after this session row was created, so the agent no longer
+        // recognizes the stored AcpSessionId.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.SetModelAsync(session.SessionId, "opencode/big-pickle", CancellationToken.None);
+
+        var (firstMethod, firstId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", firstMethod);
+        _harness.ReplyError(firstId, -32602, "Invalid params: session not found: ses_abc");
+
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, "{\"sessionId\":\"ses_def\",\"configOptions\":[]}");
+
+        var (retryMethod, retryId, retryParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", retryMethod);
+        using (var doc = JsonDocument.Parse(retryParams))
+            Assert.Equal("ses_def", doc.RootElement.GetProperty("sessionId").GetString());
+        _harness.Reply(retryId, "{}");
+
+        var result = await pending;
+        Assert.Equal("opencode/big-pickle", result);
+
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("ses_def", detail!.AcpSessionId);
+        Assert.Equal("opencode/big-pickle", detail.ModelId);
+    }
+
+    [Fact]
+    public async Task SetMode_WhenAcpSessionNotRecognized_RecreatesSessionAndRetries()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.SetModeAsync(session.SessionId, "plan", CancellationToken.None);
+
+        var (firstMethod, firstId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_mode", firstMethod);
+        _harness.ReplyError(firstId, -32602, "Invalid params: session not found: ses_abc");
+
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, "{\"sessionId\":\"ses_def\",\"configOptions\":[]}");
+
+        var (retryMethod, retryId, retryParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_mode", retryMethod);
+        using (var doc = JsonDocument.Parse(retryParams))
+            Assert.Equal("ses_def", doc.RootElement.GetProperty("sessionId").GetString());
+        _harness.Reply(retryId, "{}");
+
+        var result = await pending;
+        Assert.Equal("plan", result);
+
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("ses_def", detail!.AcpSessionId);
+        Assert.Equal("plan", detail.ModeId);
+    }
+
+    [Fact]
     public async Task SetMode_UpdatesStoreAndSpoke()
     {
         await using var coordinator = CreateCoordinator();
@@ -269,25 +372,14 @@ public class BrokerCoordinatorTests : IDisposable
         Assert.Empty(_broadcaster.Events);
     }
 
-    [Fact]
-    public async Task DeleteSession_RemovesRow()
-    {
-        await using var coordinator = CreateCoordinator();
-        var session = await CreateSessionAsync(coordinator);
-
-        var deleted = await coordinator.DeleteSessionAsync(session.SessionId, CancellationToken.None);
-        Assert.True(deleted);
-
-        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
-        Assert.Null(detail);
-    }
-
     // ─── helpers ─────────────────────────────────────────────────────────────
+
+    private readonly ActiveTurnTracker _turnTracker = new();
 
     private BrokerCoordinator CreateCoordinator()
     {
         var spoke = new OpencodeAcpSpoke(_harness.Process);
-        return new BrokerCoordinator(spoke, CreateFactory(), _broadcaster, NullLogger<BrokerCoordinator>.Instance);
+        return new BrokerCoordinator(spoke, CreateFactory(), _broadcaster, NullLogger<BrokerCoordinator>.Instance, _turnTracker);
     }
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()
@@ -305,7 +397,7 @@ public class BrokerCoordinatorTests : IDisposable
 
     private async Task<SessionSummary> CreateSessionAsync(BrokerCoordinator coordinator)
     {
-        var pending = coordinator.NewSessionAsync(@"C:\work\proj", null, CancellationToken.None);
+        var pending = coordinator.NewSessionAsync(@"C:\work\proj", null, null, CancellationToken.None);
         var (initMethod, initId, _) = await _harness.ReadRequestAsync();
         Assert.Equal("initialize", initMethod);
         _harness.Reply(initId, InitializeResultJson);

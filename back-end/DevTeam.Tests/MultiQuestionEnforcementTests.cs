@@ -83,9 +83,10 @@ public class MultiQuestionEnforcementTests : IDisposable
         _coordinator.UserTurnReply = "What should the login form do?";
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
-        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
 
-        await engine.SendMessageEnforcingSingleQuestionAsync(release.Id, "We need a login form", CancellationToken.None);
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
         Assert.DoesNotContain(_coordinator.Prompts, p => p == MultiQuestionDetector.CorrectionPrompt);
         Assert.Single(_coordinator.Prompts, p => p == "We need a login form");
@@ -97,9 +98,10 @@ public class MultiQuestionEnforcementTests : IDisposable
         _coordinator.UserTurnReply = "What should it do? And who is the end user?";
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
-        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
 
-        var result = await engine.SendMessageEnforcingSingleQuestionAsync(release.Id, "We need a login form", CancellationToken.None);
+        var result = await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
         Assert.Single(_coordinator.Prompts, p => p == MultiQuestionDetector.CorrectionPrompt);
         Assert.Equal("end_turn", result.Response);
@@ -123,9 +125,10 @@ public class MultiQuestionEnforcementTests : IDisposable
         _coordinator.ReplyMultiQuestionToCorrections = true;
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
-        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
 
-        await engine.SendMessageEnforcingSingleQuestionAsync(release.Id, "We need a login form", CancellationToken.None);
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
         Assert.Equal(MultiQuestionDetector.MaxCorrections,
             _coordinator.Prompts.Count(p => p == MultiQuestionDetector.CorrectionPrompt));
@@ -139,9 +142,10 @@ public class MultiQuestionEnforcementTests : IDisposable
             Guid.NewGuid(), "max_calls_reached", 7, 3, 10);
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
-        await engine.StartStageAsync(release.Id, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
 
-        var result = await engine.SendMessageEnforcingSingleQuestionAsync(release.Id, "We need a login form", CancellationToken.None);
+        var result = await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
         Assert.Equal("max_calls_reached", result.Response);
         Assert.Equal(10, result.TotalTokens);
@@ -149,7 +153,8 @@ public class MultiQuestionEnforcementTests : IDisposable
 
     private WorkflowEngine CreateEngine() => new(
         CreateFactory(), _gateRunner, _coordinator, _broadcaster,
-        new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance);
+        new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
+        new ModelCatalogService(_coordinator), new FakeGitCredentialStore());
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()
         => new SqliteDbContextFactory(_connection);
@@ -177,13 +182,14 @@ internal sealed class PersistingFakeCoordinator : IWorkflowCoordinator
 
     private long _tick;
 
-    public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, CancellationToken ct)
+    public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken ct)
     {
         using var db = _dbFactory.CreateDbContext();
         var session = new DevTeamSession
         {
             WorkspacePath = workspacePath,
             AcpSessionId = "acp-" + Guid.NewGuid().ToString("N"),
+            AllowedWritePrefixesJson = allowedWritePrefixes is null ? null : System.Text.Json.JsonSerializer.Serialize(allowedWritePrefixes),
         };
         db.Sessions.Add(session);
         db.SaveChanges();

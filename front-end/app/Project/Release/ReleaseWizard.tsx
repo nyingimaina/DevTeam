@@ -1,15 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
+import { usePoller } from "../../Chat/Data/usePoller";
 import {
+  ActiveTurnInfo,
   MessageDto,
+  ModelOption,
   PipelineStageDto,
   ReleaseDto,
+  ReleaseGateCheckDto,
+  ReleaseSignoffDto,
   ReleaseStageRunDto,
   ReviewFindingDto,
+  StageArtifactDto,
 } from "../../Chat/Data/BrokerTypes";
 import MessageRow from "../../Chat/UI/MessageRow";
 import ZestButton from "jattac.libs.web.zest-button";
-import { phaseLabel, stageLabel, statusLabel, whatsNext } from "./labels";
+import { FaSpinner } from "react-icons/fa6";
+import { moveOnButtonLabel, phaseLabel, proceedButtonLabel, stageLabel, statusLabel, whatsNext } from "./labels";
+import { formatElapsed } from "../../UI/formatElapsed";
 import styles from "../Styles/ReleaseWizard.module.css";
 
 interface IReleaseWizardProps {
@@ -36,14 +44,28 @@ function statusColor(status: string): string {
   }
 }
 
-function isRunning(status: string): boolean {
-  return status === "Active" || status === "Producing" || status === "Gates" || status === "Challenge" || status === "Signoff";
+function shouldPollStage(status: string): boolean {
+  return status === "Active" || status === "GatesRunning" || status === "BlockedGate" || status === "BlockedSignoff";
 }
 
 function latestRunFor(release: ReleaseDto, stageName: string): ReleaseStageRunDto | undefined {
   const runs = release.stageRuns.filter((sr) => sr.stageName === stageName);
   if (runs.length === 0) return undefined;
   return [...runs].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""))[0];
+}
+
+// Deterministic, no LLM: joins the actual failed gate-check/finding evidence already on the
+// stage run into a starting draft, so a novice reviews/edits real failure detail instead of
+// transcribing cryptic stack traces into a blank box themselves.
+function draftPushBackInstructions(stageRun: ReleaseStageRunDto): string {
+  const lines: string[] = [];
+  for (const gc of stageRun.gateChecks) {
+    if (!gc.passed) lines.push(`${gc.name}: ${gc.evidenceText ?? "failed"}`);
+  }
+  for (const f of stageRun.findings) {
+    lines.push(`${f.severity} finding in ${f.target}: ${f.summary}`);
+  }
+  return lines.join("\n\n");
 }
 
 export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "release" }: IReleaseWizardProps) {
@@ -59,14 +81,14 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
     setLoading(true);
     setError(null);
     try {
-      const list = await api.listReleasesAsync();
+      const list = await api.listReleasesAsync(workspacePath);
       setReleases(list);
     } catch (e) {
       setError(toErrorMessage(e));
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, workspacePath]);
 
   useEffect(() => {
     if (view === "list") loadReleases();
@@ -212,18 +234,30 @@ interface IReleaseDetailProps {
 }
 
 function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh, onReleaseUpdated }: IReleaseDetailProps) {
+  const featureId = release.currentFeatureId ?? null;
   const [pipeline, setPipeline] = useState<PipelineStageDto[]>([]);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
+
+  const handleRevealWorkspace = useCallback(async () => {
+    setRevealError(null);
+    try {
+      await api.revealInExplorerAsync(release.workspacePath);
+    } catch (e) {
+      setRevealError(toErrorMessage(e));
+    }
+  }, [api, release.workspacePath]);
 
   const loadPipeline = useCallback(async () => {
+    if (!featureId) { setPipeline([]); return; }
     setPipelineError(null);
     try {
-      const p = await api.getPipelineAsync(release.id);
+      const p = await api.getPipelineAsync(featureId);
       setPipeline(p);
     } catch (e) {
       setPipelineError(toErrorMessage(e));
     }
-  }, [api, release.id]);
+  }, [api, featureId]);
 
   useEffect(() => {
     void loadPipeline();
@@ -249,19 +283,54 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
 
   const role = stageIndex < pipeline.length ? pipeline[stageIndex] : null;
   const run = role ? latestRunFor(release, role.name) : undefined;
-  const currentRunId = run?.id;
+  const nextStageName = stageIndex + 1 < pipeline.length ? pipeline[stageIndex + 1].name : null;
 
+  // Background sync so status changes (gates passing, signoff becoming required, a push-back)
+  // show up on their own — no manual Refresh needed, and no exclusion for interactive stages
+  // like the old interval had (that exclusion was the root cause of BA never re-syncing).
+  // maxConsecutiveErrors is intentionally left unset: if the backend restarts, this keeps
+  // retrying at its backed-off interval and quietly resumes the moment it's back, rather than
+  // giving up and requiring a hard reload.
+  const { pollNow: pollReleaseNow } = usePoller<ReleaseDto>({
+    enabled: featureId !== null,
+    func: () => api.getReleaseAsync(release.id),
+    onResult: (fresh) => {
+      setPipelineError(null);
+      onReleaseUpdated(fresh);
+    },
+    onError: (e) => setPipelineError(toErrorMessage(e)),
+    pollIntervalMilliseconds: 3000,
+    maxIntervalMilliseconds: 20000,
+    deps: [release.id, featureId],
+  });
+
+  const pendingCurrentSignoff = release.signoffs.filter(
+    (s) => s.required && !s.approved && role !== null && s.stageName === role.name,
+  );
+
+  // "Continue working" dismisses the stage-complete card without sending a message, so the
+  // user can re-read the chat without the card in the way. It only hides the card itself —
+  // the always-visible approve control below (rendered whenever the stage is still ready)
+  // means dismissing never removes the only way to actually proceed.
+  const [dismissedReadyRunId, setDismissedReadyRunId] = useState<string | null>(null);
   useEffect(() => {
-    if (!run || !role || role.userInputRequired) return;
-    if (!isRunning(run.status)) return;
-    const timer = window.setInterval(() => {
-      void refreshRelease();
-    }, 2000);
-    return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, release.id, currentRunId, run?.status, role?.userInputRequired]);
+    if (!run?.readyToProceed) setDismissedReadyRunId(null);
+  }, [run?.readyToProceed, run?.id]);
 
-  const pendingSignoffs = release.signoffs.filter((s) => s.required && !s.approved);
+  const showReview = pendingCurrentSignoff.length > 0 && run?.readyToProceed === true && run.id !== dismissedReadyRunId;
+  const showApproveNow = pendingCurrentSignoff.length > 0 && run?.readyToProceed === true && !showReview;
+
+  const handleRefreshClick = useCallback(() => {
+    setDismissedReadyRunId(null);
+    pollReleaseNow();
+    onRefresh();
+  }, [onRefresh, pollReleaseNow]);
+
+  const {
+    approve: approveNow,
+    loading: approveNowLoading,
+    error: approveNowError,
+  } = useApproveSignoff(featureId ?? "", pendingCurrentSignoff, api, onReleaseUpdated);
 
   return (
     <div className={styles.detailView}>
@@ -270,7 +339,7 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
           zest={{ buttonStyle: "text", visualOptions: { size: "sm" } }}>Back</ZestButton>
         <h2>{release.title ?? release.features[0]?.key}</h2>
         <span className={`${styles.releaseStatus} ${statusColor(release.status)}`}>{statusLabel(release.status)}</span>
-        <ZestButton type="button" onClick={onRefresh} disabled={loading}
+        <ZestButton type="button" onClick={handleRefreshClick} disabled={loading}
           zest={{ semanticType: "refresh", busyOptions: { preventRageClick: true }, buttonStyle: "text", visualOptions: { size: "sm" } }}>
           Refresh
         </ZestButton>
@@ -280,54 +349,163 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
         <summary>Advanced details</summary>
         <div className={styles.detailInfo}>
           <span>ID: {release.id.slice(0, 8)}...</span>
-          <span>Workspace: {release.workspacePath}</span>
+          <span>
+            Workspace:{" "}
+            <button
+              type="button"
+              className={styles.workspaceLink}
+              data-testid={`${testIdPrefix}-reveal-workspace-btn`}
+              onClick={handleRevealWorkspace}
+              title="Open in file explorer"
+            >
+              {release.workspacePath}
+            </button>
+          </span>
           <span>Version: {release.version}</span>
         </div>
+        {revealError && <div className={styles.error}>{revealError}</div>}
       </details>
 
-      {pipeline.length > 0 && (
-        <PipelineStepper pipeline={pipeline} stageIndex={stageIndex} signoffs={release.signoffs} />
+      {!featureId && (
+        <CreateFeatureForm
+          release={release}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          onReleaseUpdated={onReleaseUpdated}
+        />
       )}
 
-      {pipelineError && <div className={styles.error}>{pipelineError}</div>}
+      {featureId && (
+        <>
+          {pipeline.length > 0 && (
+            <PipelineStepper pipeline={pipeline} stageIndex={stageIndex} signoffs={release.signoffs} />
+          )}
 
-      <StageScreen
-        release={release}
-        api={api}
-        pipeline={pipeline}
-        role={role}
-        run={run}
-        testIdPrefix={testIdPrefix}
-        refreshRelease={refreshRelease}
-      />
+          {pipelineError && <div className={styles.error}>{pipelineError}</div>}
 
-      {pendingSignoffs.length > 0 && (
-        <div className={styles.signoffSection}>
-          <h3>Your review</h3>
-          <p className={styles.signoffIntro}>
-            The {stageLabel(pendingSignoffs[0].stageName)} stage finished and needs your signoff before moving on.
-          </p>
-          {pendingSignoffs.map((s) => (
-            <SignoffButton
-              key={s.stageName}
-              release={release}
-              signoff={s}
+          <StageScreen
+            release={release}
+            featureId={featureId}
+            api={api}
+            pipeline={pipeline}
+            role={role}
+            run={run}
+            testIdPrefix={testIdPrefix}
+            refreshRelease={refreshRelease}
+            hidePrimaryPanel={showReview}
+          />
+
+          {showReview && run && (
+            <StageCompleteCard
+              featureId={featureId}
+              stageRun={run}
+              pendingSignoffs={pendingCurrentSignoff}
               api={api}
               testIdPrefix={testIdPrefix}
+              nextStageName={nextStageName}
               onReleaseUpdated={onReleaseUpdated}
+              onContinue={() => setDismissedReadyRunId(run.id)}
             />
-          ))}
-        </div>
+          )}
+
+          {showApproveNow && (
+            <div className={styles.stageHandoff}>
+              {approveNowError && <div className={styles.error}>{approveNowError}</div>}
+              <ZestButton
+                type="button"
+                onClick={() => void approveNow()}
+                disabled={approveNowLoading}
+                data-testid={`${testIdPrefix}-approve-now-btn`}
+                zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
+              >
+                {approveNowLoading ? "Proceeding…" : proceedButtonLabel(nextStageName)}
+              </ZestButton>
+            </div>
+          )}
+
+          {release.stageRuns.length > 0 && (
+            <details className={styles.timeline}>
+              <summary>Stage history</summary>
+              {release.stageRuns.map((sr) => (
+                <StageHistoryCard key={sr.id} stageRun={sr} testIdPrefix={testIdPrefix} />
+              ))}
+            </details>
+          )}
+        </>
       )}
 
-      {release.stageRuns.length > 0 && (
-        <details className={styles.timeline} open>
-          <summary>Stage history</summary>
-          {release.stageRuns.map((sr) => (
-            <StageHistoryCard key={sr.id} stageRun={sr} testIdPrefix={testIdPrefix} />
+      {release.features.some((f) => f.status === "Complete") && (
+        <details className={styles.timeline}>
+          <summary>Completed features</summary>
+          {release.features.filter((f) => f.status === "Complete").map((f) => (
+            <div key={f.id} className={styles.stageCard} data-testid={`${testIdPrefix}-completed-feature-${f.key}`}>
+              <span className={styles.stageName}>{f.key}</span>
+              <span className={styles.questionBadge}>{f.branchName} — merged</span>
+            </div>
           ))}
         </details>
       )}
+    </div>
+  );
+}
+
+// ─── create feature (GitFlow gate before coding can start) ────────────────
+
+interface ICreateFeatureFormProps {
+  release: ReleaseDto;
+  api: BrokerApi;
+  testIdPrefix: string;
+  onReleaseUpdated: (release: ReleaseDto) => void;
+}
+
+function CreateFeatureForm({ release, api, testIdPrefix, onReleaseUpdated }: ICreateFeatureFormProps) {
+  const [featureKey, setFeatureKey] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleCreate = useCallback(async () => {
+    if (!featureKey.trim()) return;
+    setCreating(true);
+    setError(null);
+    try {
+      await api.createFeatureAsync(release.id, featureKey.trim());
+      const fresh = await api.getReleaseAsync(release.id);
+      onReleaseUpdated(fresh);
+      setFeatureKey("");
+    } catch (e) {
+      setError(toErrorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  }, [api, release.id, featureKey, onReleaseUpdated]);
+
+  return (
+    <div className={styles.createView}>
+      <div className={styles.form}>
+        <p className={styles.whatsNext}>
+          Create a feature to start coding against this release. Each feature gets its own git branch,
+          and merges back into the release branch once it passes QA and signoff.
+        </p>
+        <label>
+          Feature Key
+          <input
+            value={featureKey}
+            onChange={(e) => setFeatureKey(e.target.value)}
+            placeholder="e.g. password-reset"
+            data-testid={`${testIdPrefix}-new-feature-key`}
+          />
+        </label>
+        {error && <div className={styles.error}>{error}</div>}
+        <ZestButton
+          type="button"
+          onClick={() => void handleCreate()}
+          disabled={!featureKey.trim() || creating}
+          data-testid={`${testIdPrefix}-create-feature-btn`}
+          zest={{ semanticType: "save", busyOptions: { preventRageClick: true } }}
+        >
+          {creating ? "Creating..." : "Create Feature"}
+        </ZestButton>
+      </div>
     </div>
   );
 }
@@ -350,7 +528,7 @@ function PipelineStepper({
         if (i < stageIndex) cls += ` ${styles.stepChipDone}`;
         else if (i === stageIndex) cls += ` ${styles.stepChipCurrent}`;
         else cls += ` ${styles.stepChipPending}`;
-        const approvedSignoff = signoffs.some((s) => s.required && s.approved && s.stageName === p.signoff);
+        const approvedSignoff = signoffs.some((s) => s.required && s.approved && s.stageName === p.name);
         return (
           <React.Fragment key={p.name}>
             {i > 0 && <span className={styles.stepSeparator}>›</span>}
@@ -370,15 +548,17 @@ function PipelineStepper({
 
 interface IStageScreenProps {
   release: ReleaseDto;
+  featureId: string;
   api: BrokerApi;
   pipeline: PipelineStageDto[];
   role: PipelineStageDto | null;
   run: ReleaseStageRunDto | undefined;
   testIdPrefix: string;
   refreshRelease: () => Promise<void>;
+  hidePrimaryPanel?: boolean;
 }
 
-function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshRelease }: IStageScreenProps) {
+function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefix, refreshRelease, hidePrimaryPanel = false }: IStageScreenProps) {
   const [busy, setBusy] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
 
@@ -386,27 +566,27 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
     setBusy(true);
     setStageError(null);
     try {
-      await api.startStageAsync(release.id);
+      await api.startStageAsync(featureId);
       await refreshRelease();
     } catch (e) {
       setStageError(toErrorMessage(e));
     } finally {
       setBusy(false);
     }
-  }, [api, release.id, refreshRelease]);
+  }, [api, featureId, refreshRelease]);
 
   const handleRunStage = useCallback(async () => {
     setBusy(true);
     setStageError(null);
     try {
-      await api.runStageAsync(release.id);
+      await api.runStageAsync(featureId);
       await refreshRelease();
     } catch (e) {
       setStageError(toErrorMessage(e));
     } finally {
       setBusy(false);
     }
-  }, [api, release.id, refreshRelease]);
+  }, [api, featureId, refreshRelease]);
 
   if (release.status === "Ready" || release.status === "Complete" || !role) {
     return (
@@ -419,6 +599,13 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
   }
 
   const interactive = role.userInputRequired;
+  const roleIndex = pipeline.findIndex((p) => p.name === role.name);
+  const nextStageName = roleIndex >= 0 && roleIndex + 1 < pipeline.length ? pipeline[roleIndex + 1].name : null;
+  // A push-back moves the flow position back to an earlier stage without touching that
+  // stage's own (already Complete) run row — nothing else ever advances the position onto a
+  // stage whose current run is Complete, so this combination only happens via push-back, and
+  // means "this is the current stage again, but it has no fresh work in flight yet."
+  const needsFreshStart = !run || run.status === "Complete";
 
   return (
     <div className={styles.stagePanel}>
@@ -430,44 +617,62 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
             <span className={styles.questionBadge}>attempt {run.attempt}</span>
           </>
         )}
+        {run?.acpSessionId && (
+          <ModelPicker releaseId={release.id} sessionId={run.acpSessionId} api={api} testIdPrefix={testIdPrefix} />
+        )}
       </div>
-      {whatsNext(role.name) && <div className={styles.whatsNext}>{whatsNext(role.name)}</div>}
+
+      {!hidePrimaryPanel && !needsFreshStart && run && role.steps.length > 0 && (
+        <StepChecklist
+          testIdPrefix={testIdPrefix}
+          steps={role.steps}
+          gateChecks={run.gateChecks}
+          inProgress={!["BlockedGate", "BlockedSignoff", "Complete"].includes(run.status)}
+        />
+      )}
+
+      {!hidePrimaryPanel && whatsNext(role.name) && <div className={styles.whatsNext}>{whatsNext(role.name)}</div>}
 
       {stageError && <div className={styles.error}>{stageError}</div>}
 
-      {!run && (
+      {!hidePrimaryPanel && needsFreshStart && (
         <div className={styles.noRun}>
-          <div className={styles.noRunHint}>
-            {interactive
-              ? "This stage runs as a conversation with the agent. Start it to begin the dialogue."
-              : "This stage runs autonomously in the workspace. Start it and watch the log below."}
-          </div>
-          <ZestButton
-            type="button"
-            onClick={interactive ? handleStartStage : handleRunStage}
-            disabled={busy}
-            data-testid={`${testIdPrefix}-start-stage-btn`}
-            zest={{ semanticType: "submit", busyOptions: { preventRageClick: true } }}
-          >
-            {busy ? "Starting..." : interactive ? "Start Conversation" : "Run Stage"}
-          </ZestButton>
+          {interactive ? (
+            <>
+              <div className={styles.noRunHint}>
+                This stage runs as a conversation with the agent. Start it to begin the dialogue.
+              </div>
+              <ZestButton
+                type="button"
+                onClick={handleStartStage}
+                disabled={busy}
+                data-testid={`${testIdPrefix}-start-stage-btn`}
+                zest={{ semanticType: "submit", busyOptions: { preventRageClick: true } }}
+              >
+                {busy ? "Starting..." : "Start Conversation"}
+              </ZestButton>
+            </>
+          ) : (
+            <AutoRunNotice testIdPrefix={testIdPrefix} onRun={handleRunStage} />
+          )}
         </div>
       )}
 
-      {run && interactive && (
+      {!hidePrimaryPanel && !needsFreshStart && run && interactive && (
         <ChatStage
           key={run.id}
-          release={release}
+          featureId={featureId}
           stageRun={run}
           api={api}
           testIdPrefix={testIdPrefix}
           busy={busy}
           runStage={handleRunStage}
           refreshRelease={refreshRelease}
+          nextStageName={nextStageName}
         />
       )}
 
-      {run && !interactive && (
+      {!hidePrimaryPanel && !needsFreshStart && run && !interactive && (
         <StageLog
           key={run.id}
           release={release}
@@ -480,12 +685,23 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
         />
       )}
 
-      {run?.status === "BlockedGate" && pipeline.length > 0 && (
+      {!hidePrimaryPanel && roleIndex > 0 && (
+        <StageContextPanels
+          featureId={featureId}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          previousRoleName={pipeline[roleIndex - 1].name}
+          previousRun={latestRunFor(release, pipeline[roleIndex - 1].name)}
+        />
+      )}
+
+      {run && run.status === "BlockedGate" && pipeline.length > 0 && (
         <PushBackPanel
-          release={release}
+          featureId={featureId}
           api={api}
           stageIndex={release.flowPosition?.currentStageIndex ?? 0}
           pipeline={pipeline}
+          stageRun={run}
           testIdPrefix={testIdPrefix}
           refreshRelease={refreshRelease}
         />
@@ -494,43 +710,277 @@ function StageScreen({ release, api, pipeline, role, run, testIdPrefix, refreshR
   );
 }
 
+// ─── auto-run notice (fully automated stages: nothing for the user to do) ──
+//
+// A non-interactive stage has no user input to wait for — nothing to configure,
+// nothing to review before it runs — so it starts the instant it becomes the
+// current stage, with no click required. This covers both a stage's first-ever
+// run and landing back on one via push-back (see needsFreshStart above), since
+// from the user's perspective both are "I just arrived here, there's nothing
+// for me to do but wait." It fires once per mount only; a failed run's "Run
+// Stage Again" always stays a manual, explicit click — auto-retrying against
+// code that's still broken before the user has read why it failed or pushed
+// back would just waste a run.
+
+interface IAutoRunNoticeProps {
+  testIdPrefix: string;
+  onRun: () => void;
+}
+
+function AutoRunNotice({ testIdPrefix, onRun }: IAutoRunNoticeProps) {
+  const firedRef = useRef(false);
+  const onRunRef = useRef(onRun);
+  onRunRef.current = onRun;
+
+  useEffect(() => {
+    if (firedRef.current) return;
+    firedRef.current = true;
+    onRunRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className={styles.noRunHint} data-testid={`${testIdPrefix}-auto-run-notice`}>
+      This stage runs autonomously — starting automatically…
+    </div>
+  );
+}
+
+// ─── step checklist: known steps ticked off as they complete ──────────────
+//
+// A role's steps are fully known ahead of time from the workflow definition — only
+// completion is dynamic. A step counts as done once its name appears among the
+// polled gateChecks (Agent steps never get their own gate check, so they're
+// inferred done once a later step's check appears). The first not-yet-done step
+// gets the spinner, but only while the stage is actually still in progress —
+// once blocked/complete, nothing is running, so nothing should spin.
+
+interface IStepChecklistProps {
+  testIdPrefix: string;
+  steps: string[];
+  gateChecks: ReleaseGateCheckDto[];
+  inProgress: boolean;
+}
+
+function StepChecklist({ testIdPrefix, steps, gateChecks, inProgress }: IStepChecklistProps) {
+  let currentAssigned = false;
+
+  return (
+    <ul className={styles.stepChecklist} data-testid={`${testIdPrefix}-step-checklist`}>
+      {steps.map((name) => {
+        const check = gateChecks.find((gc) => gc.name === name);
+        let status: "done" | "current" | "pending";
+        if (check) {
+          status = "done";
+        } else if (inProgress && !currentAssigned) {
+          currentAssigned = true;
+          status = "current";
+        } else {
+          status = "pending";
+        }
+
+        return (
+          <li
+            key={name}
+            data-testid={`${testIdPrefix}-step-${name}`}
+            data-status={status}
+            className={`${styles.stepChecklistItem} ${status === "done" ? (check?.passed === false ? styles.stepFailed : styles.stepDone) : status === "current" ? styles.stepCurrent : styles.stepPending}`}
+          >
+            {status === "done" && (check?.passed === false ? "✗ " : "✓ ")}
+            {status === "current" && <FaSpinner className={styles.spinIcon} aria-hidden="true" />}
+            {" "}{name}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+// ─── stage context: previous stage's output (reference) + live changed files ──
+//
+// Deterministic and LLM-free by design: nothing here infers which requirement is
+// "active" — it just surfaces the previous stage's completed artifacts alongside
+// the current stage's live file changes, so the user can make that connection
+// themselves. Shown for every stage except the first (nothing precedes it).
+
+interface IStageContextPanelsProps {
+  featureId: string;
+  api: BrokerApi;
+  testIdPrefix: string;
+  previousRoleName: string;
+  previousRun: ReleaseStageRunDto | undefined;
+}
+
+function StageContextPanels({ featureId, api, testIdPrefix, previousRoleName, previousRun }: IStageContextPanelsProps) {
+  const [artifacts, setArtifacts] = useState<StageArtifactDto[]>([]);
+
+  useEffect(() => {
+    if (!previousRun) {
+      setArtifacts([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await api.getStageArtifactsAsync(featureId, previousRun.id);
+        if (!cancelled) setArtifacts(result);
+      } catch {
+        // Best-effort reference panel — a failed fetch just leaves it empty.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, featureId, previousRun?.id]);
+
+  const [changedFiles, setChangedFiles] = useState<string[]>([]);
+  usePoller<string[]>({
+    enabled: true,
+    func: () => api.getWorkspaceChangesAsync(featureId),
+    onResult: (files) => setChangedFiles(files),
+    pollIntervalMilliseconds: 3000,
+    maxIntervalMilliseconds: 15000,
+    deps: [featureId],
+  });
+
+  return (
+    <div className={styles.contextPanels}>
+      <details className={styles.advancedDetails} data-testid={`${testIdPrefix}-previous-stage-panel`}>
+        <summary>{stageLabel(previousRoleName)} output (reference)</summary>
+        {artifacts.length === 0 && <div className={styles.stageSummary}>No artifacts yet.</div>}
+        {artifacts.map((a) => (
+          <div key={a.relativePath}>
+            <div className={styles.detailInfo}>{a.relativePath}</div>
+            {a.content != null && <pre className={styles.detailInfo}>{a.content}</pre>}
+          </div>
+        ))}
+      </details>
+
+      <div className={styles.advancedDetails} data-testid={`${testIdPrefix}-changed-files-panel`}>
+        <div>Files changed this attempt:</div>
+        {changedFiles.length === 0 ? (
+          <div className={styles.stageSummary}>No changes yet.</div>
+        ) : (
+          <ul className={styles.changedFilesList}>
+            {changedFiles.map((f) => <li key={f}>{f}</li>)}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── model picker (let a non-technical user swap the AI engine) ───────────
+
+interface IModelPickerProps {
+  releaseId: string;
+  sessionId: string;
+  api: BrokerApi;
+  testIdPrefix: string;
+}
+
+function ModelPicker({ releaseId, sessionId, api, testIdPrefix }: IModelPickerProps) {
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [currentModelId, setCurrentModelId] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [available, session] = await Promise.all([
+          api.getAvailableModelsAsync(releaseId),
+          api.getSessionAsync(sessionId),
+        ]);
+        if (cancelled) return;
+        setModels(available);
+        setCurrentModelId(session.modelId ?? available[0]?.value ?? null);
+      } catch (e) {
+        if (!cancelled) setError(toErrorMessage(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [api, releaseId, sessionId]);
+
+  const handleChange = useCallback(async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const modelId = e.target.value;
+    setSwitching(true);
+    setError(null);
+    try {
+      await api.setModelAsync(sessionId, modelId);
+      setCurrentModelId(modelId);
+    } catch (err) {
+      setError(toErrorMessage(err));
+    } finally {
+      setSwitching(false);
+    }
+  }, [api, sessionId]);
+
+  if (models.length === 0) return null;
+
+  return (
+    <div className={styles.modelPicker}>
+      <label className={styles.modelPickerLabel}>
+        AI Engine
+        <select
+          value={currentModelId ?? ""}
+          onChange={(e) => void handleChange(e)}
+          disabled={switching}
+          data-testid={`${testIdPrefix}-model-picker`}
+        >
+          {models.map((m) => (
+            <option key={m.value} value={m.value}>{m.name}</option>
+          ))}
+        </select>
+      </label>
+      {error && <div className={styles.error}>{error}</div>}
+    </div>
+  );
+}
+
 // ─── interactive chat stage (mirrors the Chat tab for this stage) ──────────
 
 interface IChatStageProps {
-  release: ReleaseDto;
+  featureId: string;
   stageRun: ReleaseStageRunDto;
   api: BrokerApi;
   testIdPrefix: string;
   busy: boolean;
   runStage: () => void;
   refreshRelease: () => Promise<void>;
+  nextStageName: string | null;
 }
 
-function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refreshRelease }: IChatStageProps) {
+function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, refreshRelease, nextStageName }: IChatStageProps) {
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [gatesRunning, setGatesRunning] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const gatesInFlight = useRef(false);
   const lastAutoRunMsgId = useRef<string | null>(null);
+  // Only auto-follow new messages while the reader is already at (or near) the bottom —
+  // otherwise scrolling up to review earlier output keeps getting yanked back down.
+  const stickToBottomRef = useRef(true);
+
+  const handleChatScroll = useCallback(() => {
+    const el = chatContainerRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  }, []);
 
   const hasStandaloneDone = useCallback((text: string): boolean => {
     return text.split("\n").some((line) => /^\s*done\s*$/i.test(line));
   }, []);
 
-  const autoRunGates = useCallback(async (msgs: MessageDto[]) => {
+  const runGatesNow = useCallback(async () => {
     if (gatesInFlight.current) return;
-    const latest = [...msgs].reverse().find((m) => m.role === "assistant" && m.bodyText);
-    if (!latest || !latest.bodyText) return;
-    if (latest.id === lastAutoRunMsgId.current) return;
-    if (!hasStandaloneDone(latest.bodyText)) return;
-    lastAutoRunMsgId.current = latest.id;
     gatesInFlight.current = true;
     setGatesRunning(true);
     try {
-      await api.runStageGatesAsync(release.id);
+      await api.runStageGatesAsync(featureId);
       await refreshRelease();
     } catch (e) {
       setMessagesError(toErrorMessage(e));
@@ -538,47 +988,51 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
       gatesInFlight.current = false;
       setGatesRunning(false);
     }
-  }, [api, release.id, hasStandaloneDone, refreshRelease]);
+  }, [api, featureId, refreshRelease]);
+
+  const autoRunGates = useCallback(async (msgs: MessageDto[]) => {
+    const latest = [...msgs].reverse().find((m) => m.role === "assistant" && m.bodyText);
+    if (!latest || !latest.bodyText) return;
+    if (latest.id === lastAutoRunMsgId.current) return;
+    if (!hasStandaloneDone(latest.bodyText)) return;
+    lastAutoRunMsgId.current = latest.id;
+    await runGatesNow();
+  }, [hasStandaloneDone, runGatesNow]);
 
   const loadMessages = useCallback(async () => {
     try {
-      const msgs = await api.getStageMessagesAsync(release.id, stageRun.id);
+      const msgs = await api.getStageMessagesAsync(featureId, stageRun.id);
       setMessages(msgs);
       void autoRunGates(msgs);
     } catch (e) {
       setMessagesError(toErrorMessage(e));
     }
-  }, [api, release.id, stageRun.id, autoRunGates]);
+  }, [api, featureId, stageRun.id, autoRunGates]);
+
+  // Background sync for the chat transcript. Always enabled (not gated by stage status) —
+  // the poller's own backoff already slows down once messages stop changing, so there's no
+  // need to hand-maintain a separate on/off condition. maxConsecutiveErrors is left unset so
+  // a backend restart is recovered from automatically instead of leaving the chat stuck.
+  usePoller<MessageDto[]>({
+    enabled: true,
+    func: () => api.getStageMessagesAsync(featureId, stageRun.id),
+    onResult: (msgs) => {
+      setMessages(msgs);
+      setMessagesError(null);
+      void autoRunGates(msgs);
+    },
+    onError: (e) => setMessagesError(toErrorMessage(e)),
+    pollIntervalMilliseconds: 2500,
+    maxIntervalMilliseconds: 15000,
+    deps: [featureId, stageRun.id],
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    const tick = async () => {
-      try {
-        const msgs = await api.getStageMessagesAsync(release.id, stageRun.id);
-        if (!cancelled) {
-          setMessages(msgs);
-          setMessagesError(null);
-          void autoRunGates(msgs);
-        }
-      } catch (e) {
-        if (!cancelled) setMessagesError(toErrorMessage(e));
-      }
-    };
-    if (isRunning(stageRun.status) || stageRun.status === "BlockedSignoff" || stageRun.status === "BlockedGate") {
-      void tick();
-      timer = window.setInterval(tick, 2500);
+    if (stickToBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView?.({
+        block: "nearest",
+      });
     }
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearInterval(timer);
-    };
-  }, [api, release.id, stageRun.id, stageRun.status, autoRunGates]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView?.({
-      block: "nearest",
-    });
   }, [messages]);
 
   const handleSend = useCallback(async () => {
@@ -592,19 +1046,29 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
     setSending(true);
     setMessagesError(null);
     try {
-      await api.sendStageMessageAsync(release.id, text);
+      await api.sendStageMessageAsync(featureId, text);
       await loadMessages();
+      // The server invalidates readyToProceed the moment a new message is sent — refresh
+      // the release so a shown stage-complete card disappears immediately, not on the next poll.
+      await refreshRelease();
     } catch (e) {
       setMessagesError(toErrorMessage(e));
     } finally {
       setSending(false);
     }
-  }, [api, release.id, input, sending, loadMessages]);
+  }, [api, featureId, input, sending, loadMessages, refreshRelease]);
+
+  const nextStepLabel = moveOnButtonLabel(nextStageName);
 
   return (
     <div className={styles.chatPanel}>
       {messagesError && <div className={styles.error}>{messagesError}</div>}
-      <div className={styles.chatContainer}>
+      <div
+        className={styles.chatContainer}
+        ref={chatContainerRef}
+        onScroll={handleChatScroll}
+        data-testid={`${testIdPrefix}-chat-messages`}
+      >
         {messages.length === 0 && (
           <div className={styles.chatIntro}>
             Conversation with the {stageRun.stageName} agent will appear here.
@@ -626,6 +1090,20 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {!stageRun.readyToProceed && (
+        <div className={styles.stageHandoff}>
+          <ZestButton
+            type="button"
+            onClick={() => void runGatesNow()}
+            disabled={sending || busy || gatesRunning}
+            data-testid={`${testIdPrefix}-move-on-btn`}
+            zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, buttonStyle: "outline", visualOptions: { size: "sm" } }}
+          >
+            {gatesRunning ? "Checking…" : nextStepLabel}
+          </ZestButton>
+        </div>
+      )}
 
       <div className={styles.chatInput}>
         <input
@@ -651,6 +1129,69 @@ function ChatStage({ release, stageRun, api, testIdPrefix, busy, runStage, refre
   );
 }
 
+// ─── countdown run button (retry-with-a-window-to-intervene) ──────────────
+//
+// Unlike a fresh stage's AutoRunNotice (nothing to intervene on, so it just runs),
+// a failed autonomous stage genuinely might warrant the user pushing back instead
+// of blindly retrying — so this gives them a visible countdown and an explicit
+// "Don't Run" to opt out, auto-retrying only if they don't act in time.
+
+const AUTO_RUN_SECONDS = 30;
+
+interface ICountdownRunButtonProps {
+  testIdPrefix: string;
+  disabled: boolean;
+  busy: boolean;
+  runningLabel: string;
+  countingLabel: (secondsLeft: number) => string;
+  onRun: () => void;
+}
+
+function CountdownRunButton({ testIdPrefix, disabled, busy, runningLabel, countingLabel, onRun }: ICountdownRunButtonProps) {
+  const [secondsLeft, setSecondsLeft] = useState(AUTO_RUN_SECONDS);
+  const [cancelled, setCancelled] = useState(false);
+  const onRunRef = useRef(onRun);
+  onRunRef.current = onRun;
+
+  useEffect(() => {
+    if (cancelled || secondsLeft <= 0) return;
+    const timer = window.setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [cancelled, secondsLeft]);
+
+  useEffect(() => {
+    if (!cancelled && secondsLeft <= 0) onRunRef.current();
+  }, [cancelled, secondsLeft]);
+
+  // The split-button structure (ZestButton's dropdownOptions) is always present, never
+  // conditionally removed — going from a split button to a plain one mid-interaction unmounts
+  // Radix's DropdownMenu.Root in the same render pass its own item-click-closes-menu handling
+  // runs in, which hangs indefinitely in jsdom (confirmed via isolated repro). Once used,
+  // "Don't Run" just becomes a disabled, inert menu item instead of disappearing.
+  const dropdownOptions = useMemo(
+    () => [{ key: "dont-run", label: "Don't Run", disabled: cancelled, onClick: () => setCancelled(true) }],
+    [cancelled],
+  );
+
+  return (
+    <ZestButton
+      type="button"
+      onClick={onRun}
+      disabled={disabled}
+      data-testid={`${testIdPrefix}-run-stage-btn`}
+      zest={{
+        semanticType: "submit",
+        busyOptions: { preventRageClick: true },
+        visualOptions: { size: "sm" },
+        dropdownAriaLabel: "More run options",
+        dropdownOptions,
+      }}
+    >
+      {busy ? "Running…" : cancelled ? runningLabel : countingLabel(secondsLeft)}
+    </ZestButton>
+  );
+}
+
 // ─── autonomous stage log ──────────────────────────────────────────────────
 
 interface IStageLogProps {
@@ -663,8 +1204,45 @@ interface IStageLogProps {
   refreshRelease: () => Promise<void>;
 }
 
-function StageLog({ stageRun, testIdPrefix, busy, runStage, refreshRelease }: IStageLogProps) {
+function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease }: IStageLogProps) {
+  const logContainerRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
+  // Only auto-follow new log lines while the reader is already at (or near) the bottom —
+  // otherwise scrolling up to review earlier output keeps getting yanked back down.
+  const stickToBottomRef = useRef(true);
+
+  const handleLogScroll = useCallback(() => {
+    const el = logContainerRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  }, []);
+
+  // Without this, the stage log only reflects DB fields set once at the start/end of an
+  // attempt, so a genuinely-running multi-minute turn looks identical to one silently
+  // queued behind another release's turn (the broker only runs one turn at a time —
+  // BrokerCoordinator's _turnLock). Polling /api/turns/current (already used by the
+  // global ActiveTurnIndicator) and correlating on acpSessionId resolves that ambiguity.
+  const [turn, setTurn] = useState<ActiveTurnInfo | undefined>(undefined);
+  usePoller<ActiveTurnInfo | undefined>({
+    enabled: true,
+    func: () => api.getCurrentTurnAsync(),
+    onResult: (t) => setTurn(t),
+    pollIntervalMilliseconds: 2000,
+    maxIntervalMilliseconds: 10000,
+    deps: [stageRun.id],
+  });
+
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (!turn) return;
+    const timer = window.setInterval(() => forceTick((t) => t + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [turn]);
+
+  const isRunningHere = turn !== undefined && turn.acpSessionId === stageRun.acpSessionId;
+  const isWaitingOnOtherTurn = turn !== undefined && turn.acpSessionId !== stageRun.acpSessionId;
+  const looksStalled = turn === undefined && stageRun.status === "Active";
+  const inProgress = !["BlockedGate", "BlockedSignoff", "Complete"].includes(stageRun.status);
 
   const lines = useMemo(() => {
     const out: { text: string; tone: "phase" | "ok" | "warn" | "err" | "plain" }[] = [
@@ -699,17 +1277,19 @@ function StageLog({ stageRun, testIdPrefix, busy, runStage, refreshRelease }: IS
   }, [stageRun]);
 
   useEffect(() => {
-    logEndRef.current?.scrollIntoView?.({
-      block: "nearest",
-    });
+    if (stickToBottomRef.current) {
+      logEndRef.current?.scrollIntoView?.({
+        block: "nearest",
+      });
+    }
   }, [lines]);
 
-  const showRunButton = isRunning(stageRun.status) || stageRun.status === "BlockedGate";
-  const showRefreshButton = isRunning(stageRun.status);
+  const showRunButton = shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate";
+  const showRefreshButton = shouldPollStage(stageRun.status);
 
   return (
     <div className={styles.logPanel}>
-      <div className={styles.logContainer} data-testid={`${testIdPrefix}-stage-log`}>
+      <div className={styles.logContainer} data-testid={`${testIdPrefix}-stage-log`} ref={logContainerRef} onScroll={handleLogScroll}>
         {lines.map((line, i) => (
           <div
             key={i}
@@ -718,11 +1298,37 @@ function StageLog({ stageRun, testIdPrefix, busy, runStage, refreshRelease }: IS
             {line.text}
           </div>
         ))}
+        {inProgress && isRunningHere && turn && (
+          <div className={`${styles.logLine} ${styles.logPhase} ${styles.logLiveStatus}`}>
+            <FaSpinner className={styles.spinIcon} aria-hidden="true" />
+            <span>running — {formatElapsed(turn.startedAt)}</span>
+          </div>
+        )}
+        {inProgress && isWaitingOnOtherTurn && (
+          <div className={`${styles.logLine} ${styles.logLineWarn}`}>
+            waiting — the broker is busy with another release right now
+          </div>
+        )}
+        {inProgress && looksStalled && (
+          <div className={`${styles.logLine} ${styles.logLineWarn}`}>
+            No active turn detected — this stage may need a retry.
+          </div>
+        )}
         <div ref={logEndRef} />
       </div>
 
       <div className={styles.logActions}>
-        {showRunButton && (
+        {showRunButton && stageRun.status === "BlockedGate" && (
+          <CountdownRunButton
+            testIdPrefix={testIdPrefix}
+            disabled={busy}
+            busy={busy}
+            runningLabel="Run Stage Again"
+            countingLabel={(s) => `Running again in ${s} second${s === 1 ? "" : "s"}. Click To Run Now.`}
+            onRun={runStage}
+          />
+        )}
+        {showRunButton && stageRun.status !== "BlockedGate" && (
           <ZestButton
             type="button"
             onClick={runStage}
@@ -730,7 +1336,7 @@ function StageLog({ stageRun, testIdPrefix, busy, runStage, refreshRelease }: IS
             data-testid={`${testIdPrefix}-run-stage-btn`}
             zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
           >
-            {busy ? "Running…" : isRunning(stageRun.status) ? "Run Stage Again" : "Run Stage"}
+            {busy ? "Running…" : shouldPollStage(stageRun.status) ? "Run Stage Again" : "Run Stage"}
           </ZestButton>
         )}
         {showRefreshButton && (
@@ -752,17 +1358,20 @@ function StageLog({ stageRun, testIdPrefix, busy, runStage, refreshRelease }: IS
 // ─── push-back panel ───────────────────────────────────────────────────────
 
 interface IPushBackPanelProps {
-  release: ReleaseDto;
+  featureId: string;
   api: BrokerApi;
   stageIndex: number;
   pipeline: PipelineStageDto[];
+  stageRun: ReleaseStageRunDto;
   testIdPrefix: string;
   refreshRelease: () => Promise<void>;
 }
 
-function PushBackPanel({ release, api, stageIndex, pipeline, testIdPrefix, refreshRelease }: IPushBackPanelProps) {
+function PushBackPanel({ featureId, api, stageIndex, pipeline, stageRun, testIdPrefix, refreshRelease }: IPushBackPanelProps) {
   const [target, setTarget] = useState(pipeline[Math.max(0, stageIndex - 1)]?.name ?? "");
-  const [instructions, setInstructions] = useState("");
+  const draft = useMemo(() => draftPushBackInstructions(stageRun), [stageRun]);
+  const [instructions, setInstructions] = useState(draft);
+  const lastDraftRef = useRef(draft);
   const [pushing, setPushing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -773,12 +1382,21 @@ function PushBackPanel({ release, api, stageIndex, pipeline, testIdPrefix, refre
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Re-draft when the underlying failure evidence actually changes (a fresh retry produced
+  // new gate/finding results) — but only if the user hasn't already edited the previous draft,
+  // so we never silently overwrite something they've customized.
+  useEffect(() => {
+    if (draft === lastDraftRef.current) return;
+    setInstructions((current) => (current === lastDraftRef.current ? draft : current));
+    lastDraftRef.current = draft;
+  }, [draft]);
+
   const handlePushBack = useCallback(async () => {
     if (!target || !instructions.trim()) return;
     setPushing(true);
     setError(null);
     try {
-      await api.pushBackAsync(release.id, target, instructions.trim());
+      await api.pushBackAsync(featureId, target, instructions.trim());
       setInstructions("");
       await refreshRelease();
     } catch (e) {
@@ -786,12 +1404,17 @@ function PushBackPanel({ release, api, stageIndex, pipeline, testIdPrefix, refre
     } finally {
       setPushing(false);
     }
-  }, [api, release.id, target, instructions, refreshRelease]);
+  }, [api, featureId, target, instructions, refreshRelease]);
 
   if (targets.length === 0) return null;
 
   return (
     <div className={styles.pushBack}>
+      <div className={styles.pushBackBanner}>
+        This stage&apos;s gates failed — the fix needs to happen in an earlier stage. We&apos;ve
+        drafted rework instructions below from the failure details; review them, then click{" "}
+        <strong>Push Back</strong> to send it back for correction.
+      </div>
       {error && <div className={styles.error}>{error}</div>}
       <div className={styles.pushBackTitle}>Push back to an earlier stage for rework</div>
       <label className={styles.pushBackLabel}>
@@ -830,46 +1453,107 @@ function PushBackPanel({ release, api, stageIndex, pipeline, testIdPrefix, refre
   );
 }
 
-// ─── signoff button with evidence ──────────────────────────────────────────
-
-interface ISignoffButtonProps {
-  release: ReleaseDto;
-  signoff: { stageName: string; required: boolean; approved: boolean };
-  api: BrokerApi;
-  testIdPrefix: string;
-  onReleaseUpdated: (release: ReleaseDto) => void;
-}
-
-function SignoffButton({ release, signoff, api, testIdPrefix, onReleaseUpdated }: ISignoffButtonProps) {
+// Shared by the full stage-complete card and the always-visible approve control below it —
+// both need to trigger the same "approve every pending signoff for this stage" action.
+function useApproveSignoff(
+  featureId: string,
+  pendingSignoffs: ReleaseSignoffDto[],
+  api: BrokerApi,
+  onReleaseUpdated: (release: ReleaseDto) => void,
+) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleApprove = useCallback(async () => {
+  const approve = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const updated = await api.signoffReleaseAsync(release.id, signoff.stageName, "user", "Approved via wizard");
-      onReleaseUpdated(updated);
+      let updated: ReleaseDto | null = null;
+      for (const s of pendingSignoffs) {
+        updated = await api.signoffFeatureAsync(featureId, s.stageName, "user", "Approved via wizard");
+      }
+      if (updated) onReleaseUpdated(updated);
     } catch (e) {
       setError(toErrorMessage(e));
     } finally {
       setLoading(false);
     }
-  }, [api, release.id, signoff.stageName, onReleaseUpdated]);
+  }, [api, featureId, pendingSignoffs, onReleaseUpdated]);
+
+  return { approve, loading, error };
+}
+
+// ─── stage-complete card: artifacts produced + explicit proceed ────────────
+
+interface IStageCompleteCardProps {
+  featureId: string;
+  stageRun: ReleaseStageRunDto;
+  pendingSignoffs: ReleaseSignoffDto[];
+  api: BrokerApi;
+  testIdPrefix: string;
+  nextStageName: string | null;
+  onReleaseUpdated: (release: ReleaseDto) => void;
+  onContinue: () => void;
+}
+
+function StageCompleteCard({ featureId, stageRun, pendingSignoffs, api, testIdPrefix, nextStageName, onReleaseUpdated, onContinue }: IStageCompleteCardProps) {
+  const [artifacts, setArtifacts] = useState<StageArtifactDto[]>([]);
+  const [artifactsError, setArtifactsError] = useState<string | null>(null);
+  const { approve: handleProceed, loading, error } = useApproveSignoff(featureId, pendingSignoffs, api, onReleaseUpdated);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await api.getStageArtifactsAsync(featureId, stageRun.id);
+        if (!cancelled) setArtifacts(result);
+      } catch (e) {
+        if (!cancelled) setArtifactsError(toErrorMessage(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [api, featureId, stageRun.id]);
 
   return (
-    <div className={styles.signoffRow}>
+    <div className={styles.signoffSection} data-testid={`${testIdPrefix}-stage-complete-card`}>
+      <h3>{stageLabel(stageRun.stageName)} stage complete</h3>
+      <p className={styles.signoffIntro}>Review what was produced, then proceed to the next stage.</p>
+      {artifactsError && <div className={styles.error}>{artifactsError}</div>}
+      {artifacts.length > 0 && (
+        <div className={styles.timeline}>
+          {artifacts.map((a) => (
+            <details key={a.relativePath} className={styles.advancedDetails}>
+              <summary>{a.relativePath}</summary>
+              {a.content != null ? (
+                <pre className={styles.detailInfo}>{a.content}</pre>
+              ) : (
+                <div className={styles.stageSummary}>(directory — not shown)</div>
+              )}
+            </details>
+          ))}
+        </div>
+      )}
       {error && <div className={styles.error}>{error}</div>}
-      <span className={styles.signoffStage}>{stageLabel(signoff.stageName)}</span>
-      <ZestButton
-        type="button"
-        onClick={handleApprove}
-        disabled={loading}
-        data-testid={`${testIdPrefix}-signoff-${signoff.stageName}`}
-        zest={{ semanticType: "confirm", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
-      >
-        {loading ? "Reviewing…" : "Review & Continue"}
-      </ZestButton>
+      <div className={styles.stageHandoff}>
+        <ZestButton
+          type="button"
+          onClick={onContinue}
+          disabled={loading}
+          data-testid={`${testIdPrefix}-continue-btn`}
+          zest={{ buttonStyle: "outline", visualOptions: { size: "sm" } }}
+        >
+          Continue {stageLabel(stageRun.stageName)}
+        </ZestButton>
+        <ZestButton
+          type="button"
+          onClick={() => void handleProceed()}
+          disabled={loading}
+          data-testid={`${testIdPrefix}-proceed-btn`}
+          zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
+        >
+          {loading ? "Proceeding…" : proceedButtonLabel(nextStageName)}
+        </ZestButton>
+      </div>
     </div>
   );
 }

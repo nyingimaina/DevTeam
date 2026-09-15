@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
 import { GitCommitDto, GitStatusDto } from "../../Chat/Data/BrokerTypes";
 import ZestButton from "jattac.libs.web.zest-button";
+import ManageRepositoryPane from "./ManageRepositoryPane";
 import styles from "../Styles/GitView.module.css";
 
 interface IGitViewProps {
@@ -18,6 +19,7 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
   const [commitMessage, setCommitMessage] = useState("");
   const [newBranch, setNewBranch] = useState("");
   const [view, setView] = useState<"graph" | "branches">("graph");
+  const [manageRepoOpen, setManageRepoOpen] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -97,7 +99,24 @@ export default function GitView({ api, workspacePath }: IGitViewProps) {
           <span className={styles.dirtyBadge}>dirty</span>
         )}
         {status?.isClean && <span className={styles.cleanBadge}>clean</span>}
+        <ZestButton
+          type="button"
+          onClick={() => setManageRepoOpen(true)}
+          data-testid="git-manage-repo-btn"
+          className={styles.manageRepoBtn}
+          zest={{ buttonStyle: "text", visualOptions: { size: "sm" } }}
+        >
+          Manage Repository
+        </ZestButton>
       </div>
+
+      {manageRepoOpen && (
+        <ManageRepositoryPane
+          api={api}
+          workspacePath={workspacePath}
+          onClose={() => setManageRepoOpen(false)}
+        />
+      )}
 
       {/* View toggle */}
       <div className={styles.viewToggle}>

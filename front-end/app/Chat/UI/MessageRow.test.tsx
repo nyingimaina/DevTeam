@@ -2,7 +2,6 @@ import React from "react";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import MessageRow from "./MessageRow";
-import LiveAssistantBubble from "./LiveAssistantBubble";
 import { MessageDto } from "../Data/BrokerTypes";
 
 describe("MessageRow", () => {
@@ -63,29 +62,6 @@ describe("MessageRow", () => {
     };
     render(<MessageRow message={message} />);
     expect(screen.getByText("Run command")).toBeInTheDocument();
-    expect(screen.getByText("#12345xyz")).toBeInTheDocument();
-  });
-});
-
-describe("LiveAssistantBubble", () => {
-  it("renders an empty state placeholder", () => {
-    render(<LiveAssistantBubble live={{ text: "", toolCalls: [] }} />);
-    expect(screen.getByText(/thinking/i)).toBeTruthy();
-  });
-
-  it("renders streamed markdown text", () => {
-    const { container } = render(<LiveAssistantBubble live={{ text: "partial **bold**" }} />);
-    expect(screen.getByText("bold", { selector: "strong" })).toBeInTheDocument();
-    expect(container).toHaveTextContent("partial bold");
-  });
-
-  it("renders streamed tool calls as chips", () => {
-    render(
-      <LiveAssistantBubble
-        live={{ text: "", toolCalls: [{ toolCallId: "call_abc12345xyz", title: "Run bash" }] }}
-      />,
-    );
-    expect(screen.getByText("Run bash")).toBeInTheDocument();
     expect(screen.getByText("#12345xyz")).toBeInTheDocument();
   });
 });

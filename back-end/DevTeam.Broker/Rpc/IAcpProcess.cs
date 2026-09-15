@@ -6,6 +6,9 @@ namespace DevTeam.Broker.Rpc;
 /// </summary>
 public interface IAcpProcess : IDisposable
 {
+    /// <summary>OS process id of the running agent host, for exclusion from workspace process sweeps.</summary>
+    int ProcessId { get; }
+
     /// <summary>Reads the next line of output, or null on EOF/process exit.</summary>
     Task<string?> ReadLineAsync(CancellationToken cancellationToken);
 

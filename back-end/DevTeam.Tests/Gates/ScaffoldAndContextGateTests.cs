@@ -117,4 +117,20 @@ public class ScaffoldAndContextGateTests : IDisposable
         Assert.Contains("Add tests first", context);
         Assert.Equal(result.ArtifactPath, Path.GetRelativePath(_workspace, ArtifactPaths.ContextPath(_workspace, "feat-001")));
     }
+
+    [Fact]
+    public void TryRead_MalformedYaml_ReturnsNullInsteadOfThrowing()
+    {
+        // manifest.yaml lives under the feature's own artifacts directory, so any role's agent
+        // can hand-edit it — an unquoted colon in a value (e.g. a URI in testCommand) is enough
+        // to break the parser. That must degrade to "no manifest" rather than crash the caller.
+        var manifestPath = ArtifactPaths.ManifestPath(_workspace, "feat-001");
+        Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+        System.IO.File.WriteAllText(manifestPath,
+            "feature: feat-001\ntestCommand: \"C:/tools/run.exe\" --arg res://tests/run_tests.gd\n");
+
+        var manifest = SliceManifestIO.TryRead(manifestPath);
+
+        Assert.Null(manifest);
+    }
 }

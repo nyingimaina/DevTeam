@@ -13,6 +13,11 @@ public interface IGitService
     Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default);
+    Task<GitResponse> PushAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default);
+    Task<GitResponse> DeleteBranchAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default);
+    Task<GitResponse> HasRemoteAsync(string workspacePath, CancellationToken ct = default);
+    Task<GitResponse> GetRemoteAsync(string workspacePath, CancellationToken ct = default);
+    Task<GitResponse> SetRemoteAsync(string workspacePath, string remoteUrl, CancellationToken ct = default);
 }
 
 public sealed class GitService : IGitService, IDisposable
@@ -58,6 +63,21 @@ public sealed class GitService : IGitService, IDisposable
     public async Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default)
         => await SendAsync(new GitRequest("log", workspacePath), ct);
 
+    public async Task<GitResponse> PushAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("push", workspacePath, branchName, AuthToken: authToken), ct);
+
+    public async Task<GitResponse> DeleteBranchAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("delete-branch", workspacePath, branchName, AuthToken: authToken), ct);
+
+    public async Task<GitResponse> HasRemoteAsync(string workspacePath, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("has-remote", workspacePath), ct);
+
+    public async Task<GitResponse> GetRemoteAsync(string workspacePath, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("get-remote", workspacePath), ct);
+
+    public async Task<GitResponse> SetRemoteAsync(string workspacePath, string remoteUrl, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("set-remote", workspacePath, RemoteUrl: remoteUrl), ct);
+
     private async Task<GitResponse> SendAsync(GitRequest request, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
@@ -65,7 +85,8 @@ public sealed class GitService : IGitService, IDisposable
         {
             await EnsureProcessAsync(ct);
             var json = JsonSerializer.Serialize(request, JsonOptions);
-            _logger.LogDebug("GitCli <- {Json}", json);
+            var logSafeRequest = request.AuthToken is null ? request : request with { AuthToken = "***" };
+            _logger.LogDebug("GitCli <- {Json}", JsonSerializer.Serialize(logSafeRequest, JsonOptions));
 
             await _process!.StandardInput.WriteLineAsync(json);
             await _process.StandardInput.FlushAsync(ct);
@@ -160,7 +181,9 @@ public record GitRequest(
     string? BranchName = null,
     string? Message = null,
     string? SourceBranch = null,
-    string? TargetBranch = null);
+    string? TargetBranch = null,
+    string? RemoteUrl = null,
+    string? AuthToken = null);
 
 public record GitResponse(
     bool Success,
@@ -172,7 +195,10 @@ public record GitResponse(
     bool IsClean = true,
     int Ahead = 0,
     int Behind = 0,
-    GitCommit[]? Commits = null);
+    GitCommit[]? Commits = null,
+    bool HasRemote = false,
+    string? RemoteUrl = null,
+    string[]? ChangedFiles = null);
 
 public record GitCommit(
     string Hash,
