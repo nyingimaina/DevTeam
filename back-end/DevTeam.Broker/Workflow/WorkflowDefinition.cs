@@ -27,7 +27,12 @@ public sealed record WorkflowRole(
     IReadOnlyList<WorkflowStep> Steps,
     string? Signoff,
     bool UserInputRequired,
-    IReadOnlyList<string> ExpectedArtifacts);
+    IReadOnlyList<string> ExpectedArtifacts,
+    bool WritesCode = false,
+    // Text spliced into this role's opening prompt (with "<F>" replaced by the feature key,
+    // same convention as ExpectedArtifacts) — for role-specific instructions that belong in
+    // the role's own definition rather than a stage-name check in engine code.
+    string? SeedPrompt = null);
 
 public sealed record WorkflowStep(
     WorkflowStepKind Kind,

@@ -128,6 +128,24 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void Load_ParsesWritesCodeOnACustomRoleNotNamedDeveloperOrQa()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              researcher:
+                writesCode: true
+                agent: { mode: researcher }
+              archivist:
+                agent: { mode: archivist }
+            """;
+        var definition = Load(yaml);
+
+        Assert.True(definition.Pipeline.Single(r => r.Name == "researcher").WritesCode);
+        Assert.False(definition.Pipeline.Single(r => r.Name == "archivist").WritesCode);
+    }
+
+    [Fact]
     public void Load_UnknownBuiltin_Throws()
     {
         const string yaml = """

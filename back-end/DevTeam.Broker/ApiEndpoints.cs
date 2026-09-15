@@ -161,9 +161,12 @@ public static class ApiEndpoints
             await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
             var isFirst = !await context.Profiles.AnyAsync(ctx.RequestAborted);
 
+            // No stage names are pre-seeded here — a profile is reusable across workspaces
+            // with different (possibly custom) pipelines, so there's no single fixed list to
+            // seed from. A prompt row is created on demand when a stage's prompt is saved
+            // (see the PUT handler below); ResolveActiveProfilePromptAsync already treats a
+            // missing row the same as an empty prompt, so this is safe either way.
             var profile = new Profile { Name = request.Name, Description = request.Description, IsDefault = isFirst };
-            foreach (var stageName in ProfileStageNames.All)
-                profile.Prompts.Add(new ProfilePrompt { StageName = stageName, PromptText = "" });
 
             context.Profiles.Add(profile);
             await context.SaveChangesAsync(ctx.RequestAborted);
@@ -185,7 +188,16 @@ public static class ApiEndpoints
             foreach (var promptUpdate in request.Prompts)
             {
                 var existing = profile.Prompts.FirstOrDefault(p => p.StageName == promptUpdate.StageName);
-                if (existing is null) continue;
+                if (existing is null)
+                {
+                    // Explicit DbSet.Add is required, not just profile.Prompts.Add: ProfilePrompt.Id
+                    // is already a non-default Guid the moment it's constructed (client-side
+                    // default), so EF's navigation-fixup alone treats it as Unchanged rather than
+                    // Added, and SaveChanges then issues a no-op UPDATE instead of an INSERT.
+                    existing = new ProfilePrompt { ProfileId = profile.Id, Profile = profile, StageName = promptUpdate.StageName };
+                    profile.Prompts.Add(existing);
+                    context.ProfilePrompts.Add(existing);
+                }
                 existing.PromptText = promptUpdate.PromptText;
                 existing.OverridesBuiltInPrompt = promptUpdate.OverridesBuiltInPrompt;
             }

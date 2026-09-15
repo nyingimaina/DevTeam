@@ -265,7 +265,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var featureKey = feature.Key;
         var workspacePath = feature.Release.WorkspacePath;
-        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.Name, workspacePath, featureKey);
+        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
         var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
 
         var stageRun = new ReleaseStageRun
@@ -287,15 +287,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await db.SaveChangesAsync(ct);
 
         var guidanceContext = BuildGuidanceContext(feature);
-        var artifactContext = BuildArtifactContext(workspacePath, featureKey, role.Name);
+        var artifactContext = BuildArtifactContext(workspacePath, featureKey, currentStageIndex == 0);
         var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
 
-        var requirementsAuthoring = role.Name == "business-analyst"
-            ? $" Author the agreed requirements into devteam/features/{featureKey}/{ArtifactPaths.BrsFileName} " +
-              $"(the BRS — Business Requirements Specification) using your file tools (create the directory if needed): " +
-              $"one \"## REQ-N: <Title>\" section per requirement, " +
-              $"each followed by a Given/When/Then acceptance-criteria sentence. Every requirement MUST contain Given, When and Then. "
-            : string.Empty;
+        // A role-declared seed (e.g. the default business-analyst role's BRS-authoring
+        // instruction — see WorkflowYaml.DefaultPipeline) instead of a name check, so a
+        // custom/renamed first stage doesn't silently inherit BA-specific instructions it
+        // never asked for.
+        var requirementsAuthoring = role.SeedPrompt?.Replace("<F>", featureKey) ?? string.Empty;
 
         var finalPrompt = resolvedPrompt.OverridesBuiltIn
             ? resolvedPrompt.Text
@@ -606,7 +605,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
         if (stageRun is null)
         {
-            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.Name, workspacePath, featureKey);
+            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
             var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
             stageRun = new ReleaseStageRun
             {
@@ -631,7 +630,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             var acpSessionId = Guid.Parse(stageRun.AcpSessionId);
 
             using var agentCts = AgentPromptCts();
-            var artifactContext = BuildArtifactContext(workspacePath, featureKey, role.Name);
+            var artifactContext = BuildArtifactContext(workspacePath, featureKey, currentIndex == 0);
             // Read fresh on every call (not captured once before the loop) so a note added
             // after a failed attempt — including the gate-failure feedback below — is seen
             // by the very next retry instead of only by some future, unrelated stage.
@@ -1341,15 +1340,16 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     /// <summary>
     /// Computes which workspace-relative directories a role's session may write within.
-    /// business-analyst is confined to its own feature docs directory (never source code);
-    /// developer/qa additionally get the feature's actual code paths, read from the manifest
+    /// A role declared WritesCode: false (docs-only roles like business-analyst) is confined
+    /// to its own feature docs directory, never source code; a WritesCode: true role
+    /// additionally gets the feature's actual code paths, read from the manifest
     /// scaffold_specs already produced. Falls back to the docs-only scope (never unrestricted)
     /// if the manifest is unexpectedly missing.
     /// </summary>
-    private IReadOnlyList<string> ResolveAllowedWritePrefixes(string roleName, string workspacePath, string featureKey)
+    private IReadOnlyList<string> ResolveAllowedWritePrefixes(WorkflowRole role, string workspacePath, string featureKey)
     {
         var featureDir = ArtifactPaths.FeatureDirRelative(featureKey);
-        if (roleName is not ("developer" or "qa"))
+        if (!role.WritesCode)
             return [featureDir];
 
         var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
@@ -1357,7 +1357,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         {
             _logger.LogWarning(
                 "No slice manifest found for feature '{FeatureKey}' when scoping role '{Role}'; " +
-                "restricting write access to the feature docs directory only.", featureKey, roleName);
+                "restricting write access to the feature docs directory only.", featureKey, role.Name);
             return [featureDir];
         }
 
@@ -1397,13 +1397,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// <summary>
     /// Builds the verbatim artifact content to splice into a stage's opening prompt, so the
     /// next role starts from what the previous stage actually produced instead of discovering
-    /// (or ignoring) it on its own initiative. developer/qa get context.md verbatim (written by
-    /// the context_bundle builtin); business-analyst has no upstream stage, so it gets its own
-    /// just-scaffolded manifest + requirements skeleton instead.
+    /// (or ignoring) it on its own initiative. Every later stage gets context.md verbatim
+    /// (written by the context_bundle builtin); the first stage in the pipeline has no
+    /// upstream stage to read from, so it gets its own just-scaffolded manifest + requirements
+    /// skeleton instead.
     /// </summary>
-    private static string BuildArtifactContext(string workspacePath, string featureKey, string roleName)
+    private static string BuildArtifactContext(string workspacePath, string featureKey, bool isFirstStage)
     {
-        if (roleName == "business-analyst")
+        if (isFirstStage)
         {
             var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
             var brsPath = ArtifactPaths.BrsPath(workspacePath, featureKey);

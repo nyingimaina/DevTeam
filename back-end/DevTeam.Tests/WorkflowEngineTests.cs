@@ -1001,6 +1001,42 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_CustomRoleDeclaredWritesCode_GetsCodePathsEvenThoughItIsNotNamedDeveloperOrQa()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        var devteamDir = Path.Combine(workspace, "devteam");
+        Directory.CreateDirectory(devteamDir);
+        File.WriteAllText(Path.Combine(devteamDir, "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                writesCode: true
+                agent: { mode: researcher }
+            """);
+        SliceManifestIO.Write(
+            ArtifactPaths.ManifestPath(workspace, "feat-001"),
+            new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", ["Program.cs"], "dotnet test"));
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
+            Assert.Equal(
+                new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "back-end/Features/login", "front-end/app/login", "Program.cs" },
+                prefixes);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunStage_DeveloperFirstPrompt_ContainsContextMdContentVerbatim()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));

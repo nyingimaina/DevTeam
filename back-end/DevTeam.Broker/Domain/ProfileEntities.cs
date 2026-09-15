@@ -1,10 +1,5 @@
 namespace DevTeam.Broker.Domain;
 
-public static class ProfileStageNames
-{
-    public static readonly string[] All = ["business-analyst", "developer", "qa"];
-}
-
 /// <summary>
 /// A named, reusable bundle of per-stage priming prompts. Exactly one profile is ever
 /// marked default once any exist — the first profile ever created becomes default
@@ -20,7 +15,11 @@ public sealed class Profile
     public List<ProfilePrompt> Prompts { get; set; } = [];
 }
 
-/// <summary>One profile's priming text for a single pipeline stage (see ProfileStageNames).</summary>
+/// <summary>
+/// One profile's priming text for a single pipeline stage. StageName is whatever the
+/// workspace's pipeline calls that stage — not restricted to a fixed set, since a workspace
+/// can define its own custom devteam/release.yaml pipeline with different stage names.
+/// </summary>
 public sealed class ProfilePrompt
 {
     public Guid Id { get; set; } = Guid.NewGuid();

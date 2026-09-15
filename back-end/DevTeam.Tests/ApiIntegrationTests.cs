@@ -950,8 +950,11 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var profile = await response.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
         Assert.NotNull(profile);
         Assert.True(profile!.IsDefault);
-        Assert.Equal(3, profile.Prompts.Count);
-        Assert.Contains(profile.Prompts, p => p.StageName == "developer");
+        // No stage names are pre-seeded — a profile is reusable across workspaces with
+        // different (possibly custom) pipelines, so there's no fixed list to seed from.
+        // Saving a prompt for any stage name (see Profiles_UpdatePrompts_ThenSetDefault_RoundTrips)
+        // adds its row on demand.
+        Assert.Empty(profile.Prompts);
 
         var second = await client.PostAsJsonAsync("/api/profiles", new { name = "Second", description = "d2" });
         var secondProfile = await second.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
@@ -999,6 +1002,29 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var list = await client.GetFromJsonAsync<ProfileDto[]>("/api/profiles", JsonOptions);
         Assert.Single(list!, p => p.IsDefault);
         Assert.Equal(other.Id, list!.Single(p => p.IsDefault).Id);
+    }
+
+    [Fact]
+    public async Task Profiles_SavingAPromptForAStageNameNotInTheDefaultPipeline_StillPersists()
+    {
+        // Profiles aren't pinned to the default business-analyst/developer/qa names — a
+        // workspace with a custom devteam/release.yaml can have entirely different stage
+        // names, and saving a prompt for one must not be silently dropped.
+        await ClearProfilesAsync();
+        var client = _factory.CreateClient();
+
+        var created = await (await client.PostAsJsonAsync("/api/profiles", new { name = "Custom", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+
+        var updateResponse = await client.PutAsJsonAsync($"/api/profiles/{created!.Id}", new
+        {
+            name = "Custom",
+            description = "",
+            prompts = new[] { new { stageName = "researcher", promptText = "Dig deep." } },
+        });
+        updateResponse.EnsureSuccessStatusCode();
+        var updated = await updateResponse.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.Equal("Dig deep.", updated!.Prompts.Single(p => p.StageName == "researcher").PromptText);
     }
 
     [Fact]

@@ -1,3 +1,4 @@
+using DevTeam.Broker.Gates;
 using YamlDotNet.Serialization;
 
 namespace DevTeam.Broker.Workflow;
@@ -20,6 +21,11 @@ public sealed class WorkflowYaml
         {
             Signoff = Signoffs.RequirementsApproval,
             UserInputRequired = true,
+            SeedPrompt =
+                " Author the agreed requirements into devteam/features/<F>/" + ArtifactPaths.BrsFileName + " " +
+                "(the BRS — Business Requirements Specification) using your file tools (create the directory if needed): " +
+                "one \"## REQ-N: <Title>\" section per requirement, " +
+                "each followed by a Given/When/Then acceptance-criteria sentence. Every requirement MUST contain Given, When and Then. ",
             ExpectedArtifacts = ["devteam/features/<F>/specs.feature", "devteam/features/<F>/handoff.md"],
             Steps =
             [
@@ -34,6 +40,7 @@ public sealed class WorkflowYaml
         {
             Signoff = Signoffs.PrCreated,
             UserInputRequired = false,
+            WritesCode = true,
             ExpectedArtifacts = ["devteam/features/<F>/code/"],
             Steps =
             [
@@ -59,6 +66,7 @@ public sealed class WorkflowYaml
         {
             Signoff = Signoffs.ReleaseApproval,
             UserInputRequired = false,
+            WritesCode = true,
             ExpectedArtifacts = ["devteam/features/<F>/coverage.md"],
             Steps =
             [
@@ -134,6 +142,10 @@ public sealed class RoleYaml
     public LoopYaml? Loop { get; set; }
 
     public bool UserInputRequired { get; set; }
+
+    public bool WritesCode { get; set; }
+
+    public string? SeedPrompt { get; set; }
 
     public List<string> ExpectedArtifacts { get; set; } = [];
 }
