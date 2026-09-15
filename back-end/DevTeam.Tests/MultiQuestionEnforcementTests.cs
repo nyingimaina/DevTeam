@@ -201,7 +201,7 @@ internal sealed class PersistingFakeCoordinator : IWorkflowCoordinator
     public Task<string> SetModeAsync(Guid sessionId, string modeId, CancellationToken ct)
         => Task.FromResult(modeId);
 
-    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct)
+    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false)
     {
         var isCorrection = text == MultiQuestionDetector.CorrectionPrompt;
         Prompts.Add(text);

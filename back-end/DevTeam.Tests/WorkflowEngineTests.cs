@@ -1,6 +1,7 @@
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
 using Microsoft.Data.Sqlite;
@@ -72,6 +73,241 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_PromptTellsAgentNooneIsWatchingSoStayTerse()
+    {
+        // Autonomous stages (developer/qa) have no one watching live — the opening prompt
+        // should discourage step-by-step narration so tokens aren't spent on commentary
+        // nobody reads. Interactive stages (business-analyst) keep a human in the loop live,
+        // so that prompt is intentionally unaffected.
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var developerPrompt = fake.Prompts.First(p => p.StartsWith("You are the developer"));
+        Assert.Contains("no one is watching this stage", developerPrompt);
+        Assert.Contains("keep output terse", developerPrompt);
+
+        var baPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
+        Assert.DoesNotContain("no one is watching this stage", baPrompt);
+    }
+
+    [Fact]
+    public async Task StartStage_IncludesTheActiveDefaultProfilesPromptForThatStage()
+    {
+        await using (var seedDb = CreateFactory().CreateDbContext())
+        {
+            var profile = new Profile { Name = "Terse", Description = "Short answers", IsDefault = true };
+            profile.Prompts.Add(new ProfilePrompt { StageName = "business-analyst", PromptText = "Keep it brief and to the point." });
+            seedDb.Profiles.Add(profile);
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
+        Assert.Contains("Keep it brief and to the point.", openingPrompt);
+    }
+
+    [Fact]
+    public async Task StartStage_OmitsProfileClauseWhenNoProfilesExist()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
+        Assert.DoesNotContain("active profile", openingPrompt);
+    }
+
+    [Fact]
+    public async Task RunStage_UsesTheWorkspacesOwnProfileOverTheGlobalDefault()
+    {
+        var workspacePath = @"C:\work\proj-profile-override";
+        Guid workspaceProfileId;
+        await using (var seedDb = CreateFactory().CreateDbContext())
+        {
+            var defaultProfile = new Profile { Name = "Default", IsDefault = true };
+            defaultProfile.Prompts.Add(new ProfilePrompt { StageName = "developer", PromptText = "DEFAULT_PROFILE_TEXT" });
+
+            var workspaceProfile = new Profile { Name = "ForThisWorkspace" };
+            workspaceProfile.Prompts.Add(new ProfilePrompt { StageName = "developer", PromptText = "WORKSPACE_PROFILE_TEXT" });
+
+            seedDb.Profiles.AddRange(defaultProfile, workspaceProfile);
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+            workspaceProfileId = workspaceProfile.Id;
+
+            seedDb.WorkspaceProfileSettings.Add(new WorkspaceProfileSettings { WorkspacePath = workspacePath, ProfileId = workspaceProfileId });
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspacePath, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+        var afterSignoff = await engine.SignoffAsync(featureId, "business-analyst", "pm", null, CancellationToken.None);
+        Assert.Equal(1, afterSignoff.FlowPosition!.CurrentStageIndex);
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var developerPrompt = fake.Prompts.First(p => p.StartsWith("You are the developer"));
+        Assert.Contains("WORKSPACE_PROFILE_TEXT", developerPrompt);
+        Assert.DoesNotContain("DEFAULT_PROFILE_TEXT", developerPrompt);
+    }
+
+    [Fact]
+    public async Task StartStage_OverrideModeReplacesTheEntireBuiltInPromptWithTheProfileText()
+    {
+        // Explicit, user-accepted tradeoff: override mode sends ONLY the profile's text —
+        // not the framework framing, not HandoffAutomationClause, not BRS-authoring
+        // instructions. Asserted with Equal (not Contains) so a regression that leaks any
+        // framework text back in is caught.
+        await using (var seedDb = CreateFactory().CreateDbContext())
+        {
+            var profile = new Profile { Name = "FullOverride", IsDefault = true };
+            profile.Prompts.Add(new ProfilePrompt
+            {
+                StageName = "business-analyst",
+                PromptText = "OVERRIDE_TEXT_ONLY",
+                OverridesBuiltInPrompt = true,
+            });
+            seedDb.Profiles.Add(profile);
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = Assert.Single(fake.Prompts);
+        Assert.Equal("OVERRIDE_TEXT_ONLY", openingPrompt);
+    }
+
+    [Fact]
+    public async Task StartStage_AugmentModeStillAppendsAfterTheBuiltInPromptWhenOverrideIsOff()
+    {
+        // Sibling of the override test above: default (OverridesBuiltInPrompt = false)
+        // behavior is unchanged — the profile text is appended, framework text stays.
+        await using (var seedDb = CreateFactory().CreateDbContext())
+        {
+            var profile = new Profile { Name = "Augment", IsDefault = true };
+            profile.Prompts.Add(new ProfilePrompt
+            {
+                StageName = "business-analyst",
+                PromptText = "AUGMENT_TEXT_ONLY",
+                OverridesBuiltInPrompt = false,
+            });
+            seedDb.Profiles.Add(profile);
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
+        Assert.Contains("AUGMENT_TEXT_ONLY", openingPrompt);
+        Assert.Contains("DevTeam automatically starts the next role's agent session", openingPrompt);
+    }
+
+    [Fact]
+    public async Task StartStage_MarksTheOpeningPromptAsPriming_ButNotAGenuineUserReply()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        Assert.True(fake.PromptIsPriming[0]);
+
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+        Assert.False(fake.PromptIsPriming[^1]);
+    }
+
+    [Fact]
+    public async Task SendMessage_WhenTheAgentProcessDisconnects_ClassifiesAndEscalates()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.ExceptionsToThrow.Enqueue(new AcpDisconnectedException("ACP process exited"));
+
+        await Assert.ThrowsAsync<AcpDisconnectedException>(
+            () => engine.SendMessageAsync(featureId, "hello?", CancellationToken.None));
+
+        var updated = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        var baRun = updated.Features[0].StageRuns.Single(sr => sr.StageName == "business-analyst");
+        Assert.Equal(StageErrorKind.Disconnected, baRun.LastErrorKind);
+        Assert.Equal(ReleaseStageStatus.Escalated, baRun.Status);
+        Assert.NotNull(baRun.LastErrorAt);
+    }
+
+    [Fact]
+    public async Task SendMessage_WhenTheProviderRejectsTheRequest_ClassifiesAsProviderRejectedNotDisconnected()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.ExceptionsToThrow.Enqueue(new RpcException("Upstream request failed: invalid_request_error", -32603));
+
+        await Assert.ThrowsAsync<RpcException>(
+            () => engine.SendMessageAsync(featureId, "hello?", CancellationToken.None));
+
+        var updated = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        var baRun = updated.Features[0].StageRuns.Single(sr => sr.StageName == "business-analyst");
+        Assert.Equal(StageErrorKind.ProviderRejected, baRun.LastErrorKind);
+        Assert.Equal(ReleaseStageStatus.Escalated, baRun.Status);
+    }
+
+    [Fact]
+    public async Task SendMessage_AfterEscalation_ARetryMessageStillReachesTheSameStageRun()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.ExceptionsToThrow.Enqueue(new AcpDisconnectedException("ACP process exited"));
+        await Assert.ThrowsAsync<AcpDisconnectedException>(
+            () => engine.SendMessageAsync(featureId, "hello?", CancellationToken.None));
+
+        // The retry (no queued exception this time) must find the same, now-Escalated stage
+        // run rather than throwing "no active stage run" — this is the actual retry path.
+        var result = await engine.SendMessageAsync(featureId, "retry", CancellationToken.None);
+        Assert.NotNull(result);
+
+        var updated = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        var baRun = updated.Features[0].StageRuns.Single(sr => sr.StageName == "business-analyst");
+        Assert.Equal(StageErrorKind.None, baRun.LastErrorKind);
+        Assert.Equal(ReleaseStageStatus.Active, baRun.Status);
+    }
+
+    [Fact]
     public async Task SendMessage_PromptIsDetachedFromCallerCancellationToken()
     {
         var engine = CreateEngine();
@@ -107,7 +343,7 @@ public class WorkflowEngineTests : IDisposable
     [Fact]
     public async Task RunGates_CommitsWorkspaceChangesWhenGatesPass()
     {
-        // The agent's file writes (requirements.md, manifest.yaml, etc.) are only working-tree
+        // The agent's file writes (BRS.md, manifest.yaml, etc.) are only working-tree
         // changes until something commits them — without this, GitFlow's later merge/push on
         // signoff has no actual history to carry forward.
         var engine = CreateEngine();
@@ -378,6 +614,32 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_SkipsTheAntagonistReviewWhenGatesAlreadyFailed()
+    {
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.AddRange(Enumerable.Repeat(new GateResult(false, "failed", "tests failed"), 8));
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        Assert.DoesNotContain(fake.Prompts, p => p.StartsWith("You are reviewing the developer's work"));
+    }
+
+    [Fact]
+    public async Task RunStage_StillRunsTheAntagonistReviewWhenGatesPass()
+    {
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        Assert.Contains(fake.Prompts, p => p.StartsWith("You are reviewing the developer's work"));
+    }
+
+    [Fact]
     public async Task RunStage_TriesAgentLoopUpToAttempts()
     {
         var engine = CreateEngine();
@@ -391,6 +653,56 @@ public class WorkflowEngineTests : IDisposable
         // developer loop attempts up to 3 → agent re-prompted
         var developerPrompts = fake.Prompts.Count(p => p.StartsWith("You are the developer"));
         Assert.Equal(3, developerPrompts);
+    }
+
+    [Fact]
+    public async Task RunStage_FeedsAFailedLoopAttemptsEvidenceIntoTheNextAttemptsPrompt()
+    {
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+
+        // context_bundle (a leading builtin, runs before the loop) draws from the same fake
+        // queue — give it a pass first, then fail verify_code on attempt 1 with distinctive
+        // evidence; everything after falls through to the fake's default pass.
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
+        _gateRunner.Results.Add(new GateResult(false, "Tests failed", "MARKER-attempt1-verify-code-failure"));
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var developerPrompts = fake.Prompts.Where(p => p.StartsWith("You are the developer")).ToArray();
+        Assert.True(developerPrompts.Length >= 2, "expected at least 2 developer prompts (attempt 1 + retry)");
+        Assert.Contains("MARKER-attempt1-verify-code-failure", developerPrompts[1]);
+    }
+
+    [Fact]
+    public async Task RunStage_ExhaustedLoop_DoesNotCrashAndStillBlocksOnGate()
+    {
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.AddRange(Enumerable.Repeat(new GateResult(false, "failed", "verify failed"), 8));
+
+        var exception = await Record.ExceptionAsync(() => engine.RunStageAsync(featureId, CancellationToken.None));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public async Task RunStage_GateFailureNotes_AreAttributedToSystemNotUser()
+    {
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.AddRange(Enumerable.Repeat(new GateResult(false, "failed", "verify failed"), 8));
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var devRun = updated.StageRuns.Single(sr => sr.StageName == "developer");
+        Assert.NotEmpty(devRun.GuidanceNotes);
+        Assert.All(devRun.GuidanceNotes, n => Assert.Equal("system:gate-failure", n.AddedBy));
     }
 
     [Fact]
@@ -412,7 +724,10 @@ public class WorkflowEngineTests : IDisposable
         Assert.False(updated.Signoffs.Single(s => s.StageName == "business-analyst").Approved);
 
         var devRun = updated.StageRuns.Single(sr => sr.StageName == "developer");
-        Assert.Equal("Rework: add email validation", devRun.GuidanceNotes.Single().Text);
+        // Alongside the user's push-back note, the failed loop attempts above (Part 3's
+        // gate-failure feedback) also leave their own system-authored notes — assert the
+        // push-back one specifically rather than assuming it's the only note.
+        Assert.Contains(devRun.GuidanceNotes, n => n.Text == "Rework: add email validation" && n.AddedBy == "user");
     }
 
     [Fact]
@@ -528,6 +843,57 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(
             ["context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"],
             pipeline[2].Steps);
+    }
+
+    [Fact]
+    public async Task GetPipeline_UsesACustomDevteamReleaseYamlWhenTheWorkspaceHasOne()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        var devteamDir = Path.Combine(workspace, "devteam");
+        Directory.CreateDirectory(devteamDir);
+        File.WriteAllText(Path.Combine(devteamDir, "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                agent: { mode: researcher }
+            """);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
+
+            Assert.Equal(["researcher"], pipeline.Select(p => p.Name).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GetPipeline_FallsBackToTheDefaultPipelineWhenNoReleaseYamlExists()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
+
+            Assert.Equal(["business-analyst", "developer", "qa"], pipeline.Select(p => p.Name).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
     }
 
     [Fact]
@@ -765,7 +1131,7 @@ public class WorkflowEngineTests : IDisposable
 
         var initialPrompt = Assert.Single(_coordinator.Prompts);
         Assert.Contains("business-analyst", initialPrompt);
-        Assert.Contains("requirements.md", initialPrompt);
+        Assert.Contains(ArtifactPaths.BrsFileName, initialPrompt);
         Assert.Contains("REQ-", initialPrompt);
         Assert.Contains("Given", initialPrompt, StringComparison.OrdinalIgnoreCase);
     }
@@ -774,9 +1140,9 @@ public class WorkflowEngineTests : IDisposable
     public async Task RunGates_FeedsRequirementsFromDiskToRequirementGates()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
-        var requirementsPath = ArtifactPaths.RequirementsPath(workspace.Path, "feat-001");
-        Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
-        File.WriteAllText(requirementsPath,
+        var brsPath = ArtifactPaths.BrsPath(workspace.Path, "feat-001");
+        Directory.CreateDirectory(Path.GetDirectoryName(brsPath)!);
+        File.WriteAllText(brsPath,
             "## REQ-001: User can log in" + Environment.NewLine +
             "Given a registered user" + Environment.NewLine +
             "When they enter valid credentials" + Environment.NewLine +
@@ -814,9 +1180,9 @@ public class WorkflowEngineTests : IDisposable
     public async Task RunGates_SuppliesTestArtifactsToCoverageGate()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
-        var requirementsPath = ArtifactPaths.RequirementsPath(workspace.Path, "feat-001");
-        Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
-        File.WriteAllText(requirementsPath,
+        var brsPath = ArtifactPaths.BrsPath(workspace.Path, "feat-001");
+        Directory.CreateDirectory(Path.GetDirectoryName(brsPath)!);
+        File.WriteAllText(brsPath,
             "## REQ-F01: Addition works" + Environment.NewLine +
             "Given valid numbers, When they are combined, Then the sum is returned");
         Directory.CreateDirectory(Path.Combine(workspace.Path, "CalculatorLib.Tests"));
@@ -1121,6 +1487,8 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
 
     public List<string> Prompts { get; } = [];
 
+    public List<bool> PromptIsPriming { get; } = [];
+
     public CancellationToken? LastPromptToken { get; private set; }
 
     public IReadOnlyList<ModelOption> ModelsToReturn { get; set; } = [];
@@ -1129,11 +1497,18 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
 
     public List<IReadOnlyList<string>?> AllowedWritePrefixesCalls { get; } = [];
 
+    // Dequeued (one per call) instead of returning a normal result, for tests exercising
+    // WorkflowEngine's failure-classification/recovery behavior (Part 1).
+    public Queue<Exception> ExceptionsToThrow { get; } = new();
+
+    public int NewSessionCallCount { get; private set; }
+
     public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken ct)
     {
         Commands.Add($"new-session:{workspacePath}");
         RequestedModelIds.Add(modelId);
         AllowedWritePrefixesCalls.Add(allowedWritePrefixes);
+        NewSessionCallCount++;
         return Task.FromResult(new SessionSummary(
             Guid.NewGuid(), "fake-acp", workspacePath, null, null, null,
             DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, ModelsToReturn, []));
@@ -1145,11 +1520,14 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
         return Task.FromResult(modeId);
     }
 
-    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct)
+    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false)
     {
         LastPromptToken = ct;
         Prompts.Add(text);
+        PromptIsPriming.Add(isPriming);
         Commands.Add($"prompt:{text[..Math.Min(50, text.Length)]}...");
+        if (ExceptionsToThrow.Count > 0)
+            throw ExceptionsToThrow.Dequeue();
         return Task.FromResult(new PromptResponse(sessionId, "end_turn", 10, 5, 15));
     }
 }

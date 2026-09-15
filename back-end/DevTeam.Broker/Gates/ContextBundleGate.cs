@@ -19,17 +19,17 @@ public sealed class ContextBundleGate : IGate
         if (manifest is null)
             return Task.FromResult(GateResult.Fail("No slice manifest found", "Run scaffold_specs before context_bundle."));
 
-        var requirementsPath = ArtifactPaths.RequirementsPath(request.WorkspacePath, featureKey);
-        var requirementsText = File.Exists(requirementsPath)
-            ? File.ReadAllText(requirementsPath)
-            : "(No requirements file)";
+        var brsPath = ArtifactPaths.BrsPath(request.WorkspacePath, featureKey);
+        var brsText = File.Exists(brsPath)
+            ? File.ReadAllText(brsPath)
+            : "(No BRS file)";
 
         var builder = new StringBuilder();
         builder.Append($"# Context bundle — {featureKey} ({manifest.Title})").AppendLine();
         builder.AppendLine();
-        builder.AppendLine("## Approved requirements (contract)");
+        builder.AppendLine("## Approved requirements (BRS contract)");
         builder.AppendLine();
-        builder.AppendLine(requirementsText);
+        builder.AppendLine(brsText);
         builder.AppendLine("## Allowed working areas");
         builder.AppendLine();
         builder.AppendLine($"- Backend: `{manifest.CodePathBack}`");

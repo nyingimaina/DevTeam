@@ -44,7 +44,8 @@ public sealed record MessageDto(
     string? ProviderModelId,
     string? BodyText,
     DateTimeOffset CreatedAt,
-    IReadOnlyList<PartDto> Parts);
+    IReadOnlyList<PartDto> Parts,
+    bool IsPriming);
 
 public sealed record SessionDetail(
     Guid SessionId,
@@ -129,3 +130,17 @@ public sealed record SetGitRemoteRequest(string WorkspacePath, string Url, strin
 public sealed record SetGitCredentialRequest(string Name, string Token);
 
 public sealed record GitCredentialsResponse(IReadOnlyList<string> Names);
+
+// ─── profiles ───────────────────────────────────────────────────────────────
+
+public sealed record ProfilePromptDto(string StageName, string PromptText, bool OverridesBuiltInPrompt);
+
+public sealed record ProfileDto(Guid Id, string Name, string? Description, bool IsDefault, IReadOnlyList<ProfilePromptDto> Prompts);
+
+public sealed record CreateProfileRequest(string Name, string? Description);
+
+public sealed record UpdateProfileRequest(string Name, string? Description, IReadOnlyList<ProfilePromptDto> Prompts);
+
+public sealed record WorkspaceProfileDto(Guid? ProfileId);
+
+public sealed record SetWorkspaceProfileRequest(string WorkspacePath, Guid ProfileId);

@@ -1,7 +1,7 @@
 namespace DevTeam.Broker.Gates;
 
 /// <summary>
-/// Reads the requirements contract file (devteam/features/&lt;featureKey&gt;/requirements.md) back into
+/// Reads the BRS contract file (devteam/features/&lt;featureKey&gt;/BRS.md) back into
 /// structured requirements so requirement-dependent gates can validate the authored content.
 /// The file is written by <see cref="ScaffoldSpecsGate"/> and edited by the business-analyst agent
 /// during the interactive conversation; headings have the form <c>## REQ-1: Feature title</c> followed
@@ -11,7 +11,7 @@ public static class RequirementsExtractor
 {
     public static IReadOnlyList<RequirementDtos.Requirement> Extract(string workspacePath, string featureKey)
     {
-        var path = ArtifactPaths.RequirementsPath(workspacePath, featureKey);
+        var path = ArtifactPaths.BrsPath(workspacePath, featureKey);
         if (!File.Exists(path))
             return [];
 

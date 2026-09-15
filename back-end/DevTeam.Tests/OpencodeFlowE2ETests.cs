@@ -87,7 +87,7 @@ public class OpencodeFlowE2ETests : IDisposable
         var fastModel = await DiscoverFastModelAsync(spoke, _workspace);
         _output.WriteLine(fastModel is null ? "no usable gemini model — using default." : "using " + fastModel);
 
-        // Stage start issues the full BA prompt to the real agent (writes requirements.md).
+        // Stage start issues the full BA prompt to the real agent (writes BRS.md).
         _output.WriteLine("start release…");
         var release = await engine.StartReleaseAsync("feat-e2e", _workspace, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;

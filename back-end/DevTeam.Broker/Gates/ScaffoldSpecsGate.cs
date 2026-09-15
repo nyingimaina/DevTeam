@@ -37,7 +37,7 @@ public sealed class ScaffoldSpecsGate : IGate
 
         var artifacts =
             $"{Path.GetRelativePath(request.WorkspacePath, manifestPath)}" + Environment.NewLine +
-            $"{Path.GetRelativePath(request.WorkspacePath, ArtifactPaths.RequirementsPath(request.WorkspacePath, featureKey))}";
+            $"{Path.GetRelativePath(request.WorkspacePath, ArtifactPaths.BrsPath(request.WorkspacePath, featureKey))}";
         return Task.FromResult(GateResult.Pass(
             $"Scaffolded feature '{featureKey}' with {requirements.Count} requirement(s)",
             artifacts,
@@ -46,10 +46,10 @@ public sealed class ScaffoldSpecsGate : IGate
 
     private static void WriteRequirements(string workspacePath, string featureKey, string title, IReadOnlyList<RequirementDtos.Requirement> requirements)
     {
-        var path = ArtifactPaths.RequirementsPath(workspacePath, featureKey);
+        var path = ArtifactPaths.BrsPath(workspacePath, featureKey);
         if (File.Exists(path))
         {
-            // The business-analyst may have authored requirements during the conversation (e.g. on a
+            // The business-analyst may have authored the BRS during the conversation (e.g. on a
             // reworked attempt). Never clobber an existing contract file with scaffold defaults.
             return;
         }

@@ -34,6 +34,7 @@ public sealed record StepExecutionResult
 {
     public string StepName { get; init; } = string.Empty;
     public bool Passed { get; init; }
+    public string? Reason { get; init; }
     public string? Evidence { get; init; }
     public IReadOnlyList<ReviewFinding> Findings { get; init; } = [];
 }

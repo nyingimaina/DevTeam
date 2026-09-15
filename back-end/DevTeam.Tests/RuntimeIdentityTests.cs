@@ -84,6 +84,14 @@ public class RuntimeIdentityTests
     }
 
     [Fact]
+    public void LogsDirectory_IsInsideDataDirectory()
+    {
+        var identity = RuntimeIdentity.Resolve(["--data-dir=C:\\work\\custom"], null, null, @"C:\Users\tester", @"C:\Users\tester\AppData\Local");
+
+        Assert.Equal(@"C:\work\custom\logs", identity.LogsDirectory);
+    }
+
+    [Fact]
     public void ReadArg_IgnoresCaseAndSplitsOnEquals()
     {
         Assert.Equal("123", RuntimeIdentity.ReadArg(["--PORT=123", "--port=456"], "--port"));

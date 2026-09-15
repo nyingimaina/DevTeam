@@ -27,6 +27,9 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<ReleaseUsageLedger> ReleaseUsageLedgers => Set<ReleaseUsageLedger>();
     public DbSet<ReleaseFlowPosition> ReleaseFlowPositions => Set<ReleaseFlowPosition>();
     public DbSet<WorkspaceGitSettings> WorkspaceGitSettings => Set<WorkspaceGitSettings>();
+    public DbSet<Profile> Profiles => Set<Profile>();
+    public DbSet<ProfilePrompt> ProfilePrompts => Set<ProfilePrompt>();
+    public DbSet<WorkspaceProfileSettings> WorkspaceProfileSettings => Set<WorkspaceProfileSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -50,6 +53,7 @@ public sealed class DevTeamDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
             message.Property(e => e.Role).IsRequired();
             message.Property(e => e.BodyText).HasColumnType("TEXT");
+            message.Property(e => e.IsPriming).HasDefaultValue(false);
         });
 
         modelBuilder.Entity<Part>(part =>
@@ -84,6 +88,25 @@ public sealed class DevTeamDbContext : DbContext
         {
             settings.HasKey(e => e.WorkspacePath);
             settings.Property(e => e.CredentialName).HasMaxLength(256);
+        });
+
+        modelBuilder.Entity<Profile>(profile =>
+        {
+            profile.HasKey(e => e.Id);
+            profile.Property(e => e.Name).IsRequired().HasMaxLength(256);
+        });
+
+        modelBuilder.Entity<ProfilePrompt>(prompt =>
+        {
+            prompt.HasKey(e => e.Id);
+            prompt.Property(e => e.StageName).IsRequired().HasMaxLength(64);
+            prompt.Property(e => e.PromptText).HasColumnType("TEXT");
+            prompt.Property(e => e.OverridesBuiltInPrompt).HasDefaultValue(false);
+        });
+
+        modelBuilder.Entity<WorkspaceProfileSettings>(settings =>
+        {
+            settings.HasKey(e => e.WorkspacePath);
         });
     }
 
@@ -163,6 +186,8 @@ public sealed class DevTeamDbContext : DbContext
             stage.HasKey(e => e.Id);
             stage.Property(e => e.StageName).IsRequired().HasMaxLength(128);
             stage.Property(e => e.Summary).HasColumnType("TEXT");
+            stage.Property(e => e.LastErrorKind).HasDefaultValue(StageErrorKind.None);
+            stage.Property(e => e.LastErrorMessage).HasColumnType("TEXT");
             stage.HasIndex(e => new { e.ReleaseFeatureId, e.StageName, e.Attempt }).IsUnique();
             stage.HasOne(e => e.Session)
                 .WithMany()

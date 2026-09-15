@@ -3,6 +3,7 @@ using System.Text;
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using Microsoft.EntityFrameworkCore;
@@ -44,6 +45,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
         "and any required signoff are approved — you do not need to know how the next role is " +
         "invoked, and you must never tell the user their opencode config or repo is missing a " +
         "role or agent. If asked how to proceed, tell them to use the stage's signoff controls in the UI.";
+
+    // Autonomous stages have no one watching their output live — unlike an interactive stage's
+    // chat, where a human reads every turn — so tokens spent narrating routine actions are
+    // wasted. Only used for the autonomous prompt (RunStageAsync), never the interactive one.
+    private const string AutonomousTersenessClause =
+        " Bear in mind no one is watching this stage's output live, so keep output terse — skip " +
+        "narrating routine actions. Only surface something prominently before your final DONE " +
+        "if it's a genuine blocker, an ambiguous decision you had to make, or something the user truly needs to review.";
 
     // Leaving modelId null lets opencode fall back to its own ambient "current" model,
     // which can silently drift to something far slower than intended (observed: an
@@ -164,13 +173,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<ReleaseFeature> CreateFeatureAsync(Guid releaseId, string featureKey, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var release = await db.Releases
             .Include(r => r.Features)
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
             ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
+
+        var workflow = LoadWorkflow(release.WorkspacePath);
 
         if (release.CurrentFeatureId is not null)
             throw new InvalidOperationException(
@@ -235,10 +245,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<ReleaseStageRun> StartStageAsync(Guid featureId, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
@@ -278,27 +288,42 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var guidanceContext = BuildGuidanceContext(feature);
         var artifactContext = BuildArtifactContext(workspacePath, featureKey, role.Name);
+        var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
 
         var requirementsAuthoring = role.Name == "business-analyst"
-            ? $" Author the agreed requirements into devteam/features/{featureKey}/requirements.md " +
-              $"using your file tools (create the directory if needed): one \"## REQ-N: <Title>\" section per requirement, " +
+            ? $" Author the agreed requirements into devteam/features/{featureKey}/{ArtifactPaths.BrsFileName} " +
+              $"(the BRS — Business Requirements Specification) using your file tools (create the directory if needed): " +
+              $"one \"## REQ-N: <Title>\" section per requirement, " +
               $"each followed by a Given/When/Then acceptance-criteria sentence. Every requirement MUST contain Given, When and Then. "
             : string.Empty;
+
+        var finalPrompt = resolvedPrompt.OverridesBuiltIn
+            ? resolvedPrompt.Text
+            : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
+              MultiQuestionDetector.SingleQuestionInstruction +
+              " Follow each answer to its logical conclusion before asking the next. " +
+              "When you have enough information to produce the required output, say DONE and provide the structured result." +
+              requirementsAuthoring +
+              HandoffAutomationClause +
+              AsAugmentingClause(resolvedPrompt.Text) +
+              guidanceContext +
+              artifactContext;
 
         // Use a separate cancellation for the agent prompt so HTTP timeouts don't kill it.
         // The agent may take time to process the initial prompt — that's expected.
         using var agentCts = InteractiveTurnCts();
-        await _coordinator.PromptWithSessionRecoveryAsync(
-            session.SessionId,
-            $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
-            MultiQuestionDetector.SingleQuestionInstruction +
-            " Follow each answer to its logical conclusion before asking the next. " +
-            "When you have enough information to produce the required output, say DONE and provide the structured result." +
-            requirementsAuthoring +
-            HandoffAutomationClause +
-            guidanceContext +
-            artifactContext,
-            agentCts.Token);
+        try
+        {
+            await _coordinator.PromptWithSessionRecoveryAsync(
+                session.SessionId, finalPrompt, agentCts.Token, isPriming: true);
+            ClearPromptFailure(stageRun);
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            await RecordPromptFailureAsync(db, stageRun, ex, ct);
+            throw;
+        }
 
         _logger.LogInformation("Started stage {StageName} for feature {FeatureId}, session {SessionId}",
             role.Name, featureId, session.SessionId);
@@ -309,13 +334,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var feature = await LoadFeatureAsync(db, featureId, ct);
-        var workflow = LoadWorkflow();
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var role = workflow.Pipeline[position.CurrentStageIndex];
+        // Escalated (Part 1) means this stage's last turn failed, not that it's no longer
+        // the live one — a retry message still needs to reach it, so it's treated the same
+        // as Active for the purposes of "which stage run does this message target".
         var stageRun = feature.StageRuns
-            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
+            .FirstOrDefault(sr => sr.StageName == role.Name &&
+                (sr.Status == ReleaseStageStatus.Active || sr.Status == ReleaseStageStatus.Escalated))
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
 
         if (stageRun.AcpSessionId is null)
@@ -328,7 +357,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
         stageRun.ReadyToProceed = false;
 
         using var agentCts = InteractiveTurnCts();
-        var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, agentCts.Token);
+        PromptResponse response;
+        try
+        {
+            response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, agentCts.Token);
+            ClearPromptFailure(stageRun);
+        }
+        catch (Exception ex)
+        {
+            await RecordPromptFailureAsync(db, stageRun, ex, agentCts.Token);
+            throw;
+        }
 
         stageRun.QuestionCount++;
         await db.SaveChangesAsync(agentCts.Token);
@@ -348,7 +387,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var token = agentCts.Token;
         await using var db = await _dbFactory.CreateDbContextAsync(token);
         var feature = await LoadFeatureAsync(db, featureId, token);
-        var workflow = LoadWorkflow();
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
         var role = workflow.Pipeline[position.CurrentStageIndex];
@@ -368,7 +407,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 break;
 
             var correction = await _coordinator.PromptWithSessionRecoveryAsync(
-                acpSessionId, MultiQuestionDetector.CorrectionPrompt, token);
+                acpSessionId, MultiQuestionDetector.CorrectionPrompt, token, isPriming: true);
             result = new StagePromptResult(
                 Response: correction.StopReason,
                 InputTokens: correction.TotalTokens,
@@ -389,10 +428,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<DevTeamRelease> RunGatesAsync(Guid featureId, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
@@ -461,14 +500,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (!result.Passed) allPassed = false;
         }
 
-        stageRun.Phase = StagePhase.Challenge;
-        await db.SaveChangesAsync(ct);
-
-        var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
-        if (challenge is not null)
+        // Only worth an antagonist-review call when the deterministic gates above already
+        // passed — see the identical guard in RunStageAsync.
+        if (allPassed)
         {
-            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
-            if (!challengeResult.Passed) allPassed = false;
+            stageRun.Phase = StagePhase.Challenge;
+            await db.SaveChangesAsync(ct);
+
+            var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
+            if (challenge is not null)
+            {
+                var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
+                if (!challengeResult.Passed) allPassed = false;
+            }
         }
 
         // Passing gates is the authoritative "this stage's work is technically complete" signal.
@@ -536,10 +580,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<DevTeamRelease> RunStageAsync(Guid featureId, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
@@ -557,7 +601,6 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var featureKey = feature.Key;
         var workspacePath = feature.Release.WorkspacePath;
-        var guidanceContext = BuildGuidanceContext(feature);
 
         var stageRun = feature.StageRuns
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
@@ -589,17 +632,42 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
             using var agentCts = AgentPromptCts();
             var artifactContext = BuildArtifactContext(workspacePath, featureKey, role.Name);
-            var prompt =
-                $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
-                "Work autonomously and do not ask the user for input. Produce the required artifacts." +
-                HandoffAutomationClause +
-                guidanceContext +
-                artifactContext +
-                "When you are done, say DONE and provide a summary of what you changed.";
-            await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, agentCts.Token);
+            // Read fresh on every call (not captured once before the loop) so a note added
+            // after a failed attempt — including the gate-failure feedback below — is seen
+            // by the very next retry instead of only by some future, unrelated stage.
+            var guidanceContext = BuildGuidanceContext(feature);
+            var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
+            var prompt = resolvedPrompt.OverridesBuiltIn
+                ? resolvedPrompt.Text
+                : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
+                  "Work autonomously and do not ask the user for input. Produce the required artifacts." +
+                  HandoffAutomationClause +
+                  AutonomousTersenessClause +
+                  AsAugmentingClause(resolvedPrompt.Text) +
+                  guidanceContext +
+                  artifactContext +
+                  "When you are done, say DONE and provide a summary of what you changed.";
+            try
+            {
+                await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, agentCts.Token, isPriming: true);
+                ClearPromptFailure(stageRun);
+                await db.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                await RecordPromptFailureAsync(db, stageRun, ex, ct);
+                throw;
+            }
         }
 
         var allPassed = true;
+        // Steps that don't pass end up here regardless of whether they're inside the retry
+        // Loop or a plain one-shot Builtin (code_hygiene/slice_guard/render_pr run exactly
+        // once, outside the Loop, and are never retried by it) — collected so that if this
+        // run ends up failed, a *future* separate RunStageAsync call (a "Run Stage Again"
+        // click) still starts with a prompt that says what went wrong, instead of repeating
+        // the exact same failure with no memory of it.
+        var finalFailedSteps = new List<StepExecutionResult>();
         foreach (var step in role.Steps)
         {
             switch (step.Kind)
@@ -619,7 +687,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     // Flushed immediately (not just at phase boundaries) so a concurrent poll —
                     // the frontend's live step checklist — can see progress as it happens.
                     await db.SaveChangesAsync(ct);
-                    if (!builtin.Passed) allPassed = false;
+                    if (!builtin.Passed)
+                    {
+                        allPassed = false;
+                        finalFailedSteps.Add(builtin);
+                    }
                     break;
                 case WorkflowStepKind.Loop:
                     var attempts = step.LoopAttempts ?? 3;
@@ -627,6 +699,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     for (var attempt = 1; attempt <= attempts; attempt++)
                     {
                         var attemptPassed = true;
+                        var failedSteps = new List<StepExecutionResult>();
                         foreach (var innerStep in step.LoopSteps ?? [])
                         {
                             if (innerStep.Kind == WorkflowStepKind.Agent)
@@ -644,11 +717,36 @@ public sealed class WorkflowEngine : IWorkflowEngine
                                 EvidenceText = inner.Evidence,
                             });
                             await db.SaveChangesAsync(ct);
-                            if (!inner.Passed) attemptPassed = false;
+                            if (!inner.Passed)
+                            {
+                                attemptPassed = false;
+                                failedSteps.Add(inner);
+                            }
                         }
 
                         lastAttemptPassed = attemptPassed;
                         if (attemptPassed) break;
+
+                        if (attempt == attempts)
+                        {
+                            // Nothing left to retry into within this run — carry it forward
+                            // to the final consolidated note instead (see below).
+                            finalFailedSteps.AddRange(failedSteps);
+                        }
+                        else if (failedSteps.Count > 0)
+                        {
+                            // Tell the next attempt exactly what failed — without this, a retry
+                            // is identical to the attempt that just failed and has no way to
+                            // converge.
+                            db.ReleaseGuidanceNotes.Add(new ReleaseGuidanceNote
+                            {
+                                StageRunId = stageRun.Id,
+                                StageRun = stageRun,
+                                Text = BuildGateFailureFeedback(failedSteps),
+                                AddedBy = "system:gate-failure",
+                            });
+                            await db.SaveChangesAsync(ct);
+                        }
                     }
 
                     if (!lastAttemptPassed) allPassed = false;
@@ -656,14 +754,37 @@ public sealed class WorkflowEngine : IWorkflowEngine
             }
         }
 
-        stageRun.Phase = StagePhase.Challenge;
-        await db.SaveChangesAsync(ct);
-
-        var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
-        if (challenge is not null)
+        // A consolidated record of whatever failed on this run — including gates that only
+        // ever run once (code_hygiene/slice_guard/render_pr sit outside the Loop above and
+        // are never retried by it) — so that if the human clicks "Run Stage Again", the
+        // *next*, separate RunStageAsync call's prompts still know what went wrong here
+        // instead of repeating it with no memory, same as the Loop's own inter-attempt notes.
+        if (!allPassed && finalFailedSteps.Count > 0)
         {
-            var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
-            if (!challengeResult.Passed) allPassed = false;
+            db.ReleaseGuidanceNotes.Add(new ReleaseGuidanceNote
+            {
+                StageRunId = stageRun.Id,
+                StageRun = stageRun,
+                Text = BuildGateFailureFeedback(finalFailedSteps),
+                AddedBy = "system:gate-failure",
+            });
+            await db.SaveChangesAsync(ct);
+        }
+
+        // Only worth an antagonist-review call when the deterministic gates above already
+        // passed — reviewing work already known to be incomplete just burns a slow,
+        // provider-dependent LLM call for no benefit.
+        if (allPassed)
+        {
+            stageRun.Phase = StagePhase.Challenge;
+            await db.SaveChangesAsync(ct);
+
+            var challenge = workflow.Challenges.FirstOrDefault(c => c.Producer == role.Name);
+            if (challenge is not null)
+            {
+                var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
+                if (!challengeResult.Passed) allPassed = false;
+            }
         }
 
         stageRun.ReadyToProceed = allPassed;
@@ -726,10 +847,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
     public async Task<DevTeamRelease> PushBackAsync(
         Guid featureId, string targetStageName, string? instructions, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
@@ -818,9 +939,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<IReadOnlyList<PipelineStageDto>> GetPipelineAsync(Guid featureId, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        _ = await LoadFeatureAsync(db, featureId, ct);
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
 
         return workflow.Pipeline
             .Select(r => new PipelineStageDto(r.Name, r.UserInputRequired, r.Signoff, r.ExpectedArtifacts, FlattenStepNames(r.Steps)))
@@ -856,9 +977,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<IReadOnlyList<StageArtifactDto>> GetStageArtifactsAsync(Guid featureId, Guid stageRunId, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var stageRun = feature.StageRuns.FirstOrDefault(sr => sr.Id == stageRunId)
             ?? throw new InvalidOperationException($"No stage run '{stageRunId}' for feature '{featureId}'.");
         var role = workflow.Pipeline.FirstOrDefault(r => r.Name == stageRun.StageName)
@@ -903,10 +1024,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<DevTeamRelease> AdvanceAsync(Guid featureId, CancellationToken ct)
     {
-        var workflow = LoadWorkflow();
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
         var position = feature.FlowPosition
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
@@ -1052,7 +1173,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var isLastStage = false;
         if (allSignoffsComplete)
         {
-            var workflow = LoadWorkflow();
+            var workflow = LoadWorkflow(feature.Release.WorkspacePath);
             var position = feature.FlowPosition;
             if (position is not null && position.CurrentStageName == stageName)
             {
@@ -1102,8 +1223,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct)
     {
-        await using var db = await _dbFactory.CreateDbContextAsync(ct);
-        return await LoadReleaseAsync(db, releaseId, ct);
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            return await LoadReleaseAsync(db, releaseId, ct);
+        }
+        catch (Exception ex) when (ex is not KeyNotFoundException)
+        {
+            // KeyNotFoundException is the expected "no such release" path (ApiEndpoints maps
+            // it to a 404) — anything else here is the kind of unexplained 500 that's hard to
+            // diagnose after the fact without the release id attached to the log line.
+            _logger.LogError(ex, "GetReleaseAsync failed for release {ReleaseId}", releaseId);
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct)
@@ -1274,8 +1406,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (roleName == "business-analyst")
         {
             var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
-            var requirementsPath = ArtifactPaths.RequirementsPath(workspacePath, featureKey);
-            var hasRequirements = File.Exists(requirementsPath);
+            var brsPath = ArtifactPaths.BrsPath(workspacePath, featureKey);
+            var hasRequirements = File.Exists(brsPath);
             if (manifest is null && !hasRequirements)
                 return string.Empty;
 
@@ -1292,7 +1424,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (hasRequirements)
             {
                 scaffold.AppendLine();
-                scaffold.Append(File.ReadAllText(requirementsPath));
+                scaffold.Append(File.ReadAllText(brsPath));
             }
             return scaffold.ToString();
         }
@@ -1319,7 +1451,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: await BuildBuiltinInputsAsync(gateName, featureKey, workspacePath, ct));
         var result = await _gateRunner.RunAsync(gateName, request, ct);
-        return new StepExecutionResult { StepName = gateName, Passed = result.Passed, Evidence = result.EvidenceText };
+        return new StepExecutionResult { StepName = gateName, Passed = result.Passed, Reason = result.Reason, Evidence = result.EvidenceText };
     }
 
     private static async Task<IReadOnlyDictionary<string, string>> BuildBuiltinInputsAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
@@ -1397,7 +1529,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                          $"Review for completeness, correctness, and quality. " +
                          $"Report any issues, ambiguities, or gaps as findings.";
 
-            var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, prompt, ct);
+            var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, prompt, ct, isPriming: true);
 
             var passed = response.StopReason == "end_turn";
             if (!passed)
@@ -1442,7 +1574,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
         catch (Exception ex) { _logger.LogError(ex, "Failed to broadcast {Type} for {ReleaseId}.", type, releaseId); }
     }
 
-    private WorkflowDefinition LoadWorkflow() => _loader.LoadDefault();
+    // Reads devteam/release.yaml from the workspace when the user has authored one, so a
+    // custom/reordered pipeline is opt-in per workspace; absent, every workspace keeps
+    // behaving exactly as the hardcoded default (zero migration risk for existing releases).
+    private WorkflowDefinition LoadWorkflow(string workspacePath)
+    {
+        var path = ArtifactPaths.ReleaseYamlPath(workspacePath);
+        return File.Exists(path) ? _loader.Load(File.ReadAllText(path)) : _loader.LoadDefault();
+    }
 
     private static async Task<string?> GetLatestAssistantTextAsync(
         DevTeamDbContext db, Guid sessionId, CancellationToken ct)
@@ -1453,6 +1592,110 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return candidates
             .OrderByDescending(m => m.CreatedAt)
             .FirstOrDefault()?.BodyText;
+    }
+
+    // A profile's resolved prompt for one role, plus whether it should replace the entire
+    // built-in prompt (OverridesBuiltIn) or just be appended after it. Text is empty when
+    // no profile/prompt is set, so this stays a no-op until the user creates one.
+    private readonly record struct ResolvedProfilePrompt(string Text, bool OverridesBuiltIn);
+
+    // Resolves the workspace's active profile (its own override, falling back to the global
+    // default, falling back to nothing) and returns that profile's prompt for this role.
+    // Callers decide how to fold OverridesBuiltIn into the final prompt they build — this
+    // method itself makes no assumption about append-vs-replace.
+    private static async Task<ResolvedProfilePrompt> ResolveActiveProfilePromptAsync(
+        DevTeamDbContext db, string workspacePath, string roleName, CancellationToken ct)
+    {
+        var workspaceProfileId = await db.WorkspaceProfileSettings
+            .Where(s => s.WorkspacePath == workspacePath)
+            .Select(s => (Guid?)s.ProfileId)
+            .FirstOrDefaultAsync(ct);
+
+        var profileId = workspaceProfileId ?? await db.Profiles
+            .Where(p => p.IsDefault)
+            .Select(p => (Guid?)p.Id)
+            .FirstOrDefaultAsync(ct);
+
+        if (profileId is null) return new ResolvedProfilePrompt(string.Empty, false);
+
+        var prompt = await db.ProfilePrompts
+            .Where(p => p.ProfileId == profileId && p.StageName == roleName)
+            .Select(p => new { p.PromptText, p.OverridesBuiltInPrompt })
+            .FirstOrDefaultAsync(ct);
+
+        if (prompt is null || string.IsNullOrWhiteSpace(prompt.PromptText))
+            return new ResolvedProfilePrompt(string.Empty, false);
+
+        return new ResolvedProfilePrompt(prompt.PromptText, prompt.OverridesBuiltInPrompt);
+    }
+
+    // Wraps a profile's prompt as a clearly delimited, appended clause — used only when the
+    // profile is in augment mode (OverridesBuiltIn is false). In override mode the profile's
+    // text becomes the entire prompt instead, so this is never called for it.
+    private static string AsAugmentingClause(string text) =>
+        string.IsNullOrEmpty(text) ? string.Empty :
+        Environment.NewLine + Environment.NewLine +
+        "--- Additional guidance from your active profile ---" + Environment.NewLine +
+        text;
+
+    // Turns a failed attempt's gate results into the next attempt's guidance — without this
+    // a retry is a byte-for-byte repeat of the attempt that just failed, with no way to
+    // converge. Each step's evidence is capped so a chatty verify_code test-output dump
+    // can't blow out the next prompt's token budget.
+    private const int MaxEvidenceCharsPerStep = 1500;
+
+    private static string BuildGateFailureFeedback(IReadOnlyList<StepExecutionResult> failedSteps)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("Your previous attempt failed the following checks — fix these before continuing:");
+        foreach (var step in failedSteps)
+        {
+            builder.Append("- ").Append(step.StepName).Append(": ").AppendLine(step.Reason ?? "failed");
+            var evidence = step.Evidence;
+            if (string.IsNullOrWhiteSpace(evidence)) continue;
+            if (evidence.Length > MaxEvidenceCharsPerStep)
+                evidence = evidence[..MaxEvidenceCharsPerStep] + "…(truncated)";
+            builder.AppendLine(evidence);
+        }
+        return builder.ToString().TrimEnd();
+    }
+
+    // A stage sitting idle with no reply looks identical whether the agent is legitimately
+    // slow or something actually died — this is the only thing that makes that distinction
+    // visible/queryable after the fact (BrokerCoordinator's own recovery already retries once
+    // transparently; this only fires when that retry ALSO failed, i.e. a real, reportable
+    // problem). Escalates disconnects/provider rejections (a blind retry won't help a
+    // provider rejection, so the human needs to know); a bare timeout is reported but left
+    // non-escalating since it's the most routine of the three and still auto-retryable.
+    private static async Task RecordPromptFailureAsync(
+        DevTeamDbContext db, ReleaseStageRun stageRun, Exception ex, CancellationToken ct)
+    {
+        var (kind, escalate) = ex switch
+        {
+            AcpDisconnectedException => (StageErrorKind.Disconnected, true),
+            RpcException => (StageErrorKind.ProviderRejected, true),
+            OperationCanceledException or TimeoutException => (StageErrorKind.TimedOut, true),
+            _ => ((StageErrorKind?)null, false),
+        };
+
+        if (kind is null) return;
+
+        stageRun.LastErrorKind = kind.Value;
+        stageRun.LastErrorMessage = ex.Message;
+        stageRun.LastErrorAt = DateTimeOffset.UtcNow;
+        if (escalate) stageRun.Status = ReleaseStageStatus.Escalated;
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static void ClearPromptFailure(ReleaseStageRun stageRun)
+    {
+        stageRun.LastErrorKind = StageErrorKind.None;
+        stageRun.LastErrorMessage = null;
+        stageRun.LastErrorAt = null;
+        // Escalated is a transient "last attempt failed" marker, not a durable status —
+        // once a prompt succeeds again the stage is simply back to working normally.
+        if (stageRun.Status == ReleaseStageStatus.Escalated)
+            stageRun.Status = ReleaseStageStatus.Active;
     }
 
     private static string BuildGuidanceContext(ReleaseFeature feature)

@@ -40,7 +40,7 @@ public class ScaffoldAndContextGateTests : IDisposable
         var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace, "feat-001"));
         Assert.NotNull(manifest);
         Assert.Equal("Login", manifest!.Title);
-        var requirements = System.IO.File.ReadAllText(ArtifactPaths.RequirementsPath(_workspace, "feat-001"));
+        var requirements = System.IO.File.ReadAllText(ArtifactPaths.BrsPath(_workspace, "feat-001"));
         Assert.Contains("REQ-001: User can log in", requirements);
         Assert.Contains("Given a registered user", requirements);
     }
@@ -64,9 +64,9 @@ public class ScaffoldAndContextGateTests : IDisposable
     public async Task Scaffold_DoesNotOverwriteExistingRequirementsFile()
     {
         var gate = new ScaffoldSpecsGate();
-        var requirementsPath = ArtifactPaths.RequirementsPath(_workspace, "feat-001");
-        Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
-        await File.WriteAllTextAsync(requirementsPath,
+        var brsPath = ArtifactPaths.BrsPath(_workspace, "feat-001");
+        Directory.CreateDirectory(Path.GetDirectoryName(brsPath)!);
+        await File.WriteAllTextAsync(brsPath,
             "## REQ-9: Authored by the analyst" + Environment.NewLine +
             "Given a registered user" + Environment.NewLine +
             "Then they are signed in");
@@ -81,7 +81,7 @@ public class ScaffoldAndContextGateTests : IDisposable
         Assert.True(result.Passed);
         var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace, "feat-001"));
         Assert.NotNull(manifest);
-        var requirements = File.ReadAllText(requirementsPath);
+        var requirements = File.ReadAllText(brsPath);
         Assert.Contains("REQ-9: Authored by the analyst", requirements);
         Assert.DoesNotContain("REQ-1", requirements);
     }

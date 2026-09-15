@@ -8,6 +8,7 @@ using DevTeam.Broker.Spoke;
 using DevTeam.Broker.Workflow;
 using DevTeam.Shared;
 using Microsoft.EntityFrameworkCore;
+using Serilog;
 using System.Text.Json.Serialization;
 
 namespace DevTeam.Broker;
@@ -20,9 +21,21 @@ public partial class Program
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
         Directory.CreateDirectory(identity.DataDirectory);
+        Directory.CreateDirectory(identity.LogsDirectory);
 
         var builder = WebApplication.CreateBuilder(args);
         builder.WebHost.ConfigureKestrel(options => options.ListenLocalhost(identity.Port));
+
+        // Persisted, structured logging — the built-in console logger scrolls away and
+        // nothing survives a restart. Also fills a real gap: a request that throws only
+        // ever showed a bare status code to the client, with the actual exception visible
+        // solely in a live console session (see UseSerilogRequestLogging below, which logs
+        // the exception itself before rethrowing).
+        builder.Host.UseSerilog((context, services, config) => config
+            .ReadFrom.Services(services)
+            .WriteTo.Console()
+            .WriteTo.File(Path.Combine(identity.LogsDirectory, "devteam-.log"),
+                rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14));
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
@@ -74,8 +87,10 @@ public partial class Program
         {
             var db = scope.ServiceProvider.GetRequiredService<DevTeamDbContext>();
             db.Database.EnsureCreated();
+            DevTeamDbContextSchemaSync.EnsureAllTablesCreated(db);
         }
 
+        app.UseSerilogRequestLogging();
         app.UseRequestDiagnostics();
         app.MapHub<BrokerHub>("/hub");
         app.MapApi();

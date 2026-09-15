@@ -33,6 +33,20 @@ public enum ReleaseStageStatus
     Complete,
 }
 
+/// <summary>
+/// Why a stage's most recent agent turn didn't complete normally — distinguishes cases
+/// that warrant a blind retry (the agent process died, or it timed out) from one that
+/// won't (the model provider itself rejected the request; retrying identically will
+/// likely fail identically). See ReleaseStageRun.LastErrorKind.
+/// </summary>
+public enum StageErrorKind
+{
+    None,
+    Disconnected,
+    ProviderRejected,
+    TimedOut,
+}
+
 public enum StagePhase
 {
     GuidedQA,
@@ -169,6 +183,16 @@ public sealed class ReleaseStageRun
     /// false the moment a new human message is sent, so a stale readiness can't linger.
     /// </summary>
     public bool ReadyToProceed { get; set; }
+
+    /// <summary>
+    /// Classification of the most recent prompt failure for this stage run (session
+    /// disconnected, provider rejected the request, or it timed out) — None when the
+    /// last attempt succeeded or none has run yet. Cleared on the next successful prompt.
+    /// </summary>
+    public StageErrorKind LastErrorKind { get; set; } = StageErrorKind.None;
+    public string? LastErrorMessage { get; set; }
+    public DateTimeOffset? LastErrorAt { get; set; }
+
     public List<ReleaseGateCheck> GateChecks { get; set; } = [];
     public List<ReviewFinding> Findings { get; set; } = [];
     public List<ReleaseGuidanceNote> GuidanceNotes { get; set; } = [];

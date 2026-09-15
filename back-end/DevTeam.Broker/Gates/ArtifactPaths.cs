@@ -11,14 +11,22 @@ public static class ArtifactPaths
     public static string ManifestPath(string workspacePath, string featureKey)
         => Path.Combine(FeatureDir(workspacePath, featureKey), "manifest.yaml");
 
-    public static string RequirementsPath(string workspacePath, string featureKey)
-        => Path.Combine(FeatureDir(workspacePath, featureKey), "requirements.md");
+    // The Business Requirements Specification — the business-analyst's authored contract
+    // document. A single named constant so every gate/prompt that reads or writes it agrees
+    // on the filename.
+    public const string BrsFileName = "BRS.md";
+
+    public static string BrsPath(string workspacePath, string featureKey)
+        => Path.Combine(FeatureDir(workspacePath, featureKey), BrsFileName);
 
     public static string ContextPath(string workspacePath, string featureKey)
         => Path.Combine(FeatureDir(workspacePath, featureKey), "context.md");
 
     public static string HandoffPath(string workspacePath, string featureKey)
         => Path.Combine(FeatureDir(workspacePath, featureKey), "handoff.md");
+
+    public static string ReleaseYamlPath(string workspacePath)
+        => Path.Combine(workspacePath, "devteam", "release.yaml");
 }
 
 public static class RequirementDtos

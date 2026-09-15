@@ -57,6 +57,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         {
             using var db = _dbFactory.CreateDbContext();
             db.Database.EnsureCreated();
+            DevTeamDbContextSchemaSync.EnsureAllTablesCreated(db);
         }
         catch (Exception ex)
         {
@@ -167,7 +168,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     /// new id, and retries once.
     /// </summary>
     public async Task<PromptResponse> PromptWithSessionRecoveryAsync(
-        Guid sessionId, string text, CancellationToken cancellationToken)
+        Guid sessionId, string text, CancellationToken cancellationToken, bool isPriming = false)
     {
         await EnsureInitializedAsync(cancellationToken);
         await _turnLock.WaitAsync(cancellationToken);
@@ -186,6 +187,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                     SessionId = session.Id,
                     Role = "user",
                     BodyText = text,
+                    IsPriming = isPriming,
                 });
                 session.UpdatedAt = DateTimeOffset.UtcNow;
                 await db.SaveChangesAsync(cancellationToken);
@@ -195,6 +197,14 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
 
             using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             using var turnScope = _turnTracker.Begin(sessionId, acpSessionId, text, turnCts);
+
+            // A stuck/slow opencode turn looks identical to a broken request from the UI's
+            // perspective (it just "hangs") — logging elapsed time here is the difference
+            // between "the agent is legitimately slow" and "something is actually wedged".
+            var promptStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            _logger.LogInformation(
+                "Prompting session {SessionId} (acp {AcpSessionId}, isPriming={IsPriming}, {TextLength} chars)",
+                sessionId, acpSessionId, isPriming, text.Length);
 
             AgentPromptResult result;
             try
@@ -218,6 +228,27 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                     [new AgentPromptPart(PromptPartTypeText, text)],
                     turnCts.Token);
             }
+            catch (AcpDisconnectedException ex)
+            {
+                // The opencode process itself died mid-request (not just a stale session id,
+                // which the case above already covers) — same recovery: fresh session, retry
+                // once. If this also fails, the outer catch below classifies and rethrows.
+                _logger.LogWarning(ex,
+                    "ACP process for session {SessionId} disconnected; opening a new agent session and retrying.",
+                    sessionId);
+
+                acpSessionId = await RecreateAcpSessionAsync(sessionId, workspacePath, turnCts.Token);
+                _turn = new TurnCollector(sessionId);
+                result = await _spoke.PromptAsync(
+                    acpSessionId,
+                    [new AgentPromptPart(PromptPartTypeText, text)],
+                    turnCts.Token);
+            }
+
+            promptStopwatch.Stop();
+            _logger.LogInformation(
+                "Session {SessionId} turn finished: stopReason={StopReason} elapsedMs={ElapsedMs}",
+                sessionId, result.StopReason, promptStopwatch.ElapsedMilliseconds);
 
             _turn!.SetUsage(result.Usage);
             await PersistAssistantTurnAsync(sessionId, _turn, cancellationToken);
@@ -525,7 +556,8 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             .Select(p => new PartDto(
                 p.Id, p.Kind, p.Text, p.ToolName, p.ToolCallId, p.ErrorText,
                 p.InputJson, p.OutputJson, p.CreatedAt))
-            .ToArray());
+            .ToArray(),
+        m.IsPriming);
 
     private sealed class TurnCollector(Guid sessionId)
     {

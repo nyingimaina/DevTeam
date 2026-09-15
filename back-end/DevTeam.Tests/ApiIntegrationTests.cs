@@ -723,10 +723,10 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         try
         {
             var client = _factory.CreateClient();
-            // Real gates read requirements from the workspace during the BA gate run.
-            var requirementsPath = DevTeam.Broker.Gates.ArtifactPaths.RequirementsPath(workspace, "feat-ba-001");
-            Directory.CreateDirectory(Path.GetDirectoryName(requirementsPath)!);
-            await File.WriteAllTextAsync(requirementsPath,
+            // Real gates read the BRS from the workspace during the BA gate run.
+            var brsPath = DevTeam.Broker.Gates.ArtifactPaths.BrsPath(workspace, "feat-ba-001");
+            Directory.CreateDirectory(Path.GetDirectoryName(brsPath)!);
+            await File.WriteAllTextAsync(brsPath,
                 "## REQ-001: User can log in" + Environment.NewLine +
                 "Given a registered user" + Environment.NewLine +
                 "When they enter valid credentials" + Environment.NewLine +
@@ -833,8 +833,12 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var messages = await client.GetFromJsonAsync<MessageDto[]>(
             $"/api/features/{featureId}/stages/{stageRun.Id}/messages");
         Assert.NotNull(messages);
-        Assert.Contains(messages!, m => m.BodyText?.Contains("We need a login form") == true);
+        var userReply = messages!.Single(m => m.BodyText?.Contains("We need a login form") == true);
+        Assert.False(userReply.IsPriming);
         Assert.Contains(messages!, m => m.BodyText?.Contains("Hello from the fake agent") == true);
+
+        var openingPrompt = messages!.Single(m => m.BodyText?.StartsWith("You are the business-analyst") == true);
+        Assert.True(openingPrompt.IsPriming);
     }
 
     [Fact]
@@ -877,7 +881,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
             Assert.Equal(ReleaseStatus.InProgress, rewritten.Status);
             Assert.False(rewritten.Signoffs.Single(s => s.StageName == "business-analyst").Approved);
             var devRun = rewritten.StageRuns.Single(sr => sr.StageName == "developer");
-            Assert.Equal("Rework: add email validation", devRun.GuidanceNotes.Single().Text);
+            // Alongside the user's push-back note, failed loop attempts also leave their own
+            // system-authored gate-failure notes — assert the push-back one specifically.
+            Assert.Contains(devRun.GuidanceNotes, n => n.Text == "Rework: add email validation" && n.AddedBy == "user");
 
             // 3. Re-starting BA after push-back creates a fresh active attempt
             var restart = await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { });
@@ -918,6 +924,127 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var noRelease = await client.PostAsJsonAsync($"/api/features/{Guid.NewGuid()}/push-back",
             new { targetStageName = "business-analyst", instructions = "x" });
         Assert.Equal(HttpStatusCode.NotFound, noRelease.StatusCode);
+    }
+
+    /// <summary>Profile tests share one DB across the whole test class (see AppFactory) — clear
+    /// existing rows first so "first profile becomes default"-style assertions are deterministic
+    /// regardless of what other tests in this class created earlier.</summary>
+    private async Task ClearProfilesAsync()
+    {
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+        await using var db = await dbFactory.CreateDbContextAsync();
+        db.WorkspaceProfileSettings.RemoveRange(db.WorkspaceProfileSettings);
+        db.ProfilePrompts.RemoveRange(db.ProfilePrompts);
+        db.Profiles.RemoveRange(db.Profiles);
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task Profiles_FirstOneCreated_BecomesDefaultAutomatically()
+    {
+        await ClearProfilesAsync();
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/profiles", new { name = "First", description = "d" });
+        response.EnsureSuccessStatusCode();
+        var profile = await response.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.NotNull(profile);
+        Assert.True(profile!.IsDefault);
+        Assert.Equal(3, profile.Prompts.Count);
+        Assert.Contains(profile.Prompts, p => p.StageName == "developer");
+
+        var second = await client.PostAsJsonAsync("/api/profiles", new { name = "Second", description = "d2" });
+        var secondProfile = await second.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.False(secondProfile!.IsDefault);
+    }
+
+    [Fact]
+    public async Task Profiles_UpdatePrompts_ThenSetDefault_RoundTrips()
+    {
+        await ClearProfilesAsync();
+        var client = _factory.CreateClient();
+
+        var created = await (await client.PostAsJsonAsync("/api/profiles", new { name = "Terse", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+
+        var updateResponse = await client.PutAsJsonAsync($"/api/profiles/{created!.Id}", new
+        {
+            name = "Terse",
+            description = "Short answers",
+            prompts = new[] { new { stageName = "developer", promptText = "Be concise." } },
+        });
+        updateResponse.EnsureSuccessStatusCode();
+        var updated = await updateResponse.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.Equal("Be concise.", updated!.Prompts.Single(p => p.StageName == "developer").PromptText);
+
+        var other = await (await client.PostAsJsonAsync("/api/profiles", new { name = "Other", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.False(other!.IsDefault);
+
+        var overrideResponse = await client.PutAsJsonAsync($"/api/profiles/{created.Id}", new
+        {
+            name = "Terse",
+            description = "Short answers",
+            prompts = new[] { new { stageName = "developer", promptText = "Be concise.", overridesBuiltInPrompt = true } },
+        });
+        overrideResponse.EnsureSuccessStatusCode();
+        var overridden = await overrideResponse.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.True(overridden!.Prompts.Single(p => p.StageName == "developer").OverridesBuiltInPrompt);
+
+        var setDefault = await client.PostAsync($"/api/profiles/{other.Id}/default", null);
+        setDefault.EnsureSuccessStatusCode();
+        var afterSetDefault = await setDefault.Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.True(afterSetDefault!.IsDefault);
+
+        var list = await client.GetFromJsonAsync<ProfileDto[]>("/api/profiles", JsonOptions);
+        Assert.Single(list!, p => p.IsDefault);
+        Assert.Equal(other.Id, list!.Single(p => p.IsDefault).Id);
+    }
+
+    [Fact]
+    public async Task Profiles_DeletingTheDefault_PromotesAnotherRemainingProfile()
+    {
+        await ClearProfilesAsync();
+        var client = _factory.CreateClient();
+
+        var first = await (await client.PostAsJsonAsync("/api/profiles", new { name = "First", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        var second = await (await client.PostAsJsonAsync("/api/profiles", new { name = "Second", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        Assert.True(first!.IsDefault);
+        Assert.False(second!.IsDefault);
+
+        var delete = await client.DeleteAsync($"/api/profiles/{first.Id}");
+        delete.EnsureSuccessStatusCode();
+
+        var list = await client.GetFromJsonAsync<ProfileDto[]>("/api/profiles", JsonOptions);
+        var remaining = Assert.Single(list!);
+        Assert.Equal(second.Id, remaining.Id);
+        Assert.True(remaining.IsDefault);
+    }
+
+    [Fact]
+    public async Task WorkspaceProfile_WithNoExplicitSetting_ResolvesToAndPersistsTheGlobalDefault()
+    {
+        await ClearProfilesAsync();
+        var client = _factory.CreateClient();
+        var defaultProfile = await (await client.PostAsJsonAsync("/api/profiles", new { name = "Default", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        var workspacePath = @"C:\work\profile-test-" + Guid.NewGuid().ToString("N");
+
+        var response = await client.GetFromJsonAsync<WorkspaceProfileDto>(
+            $"/api/workspace/profile?workspacePath={Uri.EscapeDataString(workspacePath)}", JsonOptions);
+        Assert.Equal(defaultProfile!.Id, response!.ProfileId);
+
+        // Explicitly overriding it to a different profile persists and is returned on re-read.
+        var other = await (await client.PostAsJsonAsync("/api/profiles", new { name = "Other", description = "" }))
+            .Content.ReadFromJsonAsync<ProfileDto>(JsonOptions);
+        var setResponse = await client.PostAsJsonAsync("/api/workspace/profile", new { workspacePath, profileId = other!.Id });
+        setResponse.EnsureSuccessStatusCode();
+
+        var reRead = await client.GetFromJsonAsync<WorkspaceProfileDto>(
+            $"/api/workspace/profile?workspacePath={Uri.EscapeDataString(workspacePath)}", JsonOptions);
+        Assert.Equal(other.Id, reRead!.ProfileId);
     }
 
     private async Task SeedDeveloperPositionAsync(Guid featureId)

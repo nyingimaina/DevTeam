@@ -6,7 +6,7 @@ public class RequirementsExtractorTests : IDisposable
 {
     private readonly string _workspace = Path.Combine(Path.GetTempPath(), "devteam-reqext-" + Guid.NewGuid().ToString("N"));
 
-    private string RequirementsPath => ArtifactPaths.RequirementsPath(_workspace, "feat-001");
+    private string RequirementsPath => ArtifactPaths.BrsPath(_workspace, "feat-001");
 
     public void Dispose()
     {

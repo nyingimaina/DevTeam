@@ -136,6 +136,141 @@ public static class ApiEndpoints
             return Results.Ok(new GitCredentialsResponse(store.ListNames()));
         });
 
+        // ─── profiles (named, reusable per-stage priming prompts) ──────────
+
+        static ProfileDto ToProfileDto(Profile p) => new(
+            p.Id, p.Name, p.Description, p.IsDefault,
+            [.. p.Prompts.Select(pr => new ProfilePromptDto(pr.StageName, pr.PromptText, pr.OverridesBuiltInPrompt))]);
+
+        app.MapGet("/api/profiles", async (HttpContext ctx) =>
+        {
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var profiles = await context.Profiles.Include(p => p.Prompts)
+                .OrderBy(p => p.Name)
+                .ToListAsync(ctx.RequestAborted);
+            return Results.Ok(profiles.Select(ToProfileDto).ToArray());
+        });
+
+        app.MapPost("/api/profiles", async (CreateProfileRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return Results.BadRequest("Name is required.");
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var isFirst = !await context.Profiles.AnyAsync(ctx.RequestAborted);
+
+            var profile = new Profile { Name = request.Name, Description = request.Description, IsDefault = isFirst };
+            foreach (var stageName in ProfileStageNames.All)
+                profile.Prompts.Add(new ProfilePrompt { StageName = stageName, PromptText = "" });
+
+            context.Profiles.Add(profile);
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToProfileDto(profile));
+        });
+
+        app.MapPut("/api/profiles/{id:guid}", async (Guid id, UpdateProfileRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return Results.BadRequest("Name is required.");
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var profile = await context.Profiles.Include(p => p.Prompts).FirstOrDefaultAsync(p => p.Id == id, ctx.RequestAborted);
+            if (profile is null) return Results.NotFound();
+
+            profile.Name = request.Name;
+            profile.Description = request.Description;
+            foreach (var promptUpdate in request.Prompts)
+            {
+                var existing = profile.Prompts.FirstOrDefault(p => p.StageName == promptUpdate.StageName);
+                if (existing is null) continue;
+                existing.PromptText = promptUpdate.PromptText;
+                existing.OverridesBuiltInPrompt = promptUpdate.OverridesBuiltInPrompt;
+            }
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToProfileDto(profile));
+        });
+
+        app.MapDelete("/api/profiles/{id:guid}", async (Guid id, HttpContext ctx) =>
+        {
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var profile = await context.Profiles.Include(p => p.Prompts).FirstOrDefaultAsync(p => p.Id == id, ctx.RequestAborted);
+            if (profile is null) return Results.NotFound();
+
+            var wasDefault = profile.IsDefault;
+            context.Profiles.Remove(profile);
+            await context.SaveChangesAsync(ctx.RequestAborted);
+
+            if (wasDefault)
+            {
+                // SQLite's EF provider can't translate ORDER BY on DateTimeOffset — sort client-side.
+                var remaining = await context.Profiles.ToListAsync(ctx.RequestAborted);
+                var promoted = remaining.OrderBy(p => p.CreatedAt).FirstOrDefault();
+                if (promoted is not null)
+                {
+                    promoted.IsDefault = true;
+                    await context.SaveChangesAsync(ctx.RequestAborted);
+                }
+            }
+            return Results.Ok(new { ok = true });
+        });
+
+        app.MapPost("/api/profiles/{id:guid}/default", async (Guid id, HttpContext ctx) =>
+        {
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var target = await context.Profiles.Include(p => p.Prompts).FirstOrDefaultAsync(p => p.Id == id, ctx.RequestAborted);
+            if (target is null) return Results.NotFound();
+
+            var currentDefaults = await context.Profiles.Where(p => p.IsDefault && p.Id != id).ToListAsync(ctx.RequestAborted);
+            foreach (var p in currentDefaults) p.IsDefault = false;
+            target.IsDefault = true;
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToProfileDto(target));
+        });
+
+        app.MapGet("/api/workspace/profile", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var settings = await context.WorkspaceProfileSettings.FindAsync([workspacePath], ctx.RequestAborted);
+            if (settings is not null) return Results.Ok(new WorkspaceProfileDto(settings.ProfileId));
+
+            var defaultProfile = await context.Profiles.FirstOrDefaultAsync(p => p.IsDefault, ctx.RequestAborted);
+            if (defaultProfile is null) return Results.Ok(new WorkspaceProfileDto(null));
+
+            context.WorkspaceProfileSettings.Add(new WorkspaceProfileSettings { WorkspacePath = workspacePath, ProfileId = defaultProfile.Id });
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(new WorkspaceProfileDto(defaultProfile.Id));
+        });
+
+        app.MapPost("/api/workspace/profile", async (SetWorkspaceProfileRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            if (!await context.Profiles.AnyAsync(p => p.Id == request.ProfileId, ctx.RequestAborted))
+                return Results.BadRequest("Unknown profile.");
+
+            var settings = await context.WorkspaceProfileSettings.FindAsync([request.WorkspacePath], ctx.RequestAborted);
+            if (settings is null)
+            {
+                settings = new WorkspaceProfileSettings { WorkspacePath = request.WorkspacePath };
+                context.WorkspaceProfileSettings.Add(settings);
+            }
+            settings.ProfileId = request.ProfileId;
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(new WorkspaceProfileDto(settings.ProfileId));
+        });
+
         // ─── feature-scoped pipeline endpoints (GitFlow) ───────────────────
         app.MapPost("/api/features/{featureId:guid}/start-stage", async (Guid featureId, HttpContext ctx) =>
         {

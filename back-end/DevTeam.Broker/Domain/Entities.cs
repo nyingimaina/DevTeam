@@ -32,6 +32,13 @@ public sealed class Message
     public string? BodyText { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<Part> Parts { get; set; } = [];
+
+    /// <summary>
+    /// True when BodyText is a prompt WorkflowEngine composed (stage kickoff, autonomous
+    /// re-prompt, correction nudge, review kickoff) rather than text a human typed in the
+    /// chat box. The frontend collapses these to a placeholder instead of showing them raw.
+    /// </summary>
+    public bool IsPriming { get; set; }
 }
 
 public sealed class Part

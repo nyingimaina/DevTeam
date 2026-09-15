@@ -33,6 +33,9 @@ public sealed record RuntimeIdentity
     /// <summary>Broker SQLite database file.</summary>
     public string DatabasePath => Path.Combine(DataDirectory, "devteam.db");
 
+    /// <summary>Broker rolling log directory (structured Serilog output, not the desktop shell's own log).</summary>
+    public string LogsDirectory => Path.Combine(DataDirectory, "logs");
+
     /// <summary>Absolute path to the opencode executable, or null if not found.</summary>
     public string? OpenCodePath { get; }
 
