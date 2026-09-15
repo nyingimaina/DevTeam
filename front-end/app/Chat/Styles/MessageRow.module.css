@@ -38,6 +38,27 @@
   display: inline-block;
 }
 
+.primingNotice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-style: italic;
+  color: inherit;
+  background: none;
+  border: 1px dashed currentColor;
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 120ms ease;
+}
+
+.primingNotice:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
 .toolCall {
   margin-top: 8px;
   display: flex;

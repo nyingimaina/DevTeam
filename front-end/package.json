@@ -15,8 +15,10 @@
     "@tomplum/react-git-log": "^2.5.0",
     "framer-motion": "^12.43.0",
     "jattac-web-poller": "^1.0.0",
+    "jattac.libs.web.responsive-table": "^0.18.2",
     "jattac.libs.web.zest-button": "^1.5.2",
     "jattac.libs.web.zest-responsive-layout": "2.6.1",
+    "jattac.libs.web.zest-sidekick-menu": "^1.5.3",
     "jattac.libs.web.zest-tabs": "^0.2.2",
     "jattac.libs.web.zest-textbox": "0.5.5",
     "module-state-manager": "^0.2.1",
@@ -25,6 +27,7 @@
     "react-dom": "^18",
     "react-icons": "^5.4.0",
     "react-markdown": "^9.1.0",
+    "react-select": "^5.10.2",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {

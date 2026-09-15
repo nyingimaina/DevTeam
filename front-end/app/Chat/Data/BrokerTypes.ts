@@ -26,6 +26,7 @@ export interface MessageDto {
   bodyText?: string | null;
   createdAt: string;
   parts: PartDto[];
+  isPriming: boolean;
 }
 
 export interface SessionDetail {
@@ -185,6 +186,9 @@ export interface ReleaseStageRunDto {
   gateChecks: ReleaseGateCheckDto[];
   findings: ReviewFindingDto[];
   guidanceNotes: ReleaseGuidanceNoteDto[];
+  lastErrorKind: string;
+  lastErrorMessage?: string | null;
+  lastErrorAt?: string | null;
 }
 
 export interface ReleaseGuidanceNoteDto {
@@ -307,6 +311,26 @@ export interface ReviewFindingDto {
   severity: string;
   summary: string;
   status: string;
+}
+
+// ─── profiles ───────────────────────────────────────────────────────────────
+
+export interface ProfilePromptDto {
+  stageName: string;
+  promptText: string;
+  overridesBuiltInPrompt: boolean;
+}
+
+export interface ProfileDto {
+  id: string;
+  name: string;
+  description: string | null;
+  isDefault: boolean;
+  prompts: ProfilePromptDto[];
+}
+
+export interface WorkspaceProfileDto {
+  profileId: string | null;
 }
 
 export interface StagePromptResult {

@@ -7,7 +7,14 @@ export default function ZestTextboxDefaultsProvider({ children }: { children: Re
   const { resolvedTheme } = useTheme();
   return (
     <ZestTextboxConfigProvider
-      value={{ theme: resolvedTheme, helperTextConfig: () => ({}), showProgressBar: true, animatedCounter: true }}
+      value={{
+        theme: resolvedTheme,
+        helperTextConfig: () => ({}),
+        helperTextPositioning: "reserved",
+        showProgressBar: true,
+        animatedCounter: true,
+        stretch: true,
+      }}
     >
       {children}
     </ZestTextboxConfigProvider>

@@ -1,17 +1,18 @@
 "use client";
 import React, { useCallback, useState } from "react";
-import ZestTabs from "jattac.libs.web.zest-tabs";
+import SidekickMenu, { ISidekickMenuItem } from "jattac.libs.web.zest-sidekick-menu";
 import BrokerApi from "./Chat/Data/BrokerApi";
 import ReleaseWizard from "./Project/Release/ReleaseWizard";
 import GitView from "./Project/Git/GitView";
+import SettingsView from "./Project/Settings/SettingsView";
 import PathBrowser from "./Project/UI/PathBrowser";
 import WorkspaceCleanupNotice from "./UI/WorkspaceCleanupNotice";
 import ActiveTurnIndicator from "./UI/ActiveTurnIndicator";
 import { formatCleanupNoticeMessage, projectNameFromPath } from "./Project/workspaceCleanup";
-import { FaFolderOpen } from "react-icons/fa6";
+import { FaFolderOpen, FaListCheck, FaCodeBranch, FaGear } from "react-icons/fa6";
 import styles from "./App.module.css";
 
-type TabValue = "releases" | "git";
+type TabValue = "releases" | "git" | "settings";
 
 const STORAGE_KEY = "devteam-project";
 
@@ -78,6 +79,30 @@ export default function App() {
 
   const projectName = projectNameFromPath(project);
 
+  const navItems: ISidekickMenuItem[] = [
+    {
+      id: "releases",
+      label: "Releases",
+      icon: <FaListCheck />,
+      searchTerms: "releases workflow pipeline stages",
+      onClick: () => setActiveTab("releases"),
+    },
+    {
+      id: "git",
+      label: "Git",
+      icon: <FaCodeBranch />,
+      searchTerms: "git source control branches commits",
+      onClick: () => setActiveTab("git"),
+    },
+    {
+      id: "settings",
+      label: "Settings",
+      icon: <FaGear />,
+      searchTerms: "settings profiles preferences",
+      onClick: () => setActiveTab("settings"),
+    },
+  ];
+
   return (
     <div className={styles.app}>
       <header className={styles.tabBar}>
@@ -89,14 +114,16 @@ export default function App() {
         >
           {projectName}
         </button>
-        <ZestTabs
-          id="app-nav"
-          items={[
-            { label: "Releases", value: "releases" },
-            { label: "Git", value: "git" },
-          ]}
-          activeValue={activeTab}
-          onChange={(v) => setActiveTab(v as TabValue)}
+        <SidekickMenu
+          items={navItems}
+          side="right"
+          openOnDesktop={false}
+          headerContent={
+            <div className={styles.brand}>
+              <img src="/devteam-icon.svg" alt="" width={32} height={32} />
+              <span className={styles.brandName}>DevTeam</span>
+            </div>
+          }
         />
       </header>
       <main className={styles.viewPort}>
@@ -105,6 +132,9 @@ export default function App() {
         </div>
         <div hidden={activeTab !== "git"}>
           <GitView api={api} workspacePath={project} />
+        </div>
+        <div hidden={activeTab !== "settings"} data-testid="settings-tab-panel">
+          <SettingsView api={api} workspacePath={project} />
         </div>
       </main>
       {notice}

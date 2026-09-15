@@ -56,6 +56,35 @@ jest.mock("./Project/UI/PathBrowser", () => {
   };
 });
 
+jest.mock("./Project/Settings/SettingsView", () => {
+  return {
+    __esModule: true,
+    default: ({ workspacePath }: { workspacePath?: string }) => (
+      <div data-testid="settings-mock">Settings Mock — {workspacePath}</div>
+    ),
+  };
+});
+
+interface MockSidekickMenuItem {
+  label: React.ReactNode;
+  onClick?: () => void;
+}
+
+jest.mock("jattac.libs.web.zest-sidekick-menu", () => {
+  return {
+    __esModule: true,
+    default: ({ items }: { items: MockSidekickMenuItem[] }) => (
+      <nav data-testid="sidekick-menu-mock">
+        {items.map((item, i) => (
+          <button key={i} onClick={item.onClick}>
+            {item.label}
+          </button>
+        ))}
+      </nav>
+    ),
+  };
+});
+
 beforeEach(() => {
   localStorage.clear();
   cleanupWorkspaceAsync.mockReset();
@@ -188,6 +217,23 @@ describe("App", () => {
 
     await waitFor(() => expect(cleanupWorkspaceAsync).toHaveBeenCalled());
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("switches to Settings via the sidekick menu", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+
+    fireEvent.click(screen.getByText("Settings"));
+    expect(screen.getByTestId("settings-mock")).toBeVisible();
+    expect(screen.queryByTestId("release-wizard")).not.toBeVisible();
+    expect(screen.getByText(/Settings Mock/)).toHaveTextContent("C:\\work\\my-project");
+  });
+
+  it("navigates via the sidekick menu instead of a tab bar", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Pick"));
+
+    expect(screen.getByTestId("sidekick-menu-mock")).toBeInTheDocument();
   });
 
   it("still opens the project normally when the cleanup sweep fails", async () => {

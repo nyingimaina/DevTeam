@@ -548,6 +548,50 @@
   color: var(--accent, #1c7c54);
   font-size: 11px;
   font-weight: 500;
+  transition: background-color 120ms ease;
+}
+
+.phaseBadge:hover {
+  background: var(--accent-ring, rgba(28, 124, 84, 0.25));
+}
+
+.diagnosticsContent {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.diagnosticsContent h4 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #888);
+  margin-bottom: 6px;
+}
+
+.diagnosticsError {
+  color: var(--danger, #b3261e);
+}
+
+.diagnosticsList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diagnosticsEvidence {
+  white-space: pre-wrap;
+  font-size: 12px;
+  background: var(--surface-hover, rgba(0, 0, 0, 0.04));
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-top: 4px;
+}
+
+.diagnosticsNoteAttribution {
+  font-size: 11px;
+  color: var(--text-muted, #888);
 }
 
 .questionBadge {

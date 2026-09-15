@@ -1,0 +1,64 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.error {
+  color: var(--zest-color-danger-bg, #dc2626);
+}
+
+.workspacePicker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workspacePicker label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9em;
+}
+
+.newProfile {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9em;
+}
+
+.editor textarea {
+  min-height: 120px;
+  font-family: inherit;
+}
+
+.editor .overrideLabel {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.overrideWarning {
+  font-size: 0.85em;
+  color: var(--zest-color-danger-bg, #dc2626);
+  border: 1px solid var(--zest-color-danger-bg, #dc2626);
+  border-radius: 4px;
+  padding: 8px 10px;
+}

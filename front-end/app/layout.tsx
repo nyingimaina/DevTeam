@@ -2,6 +2,7 @@ import React from "react";
 import ThemeProvider from "./Theme/ThemeProvider";
 import ZestButtonDefaultsProvider from "./ZestButtonDefaults/ZestButtonDefaultsProvider";
 import ZestTextboxDefaultsProvider from "./ZestTextboxDefaults/ZestTextboxDefaultsProvider";
+import ZestSidekickDefaultsProvider from "./ZestSidekickDefaults/ZestSidekickDefaultsProvider";
 import "./globals.css";
 
 export const metadata = {
@@ -22,7 +23,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <ThemeProvider>
           <ZestButtonDefaultsProvider>
-            <ZestTextboxDefaultsProvider>{children}</ZestTextboxDefaultsProvider>
+            <ZestTextboxDefaultsProvider>
+              <ZestSidekickDefaultsProvider>{children}</ZestSidekickDefaultsProvider>
+            </ZestTextboxDefaultsProvider>
           </ZestButtonDefaultsProvider>
         </ThemeProvider>
       </body>

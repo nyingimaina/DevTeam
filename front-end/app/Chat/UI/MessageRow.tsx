@@ -3,7 +3,12 @@ import { MessageDto, PartDto } from "../Data/BrokerTypes";
 import RichText from "../../UI/RichText";
 import styles from "../Styles/MessageRow.module.css";
 
-export default function MessageRow({ message }: { message: MessageDto }) {
+interface IMessageRowProps {
+  message: MessageDto;
+  onInspect?: (message: MessageDto) => void;
+}
+
+export default function MessageRow({ message, onInspect }: IMessageRowProps) {
   const isUser = message.role === "user";
   const toolParts = message.parts?.filter((p) => p.kind === "tool_call") ?? [];
 
@@ -11,7 +16,15 @@ export default function MessageRow({ message }: { message: MessageDto }) {
     <div className={`${styles.row} ${isUser ? styles.user : styles.assistant}`}>
       <div className={styles.bubble}>
         {message.bodyText &&
-          (isUser ? (
+          (message.isPriming ? (
+            <button
+              type="button"
+              className={styles.primingNotice}
+              onClick={() => onInspect?.(message)}
+            >
+              Priming Prompt Injected
+            </button>
+          ) : isUser ? (
             <div className={styles.body}>{message.bodyText}</div>
           ) : (
             <RichText text={message.bodyText} />

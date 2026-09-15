@@ -11,6 +11,7 @@ import {
   MessageDto,
   ModelOption,
   PipelineStageDto,
+  ProfileDto,
   ReleaseDto,
   ReleaseFeatureDto,
   SessionDetail,
@@ -18,6 +19,7 @@ import {
   StagePromptResult,
   StageRunDto,
   StoppedProcessDto,
+  WorkspaceProfileDto,
 } from "./BrokerTypes";
 
 export default class BrokerApi {
@@ -201,6 +203,50 @@ export default class BrokerApi {
 
   listGitCredentialsAsync(): Promise<GitCredentialsDto> {
     return this.requestAsync<GitCredentialsDto>("/api/git/credentials");
+  }
+
+  // ─── profiles ───────────────────────────────────────────────────────────
+
+  getProfilesAsync(): Promise<ProfileDto[]> {
+    return this.requestAsync<ProfileDto[]>("/api/profiles");
+  }
+
+  createProfileAsync(name: string, description: string | null): Promise<ProfileDto> {
+    return this.requestAsync<ProfileDto>("/api/profiles", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    });
+  }
+
+  updateProfileAsync(
+    id: string,
+    name: string,
+    description: string | null,
+    prompts: { stageName: string; promptText: string; overridesBuiltInPrompt: boolean }[],
+  ): Promise<ProfileDto> {
+    return this.requestAsync<ProfileDto>(`/api/profiles/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ name, description, prompts }),
+    });
+  }
+
+  deleteProfileAsync(id: string): Promise<{ ok: boolean }> {
+    return this.requestAsync<{ ok: boolean }>(`/api/profiles/${id}`, { method: "DELETE" });
+  }
+
+  setDefaultProfileAsync(id: string): Promise<ProfileDto> {
+    return this.requestAsync<ProfileDto>(`/api/profiles/${id}/default`, { method: "POST" });
+  }
+
+  getWorkspaceProfileAsync(workspacePath: string): Promise<WorkspaceProfileDto> {
+    return this.requestAsync<WorkspaceProfileDto>(`/api/workspace/profile?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  setWorkspaceProfileAsync(workspacePath: string, profileId: string): Promise<WorkspaceProfileDto> {
+    return this.requestAsync<WorkspaceProfileDto>("/api/workspace/profile", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, profileId }),
+    });
   }
 
   // ─── stage endpoints ────────────────────────────────────────────────────

@@ -4,6 +4,13 @@ const STAGE_LABELS: Record<string, string> = {
   qa: "QA",
 };
 
+// The BA's output is a named document (Business Requirements Specification) that
+// downstream stages reference by that name — every other stage's output is just
+// "<stage> output" since it has no equivalent standalone document.
+const STAGE_OUTPUT_LABELS: Record<string, string> = {
+  "business-analyst": "BRS",
+};
+
 const PHASE_LABELS: Record<string, string> = {
   GuidedQA: "Chat with agent",
   Producing: "Producing artifacts",
@@ -19,6 +26,16 @@ const STATUS_LABELS: Record<string, string> = {
   Blocked: "Blocked",
   Ready: "Ready",
   Complete: "Done",
+  Escalated: "Agent error — needs retry",
+};
+
+// Distinct copy per failure kind so "needs retry" doesn't read as one generic error —
+// a provider rejection (won't fix itself on retry) reads very differently from a
+// disconnected process or a timeout (both plausibly fixed by just trying again).
+const ERROR_KIND_LABELS: Record<string, string> = {
+  Disconnected: "The agent process disconnected unexpectedly.",
+  ProviderRejected: "The agent's model provider rejected the request — check its configuration.",
+  TimedOut: "The agent didn't respond in time.",
 };
 
 const WHATS_NEXT: Record<string, string> = {
@@ -37,6 +54,10 @@ export function stageLabel(name: string): string {
     .join(" ");
 }
 
+export function stageOutputLabel(name: string): string {
+  return STAGE_OUTPUT_LABELS[name] ?? `${stageLabel(name)} output`;
+}
+
 export function phaseLabel(phase: string): string {
   return PHASE_LABELS[phase] ?? phase;
 }
@@ -47,6 +68,10 @@ export function statusLabel(status: string): string {
 
 export function whatsNext(stageName: string): string {
   return WHATS_NEXT[stageName] ?? "";
+}
+
+export function errorKindLabel(kind: string): string {
+  return ERROR_KIND_LABELS[kind] ?? "";
 }
 
 // This button only re-checks the current stage's gates — it never advances the

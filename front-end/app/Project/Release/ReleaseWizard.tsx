@@ -14,9 +14,11 @@ import {
   StageArtifactDto,
 } from "../../Chat/Data/BrokerTypes";
 import MessageRow from "../../Chat/UI/MessageRow";
+import RichText from "../../UI/RichText";
 import ZestButton from "jattac.libs.web.zest-button";
+import { ZestResponsiveLayout } from "jattac.libs.web.zest-responsive-layout";
 import { FaSpinner } from "react-icons/fa6";
-import { moveOnButtonLabel, phaseLabel, proceedButtonLabel, stageLabel, statusLabel, whatsNext } from "./labels";
+import { errorKindLabel, moveOnButtonLabel, phaseLabel, proceedButtonLabel, stageLabel, stageOutputLabel, statusLabel, whatsNext } from "./labels";
 import { formatElapsed } from "../../UI/formatElapsed";
 import styles from "../Styles/ReleaseWizard.module.css";
 
@@ -39,13 +41,14 @@ function statusColor(status: string): string {
     case "Blocked": return styles.statusBlocked;
     case "BlockedGate": return styles.statusBlocked;
     case "BlockedSignoff": return styles.statusBlocked;
+    case "Escalated": return styles.statusBlocked;
     case "Ready": return styles.statusReady;
     default: return "";
   }
 }
 
 function shouldPollStage(status: string): boolean {
-  return status === "Active" || status === "GatesRunning" || status === "BlockedGate" || status === "BlockedSignoff";
+  return status === "Active" || status === "GatesRunning" || status === "BlockedGate" || status === "BlockedSignoff" || status === "Escalated";
 }
 
 function latestRunFor(release: ReleaseDto, stageName: string): ReleaseStageRunDto | undefined {
@@ -561,6 +564,11 @@ interface IStageScreenProps {
 function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefix, refreshRelease, hidePrimaryPanel = false }: IStageScreenProps) {
   const [busy, setBusy] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
+  // Sparse-by-default, full-detail-on-demand: the header/checklist only ever show compact
+  // ✓/✗ ticks and a status word — everything behind them (full gate evidence, every
+  // guidance note, the specific escalation reason) lives here, reached by clicking the
+  // status badge, instead of cluttering the primary view.
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   const handleStartStage = useCallback(async () => {
     setBusy(true);
@@ -608,12 +616,28 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
   const needsFreshStart = !run || run.status === "Complete";
 
   return (
+    <ZestResponsiveLayout
+      sidePaneWidth="480px"
+      sidePane={{
+        visible: diagnosticsOpen,
+        title: "Stage diagnostics",
+        content: run ? <StageDiagnosticsContent run={run} /> : null,
+        onClose: () => setDiagnosticsOpen(false),
+      }}
+    >
     <div className={styles.stagePanel}>
       <div className={styles.stageHeader}>
         <span className={styles.stageName}>Current Stage: {stageLabel(role.name)}</span>
         {run && (
           <>
-            <span className={styles.phaseBadge}>{phaseLabel(run.phase)}</span>
+            <button
+              type="button"
+              className={styles.phaseBadge}
+              onClick={() => setDiagnosticsOpen(true)}
+              data-testid={`${testIdPrefix}-diagnostics-btn`}
+            >
+              {phaseLabel(run.phase)}
+            </button>
             <span className={styles.questionBadge}>attempt {run.attempt}</span>
           </>
         )}
@@ -706,6 +730,59 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
           refreshRelease={refreshRelease}
         />
       )}
+    </div>
+    </ZestResponsiveLayout>
+  );
+}
+
+// ─── stage diagnostics (on-demand full detail behind the status badge) ────
+
+function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
+  return (
+    <div className={styles.diagnosticsContent}>
+      <section>
+        <h4>Status</h4>
+        <p>{statusLabel(run.status)}</p>
+        {run.status === "Escalated" && (
+          <p className={styles.diagnosticsError}>
+            {errorKindLabel(run.lastErrorKind) || run.lastErrorMessage || "The agent hit an error."}
+          </p>
+        )}
+      </section>
+
+      <section>
+        <h4>Gate checks</h4>
+        {run.gateChecks.length === 0 ? (
+          <p>No gate checks yet.</p>
+        ) : (
+          <ul className={styles.diagnosticsList}>
+            {run.gateChecks.map((gc) => (
+              <li key={gc.id}>
+                <div>{gc.passed ? "✓" : "✗"} {gc.name}</div>
+                {gc.evidenceText && <pre className={styles.diagnosticsEvidence}>{gc.evidenceText}</pre>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h4>Guidance notes</h4>
+        {run.guidanceNotes.length === 0 ? (
+          <p>No guidance notes yet.</p>
+        ) : (
+          <ul className={styles.diagnosticsList}>
+            {run.guidanceNotes.map((note) => (
+              <li key={note.id}>
+                <div className={styles.diagnosticsNoteAttribution}>
+                  {note.addedBy === "system:gate-failure" ? "Auto-generated from gate failure" : note.addedBy ?? "user"}
+                </div>
+                <div>{note.text}</div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }
@@ -845,7 +922,7 @@ function StageContextPanels({ featureId, api, testIdPrefix, previousRoleName, pr
   return (
     <div className={styles.contextPanels}>
       <details className={styles.advancedDetails} data-testid={`${testIdPrefix}-previous-stage-panel`}>
-        <summary>{stageLabel(previousRoleName)} output (reference)</summary>
+        <summary>{stageOutputLabel(previousRoleName)} (reference)</summary>
         {artifacts.length === 0 && <div className={styles.stageSummary}>No artifacts yet.</div>}
         {artifacts.map((a) => (
           <div key={a.relativePath}>
@@ -953,6 +1030,7 @@ interface IChatStageProps {
 
 function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, refreshRelease, nextStageName }: IChatStageProps) {
   const [messages, setMessages] = useState<MessageDto[]>([]);
+  const [inspecting, setInspecting] = useState<MessageDto | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [gatesRunning, setGatesRunning] = useState(false);
@@ -1041,7 +1119,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
     setInput("");
     setMessages((prev) => [
       ...prev,
-      { id: `pending-${Date.now()}`, role: "user", bodyText: text, createdAt: new Date().toISOString(), parts: [] },
+      { id: `pending-${Date.now()}`, role: "user", bodyText: text, createdAt: new Date().toISOString(), parts: [], isPriming: false },
     ]);
     setSending(true);
     setMessagesError(null);
@@ -1061,7 +1139,16 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   const nextStepLabel = moveOnButtonLabel(nextStageName);
 
   return (
-    <div className={styles.chatPanel}>
+    <ZestResponsiveLayout
+      className={styles.chatPanel}
+      sidePaneWidth="480px"
+      sidePane={{
+        visible: inspecting !== null,
+        title: "Injected prompt",
+        content: <RichText text={inspecting?.bodyText} />,
+        onClose: () => setInspecting(null),
+      }}
+    >
       {messagesError && <div className={styles.error}>{messagesError}</div>}
       <div
         className={styles.chatContainer}
@@ -1076,7 +1163,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
           </div>
         )}
         {messages.map((message) => (
-          <MessageRow key={message.id} message={message} />
+          <MessageRow key={message.id} message={message} onInspect={setInspecting} />
         ))}
         {sending && (
           <div className={styles.thinkingRow} role="status" data-testid={`${testIdPrefix}-thinking`}>
@@ -1125,7 +1212,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
           Send
         </ZestButton>
       </div>
-    </div>
+    </ZestResponsiveLayout>
   );
 }
 
@@ -1241,8 +1328,12 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
 
   const isRunningHere = turn !== undefined && turn.acpSessionId === stageRun.acpSessionId;
   const isWaitingOnOtherTurn = turn !== undefined && turn.acpSessionId !== stageRun.acpSessionId;
+  // The backend now persists exactly why a turn didn't complete (Escalated + lastErrorKind)
+  // instead of this having to be guessed client-side from "no active turn right now" — that
+  // heuristic stays as a fallback for the brief window before the backend's own error state
+  // has been polled in, not as the primary signal.
   const looksStalled = turn === undefined && stageRun.status === "Active";
-  const inProgress = !["BlockedGate", "BlockedSignoff", "Complete"].includes(stageRun.status);
+  const inProgress = !["BlockedGate", "BlockedSignoff", "Complete", "Escalated"].includes(stageRun.status);
 
   const lines = useMemo(() => {
     const out: { text: string; tone: "phase" | "ok" | "warn" | "err" | "plain" }[] = [
@@ -1264,7 +1355,10 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
       out.push({ text: `⚠ ${f.severity} ${f.target}: ${f.summary}`, tone: f.severity === "Blocker" ? "err" : "warn" });
     }
 
-    if (stageRun.status === "BlockedGate") {
+    if (stageRun.status === "Escalated") {
+      const reason = errorKindLabel(stageRun.lastErrorKind) || "The agent hit an error and needs a retry.";
+      out.push({ text: `⚠ ${reason}`, tone: "err" });
+    } else if (stageRun.status === "BlockedGate") {
       out.push({ text: "stage blocked — gates failed. Review findings and push back for rework.", tone: "err" });
     } else if (stageRun.status === "BlockedSignoff") {
       out.push({ text: "stage blocked — signoff required to continue.", tone: "warn" });
@@ -1284,7 +1378,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
     }
   }, [lines]);
 
-  const showRunButton = shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate";
+  const showRunButton = shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate" || stageRun.status === "Escalated";
   const showRefreshButton = shouldPollStage(stageRun.status);
 
   return (
@@ -1318,7 +1412,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
       </div>
 
       <div className={styles.logActions}>
-        {showRunButton && stageRun.status === "BlockedGate" && (
+        {showRunButton && (stageRun.status === "BlockedGate" || stageRun.status === "Escalated") && (
           <CountdownRunButton
             testIdPrefix={testIdPrefix}
             disabled={busy}
@@ -1328,7 +1422,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
             onRun={runStage}
           />
         )}
-        {showRunButton && stageRun.status !== "BlockedGate" && (
+        {showRunButton && stageRun.status !== "BlockedGate" && stageRun.status !== "Escalated" && (
           <ZestButton
             type="button"
             onClick={runStage}

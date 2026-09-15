@@ -1,0 +1,104 @@
+.createPrompt {
+  font-weight: bold;
+  cursor: pointer;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 10px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.createPrompt:hover {
+  color: var(--accent-hover);
+  background-color: var(--accent-soft);
+}
+
+.createPrompt:active {
+  background-color: var(--accent-ring);
+}
+
+.defaultClass {
+  width: 100%;
+}
+
+/* Display Mode Styles */
+.displayModeContainer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background-color: var(--bg-surface);
+  transition: all 0.2s ease;
+}
+
+.displayModeIconWrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 12px;
+}
+
+.displayModeIcon {
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.displayModeIconWrapper:hover .displayModeIcon {
+  transform: scale(1.15);
+}
+
+.displayModeIconWrapper:active .displayModeIcon {
+  transform: scale(0.95);
+}
+
+.displayModeContent {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.displayModeLabel {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-body);
+}
+
+.displayModeWarning {
+  font-size: 12px;
+  color: #d97706;
+  margin-top: 2px;
+}
+
+.displayModeCta {
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  background-color: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  margin-left: 12px;
+}
+
+.displayModeCta:hover {
+  background-color: var(--accent);
+  color: var(--bg-surface);
+}
+
+.displayModeCta:active {
+  transform: scale(0.98);
+}
