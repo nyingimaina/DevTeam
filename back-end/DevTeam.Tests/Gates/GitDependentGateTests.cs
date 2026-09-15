@@ -57,6 +57,39 @@ public class GitDependentGateTests
         Assert.Contains("Server/Config.cs", result.EvidenceText);
     }
 
+    [Theory]
+    [InlineData("Server/Config.py", "+# TODO: handle retries")]
+    [InlineData("Server/index.html", "+<!-- TODO: update copy -->")]
+    public async Task Hygiene_StillFlagsMarkersInNonCStyleComments(string file, string addedLine)
+    {
+        var runner = FakeProcessRunner.Git($"+++ b/{file}\n{addedLine}\n");
+        var gate = new CodeHygieneGate(runner);
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.CodeHygiene, Workspace, "feat-001"),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Contains("TODO", result.EvidenceText);
+    }
+
+    [Theory]
+    [InlineData("+namespace Todo.Api;")]
+    [InlineData("+public class TodoController")]
+    [InlineData("+// see the todo item below")]
+    [InlineData("+const todoLabel = \"TODO\";")]
+    public async Task Hygiene_DoesNotFlagCoincidentalKeywordMatchesFromTheAppsOwnName(string addedLine)
+    {
+        var runner = FakeProcessRunner.Git($"+++ b/Server/Config.cs\n+Console.WriteLine(1);\n{addedLine}\n");
+        var gate = new CodeHygieneGate(runner);
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.CodeHygiene, Workspace, "feat-001"),
+            CancellationToken.None);
+
+        Assert.True(result.Passed);
+    }
+
     [Fact]
     public async Task SliceGuard_RejectsFilesOutsideAllowlist()
     {
