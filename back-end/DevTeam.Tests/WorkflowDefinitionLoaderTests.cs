@@ -32,6 +32,58 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void LoadDefault_QaVerifyAndCoverageGatesAreOwnedByDeveloper()
+    {
+        // QA verifies; it can't author tests, so a failure here must be routed back to
+        // developer instead of QA retrying a loop it structurally cannot fix.
+        var qa = LoadDefault().Pipeline.Single(r => r.Name == "qa");
+
+        Assert.Equal("developer", qa.Steps.Single(s => s.Builtin == "verify_code").ResponsibleRole);
+        Assert.Equal("developer", qa.Steps.Single(s => s.Builtin == "coverage_matrix").ResponsibleRole);
+        // A gate with no ResponsibleRole override defaults to the owning role (unset here).
+        Assert.Null(qa.Steps.Single(s => s.Builtin == "render_handoff").ResponsibleRole);
+    }
+
+    [Fact]
+    public void Load_ParsesGatePromptStepsAndEntryGates()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              developer:
+                entryGates:
+                  - gatePrompt: "Confirm the BRS mentions accessibility requirements."
+                    responsibleRole: business-analyst
+                steps:
+                  - agent: { mode: developer }
+                  - gatePrompt: "Review the diff for security issues."
+            """;
+        var role = Load(yaml).Pipeline.Single();
+
+        var entryGate = Assert.Single(role.EntryGates!);
+        Assert.Equal(WorkflowStepKind.GatePrompt, entryGate.Kind);
+        Assert.Equal("Confirm the BRS mentions accessibility requirements.", entryGate.GatePromptText);
+        Assert.Equal("business-analyst", entryGate.ResponsibleRole);
+
+        var exitGate = role.Steps.Single(s => s.Kind == WorkflowStepKind.GatePrompt);
+        Assert.Equal("Review the diff for security issues.", exitGate.GatePromptText);
+        Assert.Null(exitGate.ResponsibleRole);
+    }
+
+    [Fact]
+    public void Load_GatePromptStepWithoutText_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              developer:
+                steps:
+                  - gatePrompt: ""
+            """;
+        Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+    }
+
+    [Fact]
     public void LoadDefault_DefinesChallengePairs()
     {
         var definition = LoadDefault();

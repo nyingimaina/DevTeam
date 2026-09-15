@@ -98,7 +98,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     public async Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct)
     {
-        var workflow = _loader.LoadDefault();
+        var workflow = LoadWorkflow(workspacePath);
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
         var releaseBranch = $"release/{featureKey}";
@@ -265,8 +265,6 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var featureKey = feature.Key;
         var workspacePath = feature.Release.WorkspacePath;
-        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
-        var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
 
         var stageRun = new ReleaseStageRun
         {
@@ -275,9 +273,18 @@ public sealed class WorkflowEngine : IWorkflowEngine
             Attempt = feature.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
             Status = ReleaseStageStatus.Active,
             Phase = StagePhase.GuidedQA,
-            AcpSessionId = session.SessionId.ToString(),
         };
         db.ReleaseStageRuns.Add(stageRun);
+        await db.SaveChangesAsync(ct);
+
+        // Entry gates run before a session is even opened — a role that never gets past its
+        // own entry gates has no need for one yet, and shouldn't pay for it.
+        if (!await RunEntryGatesAsync(role, featureKey, workspacePath, stageRun, db, ct))
+            return stageRun;
+
+        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
+        var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
+        stageRun.AcpSessionId = session.SessionId.ToString();
         await db.SaveChangesAsync(ct);
 
         // Run this role's leading builtins (e.g. scaffold_specs/context_bundle for
@@ -488,7 +495,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 continue;
             }
             if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, featureKey, workspacePath, ct);
+            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -605,8 +612,6 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
         if (stageRun is null)
         {
-            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
-            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
             stageRun = new ReleaseStageRun
             {
                 Feature = feature,
@@ -614,9 +619,27 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Attempt = feature.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
                 Status = ReleaseStageStatus.Active,
                 Phase = StagePhase.GuidedQA,
-                AcpSessionId = session.SessionId.ToString(),
             };
             db.ReleaseStageRuns.Add(stageRun);
+            await db.SaveChangesAsync(ct);
+
+            // Entry gates run before a session is even opened — a role that never gets past
+            // its own entry gates has no need for one yet, and shouldn't pay for it.
+            if (!await RunEntryGatesAsync(role, featureKey, workspacePath, stageRun, db, ct))
+            {
+                await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
+                {
+                    StageName = role.Name,
+                    Status = stageRun.Status.ToString(),
+                    Phase = stageRun.Phase.ToString(),
+                    AllPassed = false,
+                }, ct);
+                return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+            }
+
+            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
+            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
+            stageRun.AcpSessionId = session.SessionId.ToString();
             await db.SaveChangesAsync(ct);
         }
 
@@ -675,13 +698,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     await PromptRoleAsync();
                     break;
                 case WorkflowStepKind.Builtin:
-                    var builtin = await ExecuteStepAsync(step, featureKey, workspacePath, ct);
+                case WorkflowStepKind.GatePrompt:
+                    var builtin = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
                     db.ReleaseGateChecks.Add(new ReleaseGateCheck
                     {
                         StageRun = stageRun,
                         Name = builtin.StepName,
                         Passed = builtin.Passed,
                         EvidenceText = builtin.Evidence,
+                        ResponsibleRole = builtin.ResponsibleRole,
                     });
                     // Flushed immediately (not just at phase boundaries) so a concurrent poll —
                     // the frontend's live step checklist — can see progress as it happens.
@@ -707,7 +732,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                                 continue;
                             }
 
-                            var inner = await ExecuteStepAsync(innerStep, featureKey, workspacePath, ct);
+                            var inner = await ExecuteStepAsync(innerStep, role, featureKey, workspacePath, stageRun, db, ct);
                             db.ReleaseGateChecks.Add(new ReleaseGateCheck
                             {
                                 StageRun = stageRun,
@@ -758,16 +783,31 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // are never retried by it) — so that if the human clicks "Run Stage Again", the
         // *next*, separate RunStageAsync call's prompts still know what went wrong here
         // instead of repeating it with no memory, same as the Loop's own inter-attempt notes.
+        //
+        // When a failed gate's ResponsibleRole names a different, upstream role, retrying
+        // *this* role's own loop can never converge (e.g. QA's verify_code failing because
+        // developer didn't write tests — QA cannot author tests). Route the feature back to
+        // whoever can actually fix it instead of leaving this stage in a dead-end retry loop.
         if (!allPassed && finalFailedSteps.Count > 0)
         {
-            db.ReleaseGuidanceNotes.Add(new ReleaseGuidanceNote
+            var owner = finalFailedSteps
+                .Select(s => s.ResponsibleRole)
+                .FirstOrDefault(r => !string.IsNullOrWhiteSpace(r) && r != role.Name);
+
+            var routed = owner is not null && await RouteGateFailureToOwnerAsync(
+                feature, workflow, position, role.Name, currentIndex, owner, finalFailedSteps, db, ct);
+
+            if (!routed)
             {
-                StageRunId = stageRun.Id,
-                StageRun = stageRun,
-                Text = BuildGateFailureFeedback(finalFailedSteps),
-                AddedBy = "system:gate-failure",
-            });
-            await db.SaveChangesAsync(ct);
+                db.ReleaseGuidanceNotes.Add(new ReleaseGuidanceNote
+                {
+                    StageRunId = stageRun.Id,
+                    StageRun = stageRun,
+                    Text = BuildGateFailureFeedback(finalFailedSteps),
+                    AddedBy = "system:gate-failure",
+                });
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         // Only worth an antagonist-review call when the deterministic gates above already
@@ -854,23 +894,42 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ?? throw new InvalidOperationException("Feature has no flow position.");
 
         var currentIndex = position.CurrentStageIndex;
-        var targetIndex = -1;
-        for (var i = 0; i < workflow.Pipeline.Count; i++)
-        {
-            if (workflow.Pipeline[i].Name == targetStageName)
-            {
-                targetIndex = i;
-                break;
-            }
-        }
+        var targetIndex = FindRoleIndex(workflow, targetStageName);
 
         if (targetIndex < 0)
             throw new InvalidOperationException($"No stage '{targetStageName}' in the pipeline.");
         if (targetIndex >= currentIndex)
             throw new InvalidOperationException("Push back is only allowed to a previous stage.");
 
+        await MoveToStageAsync(
+            feature, position, workflow.Pipeline[currentIndex].Name, targetIndex, targetStageName,
+            instructions, "user", db, ct);
+
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+    }
+
+    private static int FindRoleIndex(WorkflowDefinition workflow, string roleName)
+    {
+        for (var i = 0; i < workflow.Pipeline.Count; i++)
+        {
+            if (workflow.Pipeline[i].Name == roleName) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Moves a feature's FlowPosition to a previous stage, recording why (as a guidance note
+    /// on the stage being left) and resetting the target stage's signoff if it was already
+    /// approved. Shared core for both a human push-back (PushBackAsync, addedBy "user") and an
+    /// automatic gate-ownership route (RouteGateFailureToOwnerAsync, addedBy
+    /// "system:gate-failure") — the two differ only in who triggered the move and why.
+    /// </summary>
+    private async Task MoveToStageAsync(
+        ReleaseFeature feature, ReleaseFlowPosition position, string fromStageName, int targetIndex,
+        string targetStageName, string? instructions, string addedBy, DevTeamDbContext db, CancellationToken ct)
+    {
         var notesTarget = feature.StageRuns
-            .Where(sr => sr.StageName == workflow.Pipeline[currentIndex].Name)
+            .Where(sr => sr.StageName == fromStageName)
             .OrderByDescending(sr => sr.StartedAt)
             .FirstOrDefault()
             ?? feature.StageRuns.OrderByDescending(sr => sr.StartedAt).FirstOrDefault();
@@ -882,7 +941,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 StageRunId = notesTarget.Id,
                 StageRun = notesTarget,
                 Text = instructions,
-                AddedBy = "user",
+                AddedBy = addedBy,
             });
         }
 
@@ -907,8 +966,28 @@ public sealed class WorkflowEngine : IWorkflowEngine
             TargetStage = targetStageName,
             Instructions = instructions,
         }, ct);
+    }
 
-        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+    /// <summary>
+    /// A gate failure whose ResponsibleRole differs from the role currently running can't be
+    /// fixed by retrying that role's own loop (e.g. QA's verify_code failing because developer
+    /// didn't write tests — QA cannot author tests). Routes the feature back to the actual
+    /// owner instead, the same way a human PushBackAsync would, but system-triggered.
+    /// Returns false (falls back to the caller writing a same-stage note instead) when
+    /// ResponsibleRole doesn't name a real, upstream role.
+    /// </summary>
+    private async Task<bool> RouteGateFailureToOwnerAsync(
+        ReleaseFeature feature, WorkflowDefinition workflow, ReleaseFlowPosition position,
+        string fromStageName, int fromIndex, string responsibleRole,
+        IReadOnlyList<StepExecutionResult> failedSteps, DevTeamDbContext db, CancellationToken ct)
+    {
+        var targetIndex = FindRoleIndex(workflow, responsibleRole);
+        if (targetIndex < 0 || targetIndex >= fromIndex) return false;
+
+        await MoveToStageAsync(
+            feature, position, fromStageName, targetIndex, responsibleRole,
+            BuildGateFailureFeedback(failedSteps), "system:gate-failure", db, ct);
+        return true;
     }
 
     public async Task<IReadOnlyList<MessageDto>> GetStageMessagesAsync(
@@ -1082,7 +1161,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         foreach (var step in role.Steps)
         {
             if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, featureKey, feature.Release.WorkspacePath, ct);
+            var result = await ExecuteStepAsync(step, role, featureKey, feature.Release.WorkspacePath, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -1372,6 +1451,40 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// starts (e.g. scaffold_specs/context_bundle for business-analyst). Records a gate check
     /// per executed step so RunGatesAsync doesn't need to re-run them afterward.
     /// </summary>
+    /// <summary>
+    /// Runs a role's EntryGates — checks that must pass before its turn starts at all,
+    /// symmetric to the existing exit-side Steps. On failure, marks the stage run
+    /// BlockedEntry (distinct from BlockedGate, which means this stage's own exit gates
+    /// failed after it ran) and stops short of ever sending the first prompt.
+    /// </summary>
+    private async Task<bool> RunEntryGatesAsync(
+        WorkflowRole role, string featureKey, string workspacePath, ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
+    {
+        var allPassed = true;
+        foreach (var gate in role.EntryGates ?? [])
+        {
+            var result = await ExecuteStepAsync(gate, role, featureKey, workspacePath, stageRun, db, ct);
+            db.ReleaseGateChecks.Add(new ReleaseGateCheck
+            {
+                StageRun = stageRun,
+                Name = result.StepName,
+                Passed = result.Passed,
+                EvidenceText = result.Evidence,
+                ResponsibleRole = result.ResponsibleRole,
+                IsEntryGate = true,
+            });
+            if (!result.Passed) allPassed = false;
+        }
+
+        if (!allPassed)
+        {
+            stageRun.Status = ReleaseStageStatus.BlockedEntry;
+            stageRun.FinishedAt = DateTimeOffset.UtcNow;
+        }
+        await db.SaveChangesAsync(ct);
+        return allPassed;
+    }
+
     private async Task<bool> RunLeadingBuiltinsAsync(
         WorkflowRole role, string featureKey, string workspacePath, ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
     {
@@ -1381,13 +1494,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
                 break;
 
-            var result = await ExecuteStepAsync(step, featureKey, workspacePath, ct);
+            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
                 Name = result.StepName,
                 Passed = result.Passed,
                 EvidenceText = result.Evidence,
+                ResponsibleRole = result.ResponsibleRole,
             });
             if (!result.Passed) allPassed = false;
         }
@@ -1439,14 +1553,28 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     // ─── internal execution ────────────────────────────────────────────────
 
-    private async Task<StepExecutionResult> ExecuteStepAsync(WorkflowStep step, string featureKey, string workspacePath, CancellationToken ct) =>
-        step.Kind switch
+    private async Task<StepExecutionResult> ExecuteStepAsync(
+        WorkflowStep step, WorkflowRole role, string featureKey, string workspacePath,
+        ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
+    {
+        var result = step.Kind switch
         {
             WorkflowStepKind.Builtin => await ExecuteBuiltinAsync(step.Builtin!, featureKey, workspacePath, ct),
             WorkflowStepKind.Agent => new StepExecutionResult { StepName = $"agent:{step.AgentMode}", Passed = true, Evidence = "Interactive — handled via chat." },
-            WorkflowStepKind.Loop => await ExecuteLoopAsync(step, featureKey, workspacePath, ct),
+            WorkflowStepKind.Loop => await ExecuteLoopAsync(step, role, featureKey, workspacePath, stageRun, db, ct),
+            WorkflowStepKind.GatePrompt => await ExecuteGatePromptAsync(
+                step.GatePromptText!,
+                $"gate_prompt:{role.Name}:{Truncate(step.GatePromptText!, 40)}",
+                role.Name,
+                $"Gate prompt found issues with {role.Name}'s work.",
+                stageRun, workspacePath, db, ct),
             _ => throw new InvalidOperationException($"Unknown step kind: {step.Kind}"),
         };
+        return result with { ResponsibleRole = step.ResponsibleRole ?? result.ResponsibleRole };
+    }
+
+    private static string Truncate(string text, int maxChars) =>
+        text.Length <= maxChars ? text : text[..maxChars] + "…";
 
     private async Task<StepExecutionResult> ExecuteBuiltinAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
     {
@@ -1502,7 +1630,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
     }
 
-    private async Task<StepExecutionResult> ExecuteLoopAsync(WorkflowStep step, string featureKey, string workspacePath, CancellationToken ct)
+    private async Task<StepExecutionResult> ExecuteLoopAsync(
+        WorkflowStep step, WorkflowRole role, string featureKey, string workspacePath,
+        ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
     {
         var maxAttempts = step.LoopAttempts ?? 3;
         var lastResult = new StepExecutionResult { StepName = "loop", Passed = false };
@@ -1511,7 +1641,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             foreach (var innerStep in step.LoopSteps ?? [])
             {
                 if (innerStep.Kind == WorkflowStepKind.Agent) continue;
-                lastResult = await ExecuteStepAsync(innerStep, featureKey, workspacePath, ct);
+                lastResult = await ExecuteStepAsync(innerStep, role, featureKey, workspacePath, stageRun, db, ct);
                 if (!lastResult.Passed) break;
             }
             if (lastResult.Passed) break;
@@ -1519,18 +1649,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return lastResult with { StepName = $"loop({maxAttempts})" };
     }
 
-    private async Task<StepExecutionResult> RunChallengeAsync(WorkflowChallenge challenge, ReleaseStageRun stageRun, string featureKey, string workspacePath, DevTeamDbContext db, CancellationToken ct)
+    private async Task<StepExecutionResult> ExecuteGatePromptAsync(
+        string promptText, string stepName, string target, string findingSummary,
+        ReleaseStageRun stageRun, string workspacePath, DevTeamDbContext db, CancellationToken ct)
     {
         try
         {
-            var antagonistMode = challenge.AntagonistMode ?? "build";
             var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, null, ct);
-
-            var prompt = $"You are reviewing the {challenge.Producer}'s work for feature '{featureKey}'. " +
-                         $"Review for completeness, correctness, and quality. " +
-                         $"Report any issues, ambiguities, or gaps as findings.";
-
-            var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, prompt, ct, isPriming: true);
+            var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, promptText, ct, isPriming: true);
 
             var passed = response.StopReason == "end_turn";
             if (!passed)
@@ -1538,31 +1664,36 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 db.ReviewFindings.Add(new ReviewFinding
                 {
                     StageRun = stageRun,
-                    Target = challenge.Producer,
+                    Target = target,
                     Kind = ReviewFindingKind.Requirement,
                     Severity = ReviewFindingSeverity.Major,
-                    Summary = $"Challenge agent ({antagonistMode}) found issues.",
+                    Summary = findingSummary,
                     Status = ReviewFindingStatus.Open,
                 });
             }
 
-            return new StepExecutionResult
-            {
-                StepName = $"challenge:{challenge.Producer}->{antagonistMode}",
-                Passed = passed,
-                Evidence = $"Challenge reviewed by {antagonistMode}.",
-            };
+            return new StepExecutionResult { StepName = stepName, Passed = passed, Evidence = $"Reviewed by LLM prompt: {target}." };
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Challenge failed for {Producer}", challenge.Producer);
-            return new StepExecutionResult
-            {
-                StepName = $"challenge:{challenge.Producer}",
-                Passed = true,
-                Evidence = $"Challenge skipped: {ex.Message}",
-            };
+            _logger.LogWarning(ex, "Gate prompt {StepName} failed for {Target}", stepName, target);
+            return new StepExecutionResult { StepName = stepName, Passed = true, Evidence = $"Gate prompt skipped: {ex.Message}" };
         }
+    }
+
+    private Task<StepExecutionResult> RunChallengeAsync(WorkflowChallenge challenge, ReleaseStageRun stageRun, string featureKey, string workspacePath, DevTeamDbContext db, CancellationToken ct)
+    {
+        var antagonistMode = challenge.AntagonistMode ?? "build";
+        var prompt = $"You are reviewing the {challenge.Producer}'s work for feature '{featureKey}'. " +
+                     $"Review for completeness, correctness, and quality. " +
+                     $"Report any issues, ambiguities, or gaps as findings.";
+
+        return ExecuteGatePromptAsync(
+            prompt,
+            $"challenge:{challenge.Producer}->{antagonistMode}",
+            challenge.Producer,
+            $"Challenge agent ({antagonistMode}) found issues.",
+            stageRun, workspacePath, db, ct);
     }
 
     private async Task BroadcastEventAsync(Guid releaseId, string type, object payload, CancellationToken ct)

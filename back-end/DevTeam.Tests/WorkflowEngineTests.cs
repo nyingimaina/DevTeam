@@ -706,6 +706,156 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_FailingEntryGate_NeverOpensASessionOrSendsAPrompt()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                entryGates:
+                  - builtin: code_hygiene
+                agent: { mode: researcher }
+            """);
+
+        try
+        {
+            _gateRunner.Results.Add(new GateResult(false, "bad", "leftover TODO"));
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            Assert.Empty(_coordinator.Prompts);
+            Assert.Equal(0, _coordinator.NewSessionCallCount);
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "researcher");
+            Assert.Equal(ReleaseStageStatus.BlockedEntry, stageRun.Status);
+            Assert.True(stageRun.GateChecks.Single().IsEntryGate);
+            Assert.False(stageRun.GateChecks.Single().Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_PassingEntryGate_ProceedsNormallyAndOpensASession()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                signoff: reviewed
+                entryGates:
+                  - builtin: code_hygiene
+                agent: { mode: researcher }
+            """);
+
+        try
+        {
+            // No queued failing result — FakeGateRunner defaults to Pass. A signoff is
+            // required so the stage lands on BlockedSignoff instead of immediately completing
+            // and finalizing the feature (DevTeamRelease.StageRuns only proxies the *current*
+            // feature — once finalized, CurrentFeatureId clears and this would find nothing).
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            Assert.Single(_coordinator.Prompts);
+            Assert.Equal(1, _coordinator.NewSessionCallCount);
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "researcher");
+            Assert.NotEqual(ReleaseStageStatus.BlockedEntry, stageRun.Status);
+            var entryCheck = stageRun.GateChecks.Single(gc => gc.IsEntryGate);
+            Assert.True(entryCheck.Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_GatePromptExitStep_BehavesLikeChallenge_RecordingAFindingWhenNotEndTurn()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                steps:
+                  - agent: { mode: researcher }
+                  - gatePrompt: "Review the diff for security issues."
+            """);
+
+        try
+        {
+            // First prompt is the agent's own turn (stop reason irrelevant to its result);
+            // second is the gate-prompt's own evaluation — this is the one that must fail.
+            _coordinator.StopReasonsToReturn.Enqueue("end_turn");
+            _coordinator.StopReasonsToReturn.Enqueue("max_tokens");
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "researcher");
+            Assert.Equal(ReleaseStageStatus.BlockedGate, stageRun.Status);
+            var gateCheck = stageRun.GateChecks.Single(gc => gc.Name.StartsWith("gate_prompt:"));
+            Assert.False(gateCheck.Passed);
+            Assert.NotEmpty(stageRun.Findings);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_QaGateFailureWithResponsibleRoleDeveloper_RoutesBackToDeveloperInsteadOfLoopingQa()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        // developer stage: all gates pass by default (no queued failures).
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+
+        // qa stage: context_bundle and verify_code pass, coverage_matrix fails. QA's mandate
+        // is to verify, not author tests, so this must route back to developer (who owns
+        // verify_code/coverage_matrix per the default pipeline) instead of leaving QA in a
+        // retry loop it can never win.
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
+        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
+        _gateRunner.Results.Add(new GateResult(false, "missing coverage", "REQ-002 not covered"));
+
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(1, updated.FlowPosition!.CurrentStageIndex);
+        Assert.Equal("developer", updated.FlowPosition.CurrentStageName);
+
+        var qaRun = updated.StageRuns.Where(sr => sr.StageName == "qa").OrderByDescending(sr => sr.StartedAt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, qaRun.Status);
+
+        var note = updated.StageRuns
+            .SelectMany(sr => sr.GuidanceNotes)
+            .Single(n => n.AddedBy == "system:gate-failure" && n.Text.Contains("coverage_matrix"));
+        Assert.Contains("missing coverage", note.Text);
+        Assert.Contains("REQ-002 not covered", note.Text);
+    }
+
+    [Fact]
     public async Task PushBack_MovesToPreviousStageAndRecordsGuidance()
     {
         var engine = CreateEngine();
@@ -843,6 +993,38 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(
             ["context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"],
             pipeline[2].Steps);
+    }
+
+    [Fact]
+    public async Task StartRelease_UsesACustomDevteamReleaseYamlForTheInitialFlowPositionAndSignoffs()
+    {
+        // Regression: StartReleaseAsync used to call _loader.LoadDefault() directly instead
+        // of going through LoadWorkflow(workspacePath) — a custom pipeline's first stage name
+        // and signoffs were silently ignored, always seeded from the default business-analyst/
+        // developer/qa pipeline no matter what devteam/release.yaml actually said.
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                signoff: reviewed
+                agent: { mode: researcher }
+            """);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+
+            Assert.Equal("researcher", release.FlowPosition!.CurrentStageName);
+            Assert.Equal(0, release.FlowPosition.CurrentStageIndex);
+            Assert.Contains(release.Signoffs, s => s.StageName == "researcher" && s.Required);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
     }
 
     [Fact]
@@ -1537,6 +1719,10 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
     // WorkflowEngine's failure-classification/recovery behavior (Part 1).
     public Queue<Exception> ExceptionsToThrow { get; } = new();
 
+    // Dequeued (one per call) for tests exercising gate-prompt/Challenge pass-fail — defaults
+    // to "end_turn" (pass) when empty so existing tests are unaffected.
+    public Queue<string> StopReasonsToReturn { get; } = new();
+
     public int NewSessionCallCount { get; private set; }
 
     public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken ct)
@@ -1564,6 +1750,7 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
         Commands.Add($"prompt:{text[..Math.Min(50, text.Length)]}...");
         if (ExceptionsToThrow.Count > 0)
             throw ExceptionsToThrow.Dequeue();
-        return Task.FromResult(new PromptResponse(sessionId, "end_turn", 10, 5, 15));
+        var stopReason = StopReasonsToReturn.Count > 0 ? StopReasonsToReturn.Dequeue() : "end_turn";
+        return Task.FromResult(new PromptResponse(sessionId, stopReason, 10, 5, 15));
     }
 }

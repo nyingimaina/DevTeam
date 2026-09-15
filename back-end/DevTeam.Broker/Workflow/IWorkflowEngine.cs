@@ -37,4 +37,7 @@ public sealed record StepExecutionResult
     public string? Reason { get; init; }
     public string? Evidence { get; init; }
     public IReadOnlyList<ReviewFinding> Findings { get; init; } = [];
+    // The role that should act when this specific gate fails — see WorkflowStep.ResponsibleRole.
+    // Null means "the role currently running owns this," i.e. today's implicit default.
+    public string? ResponsibleRole { get; init; }
 }

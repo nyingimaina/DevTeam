@@ -214,6 +214,8 @@ public sealed class DevTeamDbContext : DbContext
             gate.Property(e => e.Name).IsRequired().HasMaxLength(128);
             gate.Property(e => e.EvidenceText).HasColumnType("TEXT");
             gate.Property(e => e.EvidencePath).HasMaxLength(1024);
+            gate.Property(e => e.IsEntryGate).HasDefaultValue(false);
+            gate.Property(e => e.ResponsibleRole).HasMaxLength(128);
         });
 
         modelBuilder.Entity<ReviewFinding>(finding =>

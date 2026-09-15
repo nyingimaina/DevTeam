@@ -31,6 +31,11 @@ public enum ReleaseStageStatus
     Escalated,
     Stale,
     Complete,
+    // A stage's own EntryGates failed before its turn ever started — distinct from
+    // BlockedGate, which means *this* stage's own exit-side gates failed after it ran.
+    // Retryable once whatever the entry gate checks (usually the previous stage's output)
+    // is fixed, same affordance pattern as Escalated/BlockedGate.
+    BlockedEntry,
 }
 
 /// <summary>
@@ -209,6 +214,13 @@ public sealed class ReleaseGateCheck
     public string? EvidencePath { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? CompletedAt { get; set; }
+    // True when this check ran before the stage's own turn started (WorkflowRole.EntryGates)
+    // rather than after it (the existing exit-side Steps) — lets the diagnostics pane group
+    // "entry" vs "exit" checks instead of conflating them.
+    public bool IsEntryGate { get; set; }
+    // Who should act if this specific check fails — see WorkflowStep.ResponsibleRole. Null
+    // means the stage that ran it owns the fix (today's implicit default).
+    public string? ResponsibleRole { get; set; }
 }
 
 public sealed class ReviewFinding

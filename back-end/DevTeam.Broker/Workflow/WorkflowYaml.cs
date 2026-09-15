@@ -72,8 +72,12 @@ public sealed class WorkflowYaml
             [
                 new StepYaml { Builtin = BuiltinRegistry.ContextBundle },
                 new StepYaml { Agent = new AgentYaml { Mode = "qa" } },
-                new StepYaml { Builtin = BuiltinRegistry.VerifyCode },
-                new StepYaml { Builtin = BuiltinRegistry.CoverageMatrix },
+                // QA verifies; it doesn't author tests. A failure here means the developer
+                // stage didn't produce passing/sufficient tests — routed back to them (see
+                // WorkflowEngine.RouteGateFailureToOwnerAsync) instead of QA retrying a loop
+                // it structurally cannot make progress on.
+                new StepYaml { Builtin = BuiltinRegistry.VerifyCode, ResponsibleRole = "developer" },
+                new StepYaml { Builtin = BuiltinRegistry.CoverageMatrix, ResponsibleRole = "developer" },
                 new StepYaml { Builtin = BuiltinRegistry.RenderHandoff },
             ],
         },
@@ -147,6 +151,9 @@ public sealed class RoleYaml
 
     public string? SeedPrompt { get; set; }
 
+    // Checks that must pass before this role's turn starts — see WorkflowRole.EntryGates.
+    public List<StepYaml> EntryGates { get; set; } = [];
+
     public List<string> ExpectedArtifacts { get; set; } = [];
 }
 
@@ -157,6 +164,12 @@ public sealed class StepYaml
     public AgentYaml? Agent { get; set; }
 
     public LoopYaml? Loop { get; set; }
+
+    // A user-authored, LLM-graded check — see WorkflowStepKind.GatePrompt.
+    public string? GatePrompt { get; set; }
+
+    // See WorkflowStep.ResponsibleRole.
+    public string? ResponsibleRole { get; set; }
 }
 
 public sealed class AgentYaml

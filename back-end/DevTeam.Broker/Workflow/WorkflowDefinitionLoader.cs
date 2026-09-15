@@ -93,7 +93,14 @@ public sealed class WorkflowDefinitionLoader
             }
 
             var steps = ResolveRoleSteps(name, role, errors);
-            roles.Add(new WorkflowRole(name, steps, role.Signoff, role.UserInputRequired, role.ExpectedArtifacts, role.WritesCode, role.SeedPrompt));
+            var entryGates = role.EntryGates
+                .Select((step, index) => ConvertStep(name, step, index, errors))
+                .Where(step => step is not null)
+                .Select(step => step!)
+                .ToList();
+            roles.Add(new WorkflowRole(
+                name, steps, role.Signoff, role.UserInputRequired, role.ExpectedArtifacts,
+                role.WritesCode, role.SeedPrompt, entryGates));
         }
 
         return roles;
@@ -139,18 +146,18 @@ public sealed class WorkflowDefinitionLoader
 
     private static WorkflowStep? ConvertStep(string roleName, StepYaml step, int index, List<string> errors)
     {
-        var set = new[] { step.Builtin is not null, step.Agent is not null, step.Loop is not null }
+        var set = new[] { step.Builtin is not null, step.Agent is not null, step.Loop is not null, step.GatePrompt is not null }
             .Count(v => v);
 
         if (set == 0)
         {
-            errors.Add($"role '{roleName}' step #{index + 1} must define one of 'builtin', 'agent' or 'loop'");
+            errors.Add($"role '{roleName}' step #{index + 1} must define one of 'builtin', 'agent', 'loop' or 'gatePrompt'");
             return null;
         }
 
         if (set > 1)
         {
-            errors.Add($"role '{roleName}' step #{index + 1} must define exactly one of 'builtin', 'agent' or 'loop'");
+            errors.Add($"role '{roleName}' step #{index + 1} must define exactly one of 'builtin', 'agent', 'loop' or 'gatePrompt'");
             return null;
         }
 
@@ -161,7 +168,7 @@ public sealed class WorkflowDefinitionLoader
                     $"role '{roleName}' step #{index + 1} references unknown builtin '{step.Builtin}'. " +
                     "Known builtins: " + string.Join(", ", BuiltinRegistry.All.OrderBy(x => x)));
 
-            return new WorkflowStep(WorkflowStepKind.Builtin, step.Builtin, null, null, null);
+            return new WorkflowStep(WorkflowStepKind.Builtin, step.Builtin, null, null, null, ResponsibleRole: step.ResponsibleRole);
         }
 
         if (step.Agent is not null)
@@ -169,7 +176,15 @@ public sealed class WorkflowDefinitionLoader
             if (string.IsNullOrWhiteSpace(step.Agent.Mode))
                 errors.Add($"role '{roleName}' step #{index + 1} agent must define a non-empty 'mode'");
 
-            return new WorkflowStep(WorkflowStepKind.Agent, null, step.Agent.Mode, null, null);
+            return new WorkflowStep(WorkflowStepKind.Agent, null, step.Agent.Mode, null, null, ResponsibleRole: step.ResponsibleRole);
+        }
+
+        if (step.GatePrompt is not null)
+        {
+            if (string.IsNullOrWhiteSpace(step.GatePrompt))
+                errors.Add($"role '{roleName}' step #{index + 1} gatePrompt must be non-empty");
+
+            return new WorkflowStep(WorkflowStepKind.GatePrompt, null, null, null, null, step.GatePrompt, step.ResponsibleRole);
         }
 
         var attempts = step.Loop!.Attempts ?? 3;
@@ -188,7 +203,7 @@ public sealed class WorkflowDefinitionLoader
             .Select(s => s!)
             .ToList();
 
-        return new WorkflowStep(WorkflowStepKind.Loop, null, null, inner, attempts);
+        return new WorkflowStep(WorkflowStepKind.Loop, null, null, inner, attempts, ResponsibleRole: step.ResponsibleRole);
     }
 
     private static IReadOnlyList<WorkflowChallenge> BuildChallenges(
