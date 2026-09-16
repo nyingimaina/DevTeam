@@ -134,6 +134,28 @@ describe("PipelineView", () => {
     expect(screen.getByTestId("pipeline-role-developer-writescode")).toBeChecked();
   });
 
+  it("edits a stage's instructions, with autocomplete, and includes them in the saved payload", async () => {
+    const codeMap = makeRole({ name: "code-map", writesCode: false, seedPrompt: null });
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue(makePipeline([codeMap]));
+    mockApi.saveWorkspacePipelineAsync.mockResolvedValue(makePipeline([codeMap]));
+    const user = userEvent.setup();
+    render(<PipelineView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);
+    await screen.findByTestId("pipeline-role-code-map");
+
+    const seedInput = screen.getByTestId("pipeline-role-code-map-seed-prompt") as HTMLTextAreaElement;
+    fireEvent.change(seedInput, { target: { value: "Scan the codebase and emit <F" } });
+    const suggestions = screen.getByTestId("pipeline-role-code-map-seed-prompt-suggestions");
+    fireEvent.mouseDown(within(suggestions).getByText("<F>"));
+    expect(seedInput.value).toBe("Scan the codebase and emit <F>");
+
+    await user.click(screen.getByTestId("pipeline-save-btn"));
+
+    await waitFor(() => expect(mockApi.saveWorkspacePipelineAsync).toHaveBeenCalledWith(
+      "C:/work/proj",
+      [expect.objectContaining({ name: "code-map", seedPrompt: "Scan the codebase and emit <F>" })],
+    ));
+  });
+
   it("adds an exit gate prompt, picks a responsible role, and includes both in the saved payload", async () => {
     const role = makeRole({ name: "qa" });
     const developer = makeRole({ name: "developer" });

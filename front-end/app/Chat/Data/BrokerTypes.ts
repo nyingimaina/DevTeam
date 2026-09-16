@@ -384,6 +384,7 @@ export interface PipelineEditorRoleDto {
   entryGates: GateStepEditorDto[];
   exitGatePrompts: GateStepEditorDto[];
   artifact?: ArtifactEditorDto | null;
+  seedPrompt?: string | null;
 }
 
 export interface PipelineEditorDto {
