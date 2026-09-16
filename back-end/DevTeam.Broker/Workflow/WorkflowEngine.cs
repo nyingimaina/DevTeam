@@ -60,6 +60,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // Always request a known-good default explicitly instead.
     private const string DefaultModelId = "opencode/big-pickle";
 
+    // A confused agent could otherwise ping-pong delegation requests forever — same shape as
+    // WorkflowStep.LoopAttempts, just for a different kind of retry.
+    private const int MaxDelegationRoundTrips = 3;
+
     private static CancellationTokenSource AgentPromptCts()
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
@@ -282,7 +286,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (!await RunEntryGatesAsync(role, featureKey, workspacePath, stageRun, db, ct))
             return stageRun;
 
-        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
+        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey);
         var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
         stageRun.AcpSessionId = session.SessionId.ToString();
         await db.SaveChangesAsync(ct);
@@ -296,6 +300,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var guidanceContext = BuildGuidanceContext(feature);
         var artifactContext = BuildArtifactContext(workspacePath, featureKey, currentStageIndex == 0);
         var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
+        var specialists = await db.SpecialistRoles.ToListAsync(ct);
 
         // A role-declared seed (e.g. the default business-analyst role's BRS-authoring
         // instruction — see WorkflowYaml.DefaultPipeline) instead of a name check, so a
@@ -311,6 +316,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
               "When you have enough information to produce the required output, say DONE and provide the structured result." +
               requirementsAuthoring +
               HandoffAutomationClause +
+              BuildDelegationClause(specialists, featureKey) +
               AsAugmentingClause(resolvedPrompt.Text) +
               guidanceContext +
               artifactContext;
@@ -320,8 +326,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         using var agentCts = InteractiveTurnCts();
         try
         {
-            await _coordinator.PromptWithSessionRecoveryAsync(
-                session.SessionId, finalPrompt, agentCts.Token, isPriming: true);
+            await PromptWithDelegationAsync(session.SessionId, finalPrompt, stageRun, workspacePath, featureKey, db, agentCts.Token);
             ClearPromptFailure(stageRun);
             await db.SaveChangesAsync(ct);
         }
@@ -637,7 +642,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 return await LoadReleaseAsync(db, feature.ReleaseId, ct);
             }
 
-            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role, workspacePath, featureKey);
+            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey);
             var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
             stageRun.AcpSessionId = session.SessionId.ToString();
             await db.SaveChangesAsync(ct);
@@ -659,19 +664,21 @@ public sealed class WorkflowEngine : IWorkflowEngine
             // by the very next retry instead of only by some future, unrelated stage.
             var guidanceContext = BuildGuidanceContext(feature);
             var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
+            var specialists = await db.SpecialistRoles.ToListAsync(ct);
             var prompt = resolvedPrompt.OverridesBuiltIn
                 ? resolvedPrompt.Text
                 : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
                   "Work autonomously and do not ask the user for input. Produce the required artifacts." +
                   HandoffAutomationClause +
                   AutonomousTersenessClause +
+                  BuildDelegationClause(specialists, featureKey) +
                   AsAugmentingClause(resolvedPrompt.Text) +
                   guidanceContext +
                   artifactContext +
                   "When you are done, say DONE and provide a summary of what you changed.";
             try
             {
-                await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, agentCts.Token, isPriming: true);
+                await PromptWithDelegationAsync(acpSessionId, prompt, stageRun, workspacePath, featureKey, db, agentCts.Token);
                 ClearPromptFailure(stageRun);
                 await db.SaveChangesAsync(ct);
             }
@@ -1419,30 +1426,146 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     /// <summary>
     /// Computes which workspace-relative directories a role's session may write within.
-    /// A role declared WritesCode: false (docs-only roles like business-analyst) is confined
-    /// to its own feature docs directory, never source code; a WritesCode: true role
+    /// WritesCode: false (docs-only roles like business-analyst, and non-code specialists) is
+    /// confined to its own feature docs directory, never source code; WritesCode: true
     /// additionally gets the feature's actual code paths, read from the manifest
     /// scaffold_specs already produced. Falls back to the docs-only scope (never unrestricted)
-    /// if the manifest is unexpectedly missing.
+    /// if the manifest is unexpectedly missing. Takes the primitives rather than a WorkflowRole
+    /// so it serves both pipeline roles and specialist delegates (Part 3) identically.
     /// </summary>
-    private IReadOnlyList<string> ResolveAllowedWritePrefixes(WorkflowRole role, string workspacePath, string featureKey)
+    private IReadOnlyList<string> ResolveAllowedWritePrefixes(bool writesCode, string ownerName, string workspacePath, string featureKey)
     {
         var featureDir = ArtifactPaths.FeatureDirRelative(featureKey);
-        if (!role.WritesCode)
+        if (!writesCode)
             return [featureDir];
 
         var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
         if (manifest is null)
         {
             _logger.LogWarning(
-                "No slice manifest found for feature '{FeatureKey}' when scoping role '{Role}'; " +
-                "restricting write access to the feature docs directory only.", featureKey, role.Name);
+                "No slice manifest found for feature '{FeatureKey}' when scoping '{Owner}'; " +
+                "restricting write access to the feature docs directory only.", featureKey, ownerName);
             return [featureDir];
         }
 
         var prefixes = new List<string> { featureDir, manifest.CodePathBack, manifest.CodePathFront };
         prefixes.AddRange(manifest.Shared);
         return prefixes;
+    }
+
+    private sealed record DelegateRequestPayload(string? Role, string? Question);
+
+    private static readonly System.Text.Json.JsonSerializerOptions DelegateRequestJsonOptions =
+        new() { PropertyNameCaseInsensitive = true };
+
+    // Only added to a prompt when at least one specialist is registered, so a workspace that
+    // never uses this feature sees no change to its prompts at all.
+    private static string BuildDelegationClause(IReadOnlyList<SpecialistRole> specialists, string featureKey)
+    {
+        if (specialists.Count == 0) return string.Empty;
+
+        var roster = string.Join("; ", specialists.Select(s => $"{s.Name} ({s.Description})"));
+        return " If you need help outside your own expertise, you can consult a specialist: " + roster + ". " +
+               "To do so, write exactly one JSON object like {\"role\": \"<name>\", \"question\": \"<your question>\"} " +
+               $"to devteam/features/{featureKey}/delegate-request.json using your file tools, then end your turn — " +
+               "the specialist's answer will be given to you in the next message.";
+    }
+
+    /// <summary>
+    /// Prompts a session and, if the agent asked to consult a specialist (see
+    /// BuildDelegationClause), runs the round trip and re-prompts with the answer before
+    /// returning — up to MaxDelegationRoundTrips times. A stage that never uses delegation
+    /// behaves exactly as a plain PromptWithSessionRecoveryAsync call would.
+    /// </summary>
+    private async Task<PromptResponse> PromptWithDelegationAsync(
+        Guid acpSessionId, string prompt, ReleaseStageRun stageRun, string workspacePath, string featureKey,
+        DevTeamDbContext db, CancellationToken ct)
+    {
+        var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, ct, isPriming: true);
+        var requestPath = ArtifactPaths.DelegateRequestPath(workspacePath, featureKey);
+
+        for (var round = 0; round < MaxDelegationRoundTrips && File.Exists(requestPath); round++)
+        {
+            var followUp = await HandleDelegationRequestAsync(requestPath, stageRun, workspacePath, featureKey, db, ct);
+            response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, followUp, ct, isPriming: false);
+        }
+
+        // A well-behaved agent stops asking once it has what it needs; if the file is still
+        // there after the cap, don't leave a stale request lying around for the next turn.
+        if (File.Exists(requestPath))
+        {
+            try { File.Delete(requestPath); } catch (IOException) { /* best-effort cleanup */ }
+        }
+
+        return response;
+    }
+
+    private async Task<string> HandleDelegationRequestAsync(
+        string requestPath, ReleaseStageRun stageRun, string workspacePath, string featureKey,
+        DevTeamDbContext db, CancellationToken ct)
+    {
+        string requestJson;
+        try
+        {
+            requestJson = await File.ReadAllTextAsync(requestPath, ct);
+            File.Delete(requestPath);
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "Could not read delegate-request.json for feature {FeatureKey}", featureKey);
+            return "Your delegation request could not be read. Continue your work without it.";
+        }
+
+        DelegateRequestPayload? request;
+        try
+        {
+            request = System.Text.Json.JsonSerializer.Deserialize<DelegateRequestPayload>(requestJson, DelegateRequestJsonOptions);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            request = null;
+        }
+
+        if (string.IsNullOrWhiteSpace(request?.Role) || string.IsNullOrWhiteSpace(request.Question))
+        {
+            return "Your delegate-request.json must look like {\"role\": \"<name>\", \"question\": \"<text>\"}. " +
+                   "Continue your work without a specialist for now.";
+        }
+
+        var specialist = await db.SpecialistRoles.FirstOrDefaultAsync(s => s.Name == request.Role, ct);
+        if (specialist is null)
+        {
+            var known = await db.SpecialistRoles.Select(s => s.Name).ToListAsync(ct);
+            return known.Count == 0
+                ? "There are no registered specialists to consult. Continue your work without one."
+                : $"Unknown specialist '{request.Role}'. Registered specialists: {string.Join(", ", known)}. Continue your work.";
+        }
+
+        try
+        {
+            var allowedPrefixes = ResolveAllowedWritePrefixes(specialist.WritesCode, specialist.Name, workspacePath, featureKey);
+            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedPrefixes, ct);
+            await _coordinator.PromptWithSessionRecoveryAsync(
+                session.SessionId, specialist.PrimingPrompt + "\n\nQuestion from another stage: " + request.Question,
+                ct, isPriming: true);
+            var answer = await GetLatestAssistantTextAsync(db, session.SessionId, ct) ?? "(the specialist gave no response)";
+
+            db.SpecialistConsultations.Add(new SpecialistConsultation
+            {
+                StageRun = stageRun,
+                SpecialistName = specialist.Name,
+                Question = request.Question,
+                ResponseText = answer,
+            });
+            await db.SaveChangesAsync(ct);
+
+            return $"The {specialist.Name} specialist responded: {answer}\n\nContinue your work with this guidance.";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Consulting specialist {Specialist} failed", specialist.Name);
+            return $"Consulting {specialist.Name} failed ({ex.Message}). Continue your work without it.";
+        }
     }
 
     /// <summary>

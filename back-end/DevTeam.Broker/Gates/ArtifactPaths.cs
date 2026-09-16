@@ -27,6 +27,12 @@ public static class ArtifactPaths
 
     public static string ReleaseYamlPath(string workspacePath)
         => Path.Combine(workspacePath, "devteam", "release.yaml");
+
+    // A stage's agent writes {"role": "...", "question": "..."} here to delegate to a
+    // registered specialist (see WorkflowEngine's delegation round-trip) — same "write to a
+    // known path, engine reads it" convention as the handoff/context files above.
+    public static string DelegateRequestPath(string workspacePath, string featureKey)
+        => Path.Combine(FeatureDir(workspacePath, featureKey), "delegate-request.json");
 }
 
 public static class RequirementDtos

@@ -856,6 +856,194 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_DelegatesToASpecialist_FoldsTheAnswerIntoAFollowUpPromptAndRecordsTheConsultation()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-delegation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var featureDir = Path.Combine(workspace, "devteam", "features", "feat-001");
+            Directory.CreateDirectory(featureDir);
+
+            var specialistSessionId = Guid.NewGuid();
+            await using (var db = CreateFactory().CreateDbContext())
+            {
+                db.SpecialistRoles.Add(new SpecialistRole { Name = "database-admin", Description = "DB expert", PrimingPrompt = "You are a DBA." });
+                db.Sessions.Add(new DevTeamSession { Id = specialistSessionId, WorkspacePath = workspace, AcpSessionId = "acp-dba" });
+                db.Messages.Add(new Message { SessionId = specialistSessionId, Role = "assistant", BodyText = "Add it nullable, backfill, then add the NOT NULL constraint." });
+                await db.SaveChangesAsync();
+            }
+
+            var engine = CreateEngine();
+            // Drive through business-analyst first (its own turn also checks for delegation,
+            // so the request file must not exist yet, or it would be consumed there instead).
+            var (_, featureId) = await DriveToDeveloperAsync(engine, workspace);
+            File.WriteAllText(Path.Combine(featureDir, "delegate-request.json"),
+                """{"role": "database-admin", "question": "How do I add a NOT NULL column safely?"}""");
+            // Developer's own session opens first (consuming a throwaway id); only the
+            // specialist consultation itself should consume the seeded one.
+            _coordinator.SessionIdsToReturn.Enqueue(Guid.NewGuid());
+            _coordinator.SessionIdsToReturn.Enqueue(specialistSessionId);
+
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            // The developer session's turn should have been followed up with the specialist's answer.
+            Assert.Contains(_coordinator.Prompts, p => p.Contains("Add it nullable, backfill, then add the NOT NULL constraint."));
+            Assert.False(File.Exists(Path.Combine(featureDir, "delegate-request.json")));
+
+            await using var verifyDb = CreateFactory().CreateDbContext();
+            var consultation = await verifyDb.SpecialistConsultations.SingleAsync();
+            Assert.Equal("database-admin", consultation.SpecialistName);
+            Assert.Contains("NOT NULL column", consultation.Question);
+            Assert.Contains("backfill", consultation.ResponseText);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_DelegationRequestForAnUnknownSpecialist_FoldsAnErrorIntoTheFollowUpInsteadOfCrashing()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-delegation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var featureDir = Path.Combine(workspace, "devteam", "features", "feat-001");
+            Directory.CreateDirectory(featureDir);
+            // A decoy specialist that exists but isn't the one requested, so this exercises
+            // "unknown name" specifically rather than "no specialists registered at all".
+            await using (var db = CreateFactory().CreateDbContext())
+            {
+                db.SpecialistRoles.Add(new SpecialistRole { Name = "database-admin", Description = "DB expert", PrimingPrompt = "You are a DBA." });
+                await db.SaveChangesAsync();
+            }
+
+            var engine = CreateEngine();
+            var (_, featureId) = await DriveToDeveloperAsync(engine, workspace);
+            File.WriteAllText(Path.Combine(featureDir, "delegate-request.json"),
+                """{"role": "network-engineer", "question": "Help"}""");
+            var sessionCallsBefore = _coordinator.NewSessionCallCount;
+
+            var result = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            Assert.Contains(_coordinator.Prompts, p => p.Contains("Unknown specialist 'network-engineer'"));
+            // Exactly 2 new sessions open for this stage regardless of delegation: developer's
+            // own producer session, and its antagonist Challenge review (gates pass by
+            // default in this test) — no third session for the unregistered specialist name.
+            Assert.Equal(sessionCallsBefore + 2, _coordinator.NewSessionCallCount);
+            Assert.NotNull(result);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_SpecialistSession_NeverReceivesTheCallingStagesWritePrefixes()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-delegation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var featureDir = Path.Combine(workspace, "devteam", "features", "feat-001");
+            Directory.CreateDirectory(featureDir);
+            // The specialist is docs-only (WritesCode: false) even though the calling
+            // developer stage itself writes code — its scope must not inherit the caller's.
+            var specialistSessionId = Guid.NewGuid();
+            await using (var db = CreateFactory().CreateDbContext())
+            {
+                db.SpecialistRoles.Add(new SpecialistRole { Name = "database-admin", Description = "DB expert", PrimingPrompt = "You are a DBA.", WritesCode = false });
+                db.Sessions.Add(new DevTeamSession { Id = specialistSessionId, WorkspacePath = workspace, AcpSessionId = "acp-dba" });
+                db.Messages.Add(new Message { SessionId = specialistSessionId, Role = "assistant", BodyText = "Migration prepared." });
+                await db.SaveChangesAsync();
+            }
+
+            var engine = CreateEngine();
+            var (_, featureId) = await DriveToDeveloperAsync(engine, workspace);
+            File.WriteAllText(Path.Combine(featureDir, "delegate-request.json"),
+                """{"role": "database-admin", "question": "Prepare a migration."}""");
+            _coordinator.AllowedWritePrefixesCalls.Clear();
+            // Developer's own session opens first (consuming a throwaway id); only the
+            // specialist consultation itself should consume the seeded one.
+            _coordinator.SessionIdsToReturn.Enqueue(Guid.NewGuid());
+            _coordinator.SessionIdsToReturn.Enqueue(specialistSessionId);
+
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            // First call is developer's own (code + docs); the specialist's own call must be
+            // docs-only, never the developer's broader scope.
+            var specialistPrefixes = _coordinator.AllowedWritePrefixesCalls[1];
+            Assert.Equal([ArtifactPaths.FeatureDirRelative("feat-001")], specialistPrefixes);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_DelegationRequestsPastTheCap_StopWithoutHangingAndTheFileIsCleanedUp()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-delegation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var featureDir = Path.Combine(workspace, "devteam", "features", "feat-001");
+            Directory.CreateDirectory(featureDir);
+            var requestPath = Path.Combine(featureDir, "delegate-request.json");
+            const string requestJson = """{"role": "database-admin", "question": "Again?"}""";
+
+            await using (var db = CreateFactory().CreateDbContext())
+            {
+                db.SpecialistRoles.Add(new SpecialistRole { Name = "database-admin", Description = "DB expert", PrimingPrompt = "You are a DBA." });
+                await db.SaveChangesAsync();
+            }
+
+            // Every session this flow opens (developer's own, any antagonist review, every
+            // specialist consultation) gets a seeded assistant response — avoids needing to
+            // predict exactly which session id ends up being which across however many
+            // sessions actually open (developer's own producer session plus its Challenge
+            // review both open one each).
+            _coordinator.OnNewSession = sessionId =>
+            {
+                using var db = CreateFactory().CreateDbContext();
+                db.Sessions.Add(new DevTeamSession { Id = sessionId, WorkspacePath = workspace, AcpSessionId = sessionId.ToString() });
+                db.Messages.Add(new Message { SessionId = sessionId, Role = "assistant", BodyText = "Here you go." });
+                db.SaveChanges();
+            };
+
+            // Simulate an agent that re-requests the same specialist on every turn it gets —
+            // its own opening turn, and every delegation follow-up — matched by prompt text
+            // (not session id, for the same reason as above) so the round trip must still
+            // terminate on its own rather than looping forever.
+            _coordinator.OnPrompt = (_, text) =>
+            {
+                if (text.Contains("You are the developer") || text.Contains("specialist responded"))
+                    File.WriteAllText(requestPath, requestJson);
+            };
+
+            var engine = CreateEngine();
+            var (_, featureId) = await DriveToDeveloperAsync(engine, workspace);
+
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            // Bounded at MaxDelegationRoundTrips (3), and the file is force-cleaned afterward
+            // rather than left dangling for the next stage run to trip over.
+            await using var verifyDb = CreateFactory().CreateDbContext();
+            var consultationCount = await verifyDb.SpecialistConsultations.CountAsync();
+            Assert.Equal(3, consultationCount);
+            Assert.False(File.Exists(requestPath));
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PushBack_MovesToPreviousStageAndRecordsGuidance()
     {
         var engine = CreateEngine();
@@ -1545,9 +1733,9 @@ public class WorkflowEngineTests : IDisposable
         }
     }
 
-    private async Task<(DevTeamRelease Release, Guid FeatureId)> DriveToDeveloperAsync(WorkflowEngine engine)
+    private async Task<(DevTeamRelease Release, Guid FeatureId)> DriveToDeveloperAsync(WorkflowEngine engine, string workspacePath = @"C:\work\proj")
     {
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseAsync("feat-001", workspacePath, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA interactive flow: gates pass (default) → signoff required → approve → advance to developer
@@ -1725,14 +1913,26 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
 
     public int NewSessionCallCount { get; private set; }
 
+    // Dequeued (one per call) instead of a random Guid, for tests that need to know a
+    // delegated/challenge session's id ahead of time (e.g. to seed its assistant response).
+    public Queue<Guid> SessionIdsToReturn { get; } = new();
+
+    // Invoked with the id a new session was just given (whether dequeued or randomly
+    // generated) — lets a test react to *any* session opening (e.g. Challenge/antagonist
+    // reviews the test isn't specifically tracking) without needing to predict every one
+    // FakeBrokerCoordinator hands out via SessionIdsToReturn.
+    public Action<Guid>? OnNewSession { get; set; }
+
     public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken ct)
     {
         Commands.Add($"new-session:{workspacePath}");
         RequestedModelIds.Add(modelId);
         AllowedWritePrefixesCalls.Add(allowedWritePrefixes);
         NewSessionCallCount++;
+        var sessionId = SessionIdsToReturn.Count > 0 ? SessionIdsToReturn.Dequeue() : Guid.NewGuid();
+        OnNewSession?.Invoke(sessionId);
         return Task.FromResult(new SessionSummary(
-            Guid.NewGuid(), "fake-acp", workspacePath, null, null, null,
+            sessionId, "fake-acp", workspacePath, null, null, null,
             DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, ModelsToReturn, []));
     }
 
@@ -1742,12 +1942,18 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
         return Task.FromResult(modeId);
     }
 
+    // Invoked with (sessionId, text) on every prompt call, before the exception/stop-reason
+    // handling below — lets a test simulate a side effect of "the agent responded" (e.g.
+    // writing delegate-request.json again, to test the delegation round-trip cap).
+    public Action<Guid, string>? OnPrompt { get; set; }
+
     public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false)
     {
         LastPromptToken = ct;
         Prompts.Add(text);
         PromptIsPriming.Add(isPriming);
         Commands.Add($"prompt:{text[..Math.Min(50, text.Length)]}...");
+        OnPrompt?.Invoke(sessionId, text);
         if (ExceptionsToThrow.Count > 0)
             throw ExceptionsToThrow.Dequeue();
         var stopReason = StopReasonsToReturn.Count > 0 ? StopReasonsToReturn.Dequeue() : "end_turn";
