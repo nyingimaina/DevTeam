@@ -39,9 +39,19 @@ function pickReactSelectOption(pickerWrapper: HTMLElement, optionText: string) {
 }
 
 describe("ProfilesView", () => {
+  function makeRole(name: string) {
+    return {
+      name, writesCode: false, signoff: null, userInputRequired: false,
+      stepSummary: [], entryGates: [], exitGatePrompts: [], artifact: null,
+    };
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockApi.getWorkspaceProfileAsync.mockResolvedValue({ profileId: null });
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue({
+      roles: ["business-analyst", "developer", "qa"].map(makeRole),
+    });
   });
 
   it("lists profiles with a default indicator", async () => {
@@ -146,6 +156,48 @@ describe("ProfilesView", () => {
     expect(within(editor).queryByText(/replaces the entire built-in prompt/i)).not.toBeInTheDocument();
     await user.click(within(editor).getByTestId("profile-override-checkbox"));
     expect(within(editor).getByText(/replaces the entire built-in prompt/i)).toBeInTheDocument();
+  });
+
+  it("lets a custom pipeline stage (not business-analyst/developer/qa) be picked and given a prompt", async () => {
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue({ roles: [makeRole("code-map")] });
+    const profile = makeProfile({ prompts: [] });
+    mockApi.getProfilesAsync.mockResolvedValue([profile]);
+    mockApi.updateProfileAsync.mockResolvedValue(profile);
+    const user = userEvent.setup();
+    render(<ProfilesView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);
+
+    await clickRow(user, "Terse");
+    const editor = await screen.findByTestId("profile-editor");
+
+    expect(within(editor).getByTestId("profile-stage-picker")).toHaveTextContent("code-map");
+
+    const promptField = within(editor).getByTestId("profile-prompt-textarea");
+    await user.type(promptField, "Scan the codebase.");
+    await user.click(within(editor).getByTestId("profile-save-btn"));
+
+    await waitFor(() => expect(mockApi.updateProfileAsync).toHaveBeenCalledWith(
+      "p1", "Terse", "Short answers",
+      [{ stageName: "code-map", promptText: "Scan the codebase.", overridesBuiltInPrompt: false }],
+    ));
+  });
+
+  it("suggests known placeholders in the profile prompt field", async () => {
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue({
+      roles: [{ ...makeRole("code-map"), artifact: { root: "docs-root", fileName: "code-map.json", kind: "json" } }],
+    });
+    mockApi.getProfilesAsync.mockResolvedValue([makeProfile({ prompts: [] })]);
+    const user = userEvent.setup();
+    render(<ProfilesView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);
+
+    await clickRow(user, "Terse");
+    const editor = await screen.findByTestId("profile-editor");
+    const promptField = within(editor).getByTestId("profile-prompt-textarea") as HTMLTextAreaElement;
+
+    fireEvent.change(promptField, { target: { value: "Read <code" } });
+    const suggestions = within(editor).getByTestId("profile-prompt-textarea-suggestions");
+    fireEvent.mouseDown(within(suggestions).getByText("<code-map/artifact.file>"));
+
+    expect(promptField.value).toBe("Read <code-map/artifact.file>");
   });
 
   it("creates a new profile", async () => {

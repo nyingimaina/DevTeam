@@ -1,21 +1,19 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
-import { ProfileDto } from "../../Chat/Data/BrokerTypes";
+import { PipelineEditorRoleDto, ProfileDto } from "../../Chat/Data/BrokerTypes";
 import ZestButton from "jattac.libs.web.zest-button";
 import ZestTextbox from "jattac.libs.web.zest-textbox";
 import ResponsiveTable, { ColumnDefinition } from "jattac.libs.web.responsive-table";
 import SelectWrapper from "../../Forms/SelectWrapper/UI/SelectWrapper";
+import PlaceholderAutocompleteInput, { placeholderTokens } from "../../Forms/PlaceholderAutocompleteInput/UI/PlaceholderAutocompleteInput";
 import styles from "../Styles/ProfilesView.module.css";
-
-const STAGE_NAMES = ["business-analyst", "developer", "qa"];
 
 // react-select (via SelectWrapper) inspects each item with the `in` operator to detect
 // option groups, which throws on primitive strings — options must be objects.
 interface IStageOption {
   name: string;
 }
-const STAGE_OPTIONS: IStageOption[] = STAGE_NAMES.map((name) => ({ name }));
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -30,8 +28,9 @@ interface IProfilesViewProps {
 export default function ProfilesView({ api, workspacePath, testIdPrefix = "profile" }: IProfilesViewProps) {
   const [profiles, setProfiles] = useState<ProfileDto[]>([]);
   const [workspaceProfileId, setWorkspaceProfileId] = useState<string | null>(null);
+  const [pipelineRoles, setPipelineRoles] = useState<PipelineEditorRoleDto[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [activeStage, setActiveStage] = useState(STAGE_NAMES[0]);
+  const [activeStage, setActiveStage] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editPrompts, setEditPrompts] = useState<Record<string, string>>({});
@@ -42,12 +41,14 @@ export default function ProfilesView({ api, workspacePath, testIdPrefix = "profi
 
   const loadAll = useCallback(async () => {
     try {
-      const [profileList, workspaceProfile] = await Promise.all([
+      const [profileList, workspaceProfile, pipeline] = await Promise.all([
         api.getProfilesAsync(),
         api.getWorkspaceProfileAsync(workspacePath),
+        api.getWorkspacePipelineAsync(workspacePath),
       ]);
       setProfiles(profileList);
       setWorkspaceProfileId(workspaceProfile.profileId);
+      setPipelineRoles(pipeline.roles);
     } catch (e) {
       setError(toErrorMessage(e));
     }
@@ -56,6 +57,8 @@ export default function ProfilesView({ api, workspacePath, testIdPrefix = "profi
   useEffect(() => { void loadAll(); }, [loadAll]);
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
+  const stageNames = pipelineRoles.map((r) => r.name);
+  const stageOptions: IStageOption[] = stageNames.map((name) => ({ name }));
 
   const openEditor = useCallback((profile: ProfileDto) => {
     setSelectedId(profile.id);
@@ -63,22 +66,23 @@ export default function ProfilesView({ api, workspacePath, testIdPrefix = "profi
     setEditDescription(profile.description ?? "");
     const prompts: Record<string, string> = {};
     const overrides: Record<string, boolean> = {};
-    for (const stageName of STAGE_NAMES) {
+    for (const stageName of stageNames) {
       const stagePrompt = profile.prompts.find((p) => p.stageName === stageName);
       prompts[stageName] = stagePrompt?.promptText ?? "";
       overrides[stageName] = stagePrompt?.overridesBuiltInPrompt ?? false;
     }
     setEditPrompts(prompts);
     setEditOverrides(overrides);
-    setActiveStage(STAGE_NAMES[0]);
-  }, []);
+    setActiveStage(stageNames[0] ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stageNames is derived from pipelineRoles each render; re-running this on every pipeline poll would reset the open editor
+  }, [pipelineRoles]);
 
   const handleSave = useCallback(async () => {
     if (!selected) return;
     setLoading(true);
     setError(null);
     try {
-      const prompts = STAGE_NAMES.map((stageName) => ({
+      const prompts = stageNames.map((stageName) => ({
         stageName,
         promptText: editPrompts[stageName] ?? "",
         overridesBuiltInPrompt: editOverrides[stageName] ?? false,
@@ -90,7 +94,8 @@ export default function ProfilesView({ api, workspacePath, testIdPrefix = "profi
     } finally {
       setLoading(false);
     }
-  }, [api, selected, editName, editDescription, editPrompts, editOverrides]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, selected, editName, editDescription, editPrompts, editOverrides, pipelineRoles]);
 
   const handleCreate = useCallback(async () => {
     if (!newName.trim()) return;
@@ -243,7 +248,7 @@ export default function ProfilesView({ api, workspacePath, testIdPrefix = "profi
             Stage
             <div data-testid="profile-stage-picker">
               <SelectWrapper<IStageOption>
-                data={STAGE_OPTIONS}
+                data={stageOptions}
                 selectedResolver={(s) => s.name === activeStage}
                 valueResolver={(s) => s.name}
                 labelResolver={(s) => s.name}
@@ -253,23 +258,24 @@ export default function ProfilesView({ api, workspacePath, testIdPrefix = "profi
               />
             </div>
           </label>
-          <ZestTextbox
-            data-testid="profile-prompt-textarea"
-            value={editPrompts[activeStage] ?? ""}
-            onChange={(e) => setEditPrompts((prev) => ({ ...prev, [activeStage]: e.target.value }))}
+          <PlaceholderAutocompleteInput
+            testId="profile-prompt-textarea"
+            value={activeStage ? (editPrompts[activeStage] ?? "") : ""}
+            onChange={(value) => activeStage && setEditPrompts((prev) => ({ ...prev, [activeStage]: value }))}
+            tokens={placeholderTokens(pipelineRoles)}
             placeholder="Additional guidance sent to the agent for this stage…"
-            zest={{ isMultiline: true }}
+            multiline
           />
           <label className={styles.overrideLabel}>
             <input
               type="checkbox"
               data-testid="profile-override-checkbox"
-              checked={editOverrides[activeStage] ?? false}
-              onChange={(e) => setEditOverrides((prev) => ({ ...prev, [activeStage]: e.target.checked }))}
+              checked={activeStage ? (editOverrides[activeStage] ?? false) : false}
+              onChange={(e) => activeStage && setEditOverrides((prev) => ({ ...prev, [activeStage]: e.target.checked }))}
             />
             Override the built-in prompt for this stage
           </label>
-          {editOverrides[activeStage] && (
+          {activeStage && editOverrides[activeStage] && (
             <div className={styles.overrideWarning}>
               This replaces the entire built-in prompt for this stage, including handoff and artifact
               instructions. Only the text above is sent to the agent.
