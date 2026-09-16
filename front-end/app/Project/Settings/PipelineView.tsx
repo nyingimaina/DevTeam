@@ -1,5 +1,5 @@
 "use client";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
 import { ArtifactEditorDto, ArtifactRootKey, GateStepEditorDto, PipelineEditorRoleDto } from "../../Chat/Data/BrokerTypes";
 import ZestButton from "jattac.libs.web.zest-button";
@@ -31,6 +31,13 @@ function uniqueStageKey(title: string, existingNames: string[]): string {
   let suffix = 2;
   while (existingNames.includes(`${base}-${suffix}`)) suffix += 1;
   return `${base}-${suffix}`;
+}
+
+// A stage's artifact filename is always derived from its own (already-unique) key plus its
+// kind — never hand-typed — so the pipeline editor never offers a free-text field that could
+// drift out of sync with the stage that owns it, or collide with another stage's artifact.
+function artifactFileName(stageName: string, kind: "text" | "json"): string {
+  return `${stageName}${kind === "json" ? ".json" : ".md"}`;
 }
 
 // react-select (via SelectWrapper) inspects each item with the `in` operator, which throws on
@@ -264,7 +271,7 @@ function ArtifactEditor({
           checked={artifact != null}
           onChange={(e) => onChange(
             e.target.checked
-              ? { root: "docs-root", fileName: `${stageName}.json`, kind: "text" }
+              ? { root: "docs-root", fileName: artifactFileName(stageName, "text"), kind: "text" }
               : null,
           )}
           data-testid={`${testIdPrefix}-artifact-toggle`}
@@ -282,25 +289,35 @@ function ArtifactEditor({
               onChange={(items) => items[0] && onChange({ ...artifact, root: items[0].name as ArtifactRootKey })}
             />
           </div>
-          <ZestTextbox
-            data-testid={`${testIdPrefix}-artifact-filename`}
-            value={artifact.fileName}
-            onChange={(e) => onChange({ ...artifact, fileName: e.target.value })}
-            placeholder="File name, e.g. codemap.json"
-          />
           <label className={styles.inlineLabel}>
             <input
               type="checkbox"
               checked={artifact.kind === "json"}
-              onChange={(e) => onChange({ ...artifact, kind: e.target.checked ? "json" : "text" })}
+              onChange={(e) => {
+                const kind = e.target.checked ? "json" : "text";
+                onChange({ ...artifact, kind, fileName: artifactFileName(stageName, kind) });
+              }}
               data-testid={`${testIdPrefix}-artifact-json-toggle`}
             />
             Validate as JSON (not just check it exists)
           </label>
+          <span className={styles.generatedKeyHint} data-testid={`${testIdPrefix}-artifact-filename`}>
+            File: {artifact.fileName}
+          </span>
         </div>
       )}
     </div>
   );
+}
+
+// The full set of known placeholder tokens a gate-prompt author can reference — recomputed
+// live from the current pipeline so a newly-declared artifact stage shows up immediately.
+function placeholderTokens(artifactStageNames: string[]): string[] {
+  return [
+    "<F>",
+    ...ARTIFACT_ROOT_OPTIONS.map((o) => `<${o.name}>`),
+    ...artifactStageNames.map((name) => `<${name}/artifact.file>`),
+  ];
 }
 
 function GateStepListEditor({
@@ -377,10 +394,11 @@ function GateStepListEditor({
         </ul>
       )}
       <div className={styles.gateAddRow}>
-        <ZestTextbox
-          data-testid={`${testIdPrefix}-new-text`}
+        <PlaceholderAutocompleteInput
+          testId={`${testIdPrefix}-new-text`}
           value={draftText}
-          onChange={(e) => setDraftText(e.target.value)}
+          onChange={setDraftText}
+          tokens={placeholderTokens(artifactStageNames)}
           placeholder="New gate-prompt text…"
         />
         <ZestButton
@@ -392,6 +410,9 @@ function GateStepListEditor({
         >
           Add
         </ZestButton>
+      </div>
+      <div className={styles.gateEditorHint}>
+        Tip: type &lt; in the box above for known placeholders like &lt;F&gt; or &lt;docs-root&gt;, or click &quot;Insert placeholder&quot; to browse them all.
       </div>
       <div className={styles.gateAddRow} data-testid={`${testIdPrefix}-specialist-picker`}>
         <div className={styles.selectField}>
@@ -421,6 +442,113 @@ function GateStepListEditor({
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+interface IAutocompleteContext {
+  start: number;
+  end: number;
+  query: string;
+}
+
+// A small, self-contained trigger-character ("<") autocomplete for a single-line input,
+// plus an explicit "Insert placeholder" button so a novice who doesn't already know about
+// the "<" convention can still discover and use it by browsing. Deliberately not a pulled-in
+// library: the actual need — a closed set of ~10 known tokens — is narrow, and the one
+// candidate library that fit was npm-deprecated with an unpatched vulnerability.
+function PlaceholderAutocompleteInput({
+  value, onChange, tokens, placeholder, testId,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  tokens: string[];
+  placeholder?: string;
+  testId: string;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [context, setContext] = useState<IAutocompleteContext | null>(null);
+  const [highlightIndex, setHighlightIndex] = useState(0);
+
+  const detectTypedTrigger = (text: string, cursor: number): IAutocompleteContext | null => {
+    const uptoCursor = text.slice(0, cursor);
+    const openIndex = uptoCursor.lastIndexOf("<");
+    if (openIndex === -1) return null;
+    const between = uptoCursor.slice(openIndex + 1);
+    if (between.includes(">") || /\s/.test(between)) return null;
+    return { start: openIndex, end: cursor, query: between };
+  };
+
+  const matches = context ? tokens.filter((t) => t.toLowerCase().includes(context.query.toLowerCase())) : [];
+
+  const applySuggestion = (token: string) => {
+    if (!context) return;
+    const before = value.slice(0, context.start);
+    const after = value.slice(context.end);
+    onChange(`${before}${token}${after}`);
+    setContext(null);
+    requestAnimationFrame(() => {
+      const pos = before.length + token.length;
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(pos, pos);
+    });
+  };
+
+  const openBrowseAll = () => {
+    const cursor = inputRef.current?.selectionStart ?? value.length;
+    setContext({ start: cursor, end: cursor, query: "" });
+    setHighlightIndex(0);
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className={styles.autocompleteGroup}>
+      <div className={styles.autocompleteWrapper}>
+        <input
+          ref={inputRef}
+          type="text"
+          className={styles.autocompleteInput}
+          data-testid={testId}
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => {
+            onChange(e.target.value);
+            setContext(detectTypedTrigger(e.target.value, e.target.selectionStart ?? e.target.value.length));
+            setHighlightIndex(0);
+          }}
+          onKeyDown={(e) => {
+            if (!context || matches.length === 0) return;
+            if (e.key === "ArrowDown") { e.preventDefault(); setHighlightIndex((i) => (i + 1) % matches.length); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); setHighlightIndex((i) => (i - 1 + matches.length) % matches.length); }
+            else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); applySuggestion(matches[highlightIndex]); }
+            else if (e.key === "Escape") { setContext(null); }
+          }}
+          // Deferred so a suggestion's onMouseDown (which calls preventDefault) still fires
+          // before the list is torn down by this blur.
+          onBlur={() => setTimeout(() => setContext(null), 150)}
+        />
+        {context && matches.length > 0 && (
+          <ul className={styles.autocompleteList} data-testid={`${testId}-suggestions`}>
+            {matches.map((token, i) => (
+              <li
+                key={token}
+                className={i === highlightIndex ? styles.autocompleteOptionActive : styles.autocompleteOption}
+                onMouseDown={(e) => { e.preventDefault(); applySuggestion(token); }}
+              >
+                {token}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <ZestButton
+        type="button"
+        onClick={openBrowseAll}
+        data-testid={`${testId}-browse-btn`}
+        zest={{ buttonStyle: "outline", visualOptions: { size: "sm" } }}
+      >
+        Insert placeholder
+      </ZestButton>
     </div>
   );
 }

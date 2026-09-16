@@ -158,6 +158,54 @@ describe("PipelineView", () => {
     ));
   });
 
+  it("suggests known placeholders when typing < and inserts the selected token", async () => {
+    const role = makeRole({ name: "qa" });
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue(makePipeline([role]));
+    mockApi.saveWorkspacePipelineAsync.mockResolvedValue(makePipeline([role]));
+    const user = userEvent.setup();
+    render(<PipelineView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);
+    await screen.findByTestId("pipeline-role-qa");
+
+    const input = screen.getByTestId("pipeline-role-qa-exit-new-text") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Confirm <F" } });
+
+    const suggestions = screen.getByTestId("pipeline-role-qa-exit-new-text-suggestions");
+    expect(within(suggestions).getByText("<F>")).toBeInTheDocument();
+    fireEvent.mouseDown(within(suggestions).getByText("<F>"));
+
+    expect(input.value).toBe("Confirm <F>");
+
+    await user.click(screen.getByTestId("pipeline-role-qa-exit-add-btn"));
+    await user.click(screen.getByTestId("pipeline-save-btn"));
+
+    await waitFor(() => expect(mockApi.saveWorkspacePipelineAsync).toHaveBeenCalledWith(
+      "C:/work/proj",
+      [expect.objectContaining({
+        exitGatePrompts: [expect.objectContaining({ gatePromptText: "Confirm <F>" })],
+      })],
+    ));
+  });
+
+  it("browses every known placeholder via the Insert placeholder button, for a novice who doesn't know the < convention", async () => {
+    const codeMap = makeRole({ name: "code-map", writesCode: false, artifact: { root: "docs-root", fileName: "code-map.json", kind: "json" } });
+    const qa = makeRole({ name: "qa" });
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue(makePipeline([codeMap, qa]));
+    const user = userEvent.setup();
+    render(<PipelineView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);
+    await screen.findByTestId("pipeline-role-qa");
+
+    await user.click(screen.getByTestId("pipeline-role-qa-exit-new-text-browse-btn"));
+
+    const suggestions = screen.getByTestId("pipeline-role-qa-exit-new-text-suggestions");
+    expect(within(suggestions).getByText("<F>")).toBeInTheDocument();
+    expect(within(suggestions).getByText("<docs-root>")).toBeInTheDocument();
+    expect(within(suggestions).getByText("<code-map/artifact.file>")).toBeInTheDocument();
+
+    fireEvent.mouseDown(within(suggestions).getByText("<code-map/artifact.file>"));
+
+    expect((screen.getByTestId("pipeline-role-qa-exit-new-text") as HTMLInputElement).value).toBe("<code-map/artifact.file>");
+  });
+
   it("picks a required specialist from the registry and includes it in the saved payload", async () => {
     const role = makeRole({ name: "developer" });
     mockApi.getWorkspacePipelineAsync.mockResolvedValue(makePipeline([role]));
@@ -192,10 +240,11 @@ describe("PipelineView", () => {
 
     await user.click(screen.getByTestId("pipeline-role-code-map-artifact-toggle"));
     // "docs-root" is already the default once the toggle is on — no need to re-pick it.
-    const fileNameInput = screen.getByTestId("pipeline-role-code-map-artifact-filename");
-    await user.clear(fileNameInput);
-    await user.type(fileNameInput, "codemap.json");
+    // Filename is derived — no free-text field to type into — and updates live with the
+    // JSON toggle, since kind determines the extension.
+    expect(screen.getByTestId("pipeline-role-code-map-artifact-filename")).toHaveTextContent("File: code-map.md");
     await user.click(screen.getByTestId("pipeline-role-code-map-artifact-json-toggle"));
+    expect(screen.getByTestId("pipeline-role-code-map-artifact-filename")).toHaveTextContent("File: code-map.json");
 
     pickReactSelectOption(screen.getByTestId("pipeline-role-business-analyst-entry-artifact-picker"), "Code MAP");
     expect(screen.getByTestId("pipeline-role-business-analyst-entry")).toHaveTextContent("artifact from: code-map");
@@ -207,7 +256,7 @@ describe("PipelineView", () => {
       expect.arrayContaining([
         expect.objectContaining({
           name: "code-map",
-          artifact: { root: "docs-root", fileName: "codemap.json", kind: "json" },
+          artifact: { root: "docs-root", fileName: "code-map.json", kind: "json" },
         }),
         expect.objectContaining({
           name: "business-analyst",

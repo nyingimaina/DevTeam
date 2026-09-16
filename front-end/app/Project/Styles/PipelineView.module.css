@@ -139,3 +139,58 @@
 .selectField {
   min-width: 200px;
 }
+
+.autocompleteGroup {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 1 1 auto;
+}
+
+.autocompleteWrapper {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 160px;
+}
+
+.autocompleteInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font-size: 0.9em;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 4px;
+  background: var(--input-bg, transparent);
+  color: inherit;
+}
+
+.autocompleteList {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 2px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 4px;
+  background: var(--surface-bg, #fff);
+}
+
+.autocompleteOption {
+  padding: 4px 10px;
+  font-size: 0.85em;
+  font-family: monospace;
+  cursor: pointer;
+}
+
+.autocompleteOptionActive {
+  padding: 4px 10px;
+  font-size: 0.85em;
+  font-family: monospace;
+  cursor: pointer;
+  background: var(--highlight-bg, #e0e7ff);
+}
