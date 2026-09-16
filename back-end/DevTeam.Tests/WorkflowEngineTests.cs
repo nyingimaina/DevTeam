@@ -913,6 +913,227 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_RequiresArtifactExitGate_BlocksWhenTheDeclaredArtifactIsMissing()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                  kind: json
+                steps:
+                  - agent: { mode: code-map }
+                  - requiresArtifact: code-map
+            """);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "code-map");
+            Assert.Equal(ReleaseStageStatus.BlockedGate, stageRun.Status);
+            var gateCheck = stageRun.GateChecks.Single(gc => gc.Name == "requires_artifact:code-map");
+            Assert.False(gateCheck.Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_RequiresArtifactExitGate_PassesOnceATextArtifactExists()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              code-map:
+                signoff: reviewed
+                artifact:
+                  root: docs-root
+                  fileName: codemap.md
+                  kind: text
+                steps:
+                  - agent: { mode: code-map }
+                  - requiresArtifact: code-map
+            """);
+
+        try
+        {
+            var artifactDir = Path.Combine(workspace, "docs", "code-map");
+            Directory.CreateDirectory(artifactDir);
+            File.WriteAllText(Path.Combine(artifactDir, "codemap.md"), "# Code Map\n");
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "code-map");
+            var gateCheck = stageRun.GateChecks.Single(gc => gc.Name == "requires_artifact:code-map");
+            Assert.True(gateCheck.Passed);
+            Assert.NotEqual(ReleaseStageStatus.BlockedGate, stageRun.Status);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_RequiresArtifactExitGate_FailsForMalformedJsonAndPassesForValidJson()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              code-map:
+                signoff: reviewed
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                  kind: json
+                steps:
+                  - agent: { mode: code-map }
+                  - requiresArtifact: code-map
+            """);
+
+        try
+        {
+            var artifactDir = Path.Combine(workspace, "docs", "code-map");
+            Directory.CreateDirectory(artifactDir);
+            var artifactPath = Path.Combine(artifactDir, "codemap.json");
+            File.WriteAllText(artifactPath, "{ not valid json");
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var malformed = await engine.RunStageAsync(featureId, CancellationToken.None);
+            var malformedRun = malformed.StageRuns.Single(sr => sr.StageName == "code-map");
+            Assert.Equal(ReleaseStageStatus.BlockedGate, malformedRun.Status);
+            Assert.False(malformedRun.GateChecks.Single(gc => gc.Name == "requires_artifact:code-map").Passed);
+
+            File.WriteAllText(artifactPath, """{"modules": []}""");
+            var fixedResult = await engine.RunStageAsync(featureId, CancellationToken.None);
+            var fixedRun = fixedResult.StageRuns
+                .Where(sr => sr.StageName == "code-map")
+                .OrderByDescending(sr => sr.Attempt)
+                .First();
+            Assert.True(fixedRun.GateChecks.Single(gc => gc.Name == "requires_artifact:code-map").Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_FailingRequiresArtifactEntryGate_NeverOpensASessionOrSendsAPrompt()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                  kind: json
+                agent: { mode: code-map }
+              business-analyst:
+                entryGates:
+                  - requiresArtifact: code-map
+                agent: { mode: business-analyst }
+            """);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            // code-map has no entry gates and no signoff, so its own turn (an agent step with
+            // no exit gate) completes and the flow auto-advances straight to business-analyst.
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+            _coordinator.Prompts.Clear();
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            Assert.Empty(_coordinator.Prompts);
+            var baRun = updated.StageRuns.Single(sr => sr.StageName == "business-analyst");
+            Assert.Equal(ReleaseStageStatus.BlockedEntry, baRun.Status);
+            Assert.True(baRun.GateChecks.Single().IsEntryGate);
+            Assert.False(baRun.GateChecks.Single().Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_GatePromptStep_ResolvesFRootAndStageArtifactPlaceholders()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                  kind: json
+                agent: { mode: code-map }
+              researcher:
+                entryGates:
+                  - gatePrompt: "Feature <F>: confirm <docs-root> and <feature-docs-root> and <code-map/artifact.file> are all real paths."
+                agent: { mode: researcher }
+            """);
+
+        try
+        {
+            _coordinator.StopReasonsToReturn.Enqueue("end_turn"); // code-map's own turn
+            _coordinator.StopReasonsToReturn.Enqueue("end_turn"); // the entry gate prompt itself
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            // code-map (index 0) completes and advances the flow position; researcher's entry
+            // gate only runs once RunStageAsync is called again for the now-current stage.
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var gatePrompt = _coordinator.Prompts.Single(p => p.Contains("confirm"));
+            Assert.Contains("Feature feat-001:", gatePrompt);
+            Assert.Contains(Path.Combine(workspace, "docs"), gatePrompt);
+            Assert.Contains(ArtifactPaths.FeatureDir(workspace, "feat-001"), gatePrompt);
+            Assert.Contains(Path.Combine(workspace, "docs", "code-map", "codemap.json"), gatePrompt);
+            Assert.DoesNotContain("<F>", gatePrompt);
+            Assert.DoesNotContain("<docs-root>", gatePrompt);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunStage_QaGateFailureWithResponsibleRoleDeveloper_RoutesBackToDeveloperInsteadOfLoopingQa()
     {
         var engine = CreateEngine();
@@ -1067,7 +1288,7 @@ public class WorkflowEngineTests : IDisposable
             // First call is developer's own (code + docs); the specialist's own call must be
             // docs-only, never the developer's broader scope.
             var specialistPrefixes = _coordinator.AllowedWritePrefixesCalls[1];
-            Assert.Equal([ArtifactPaths.FeatureDirRelative("feat-001")], specialistPrefixes);
+            Assert.Equal([ArtifactPaths.FeatureDirRelative("feat-001"), "docs"], specialistPrefixes);
         }
         finally
         {
@@ -1390,7 +1611,7 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task StartStage_BusinessAnalystSession_RequestsFeatureDocsPrefixOnly()
+    public async Task StartStage_BusinessAnalystSession_RequestsFeatureDocsAndDocsRootPrefixesOnly()
     {
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
@@ -1399,11 +1620,11 @@ public class WorkflowEngineTests : IDisposable
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
         var prefixes = Assert.Single(_coordinator.AllowedWritePrefixesCalls);
-        Assert.Equal([ArtifactPaths.FeatureDirRelative("feat-001")], prefixes);
+        Assert.Equal([ArtifactPaths.FeatureDirRelative("feat-001"), "docs"], prefixes);
     }
 
     [Fact]
-    public async Task RunStage_DeveloperSession_RequestsManifestCodePathsPlusDocsPrefix()
+    public async Task RunStage_DeveloperSession_RequestsManifestCodePathsPlusFeatureAndDocsRootPrefixes()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
         SliceManifestIO.Write(
@@ -1426,7 +1647,7 @@ public class WorkflowEngineTests : IDisposable
         // session may follow for the antagonist challenge review — that one is out of scope here.
         var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
         Assert.Equal(
-            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "back-end/Features/login", "front-end/app/login", "Program.cs" },
+            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "Program.cs" },
             prefixes);
     }
 
@@ -1457,7 +1678,7 @@ public class WorkflowEngineTests : IDisposable
         // for the challenge review — that one is out of scope here.
         var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
         Assert.Equal(
-            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "back-end/Features/login", "front-end/app/login", "Program.cs" },
+            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "Program.cs" },
             prefixes);
     }
 
@@ -1488,7 +1709,7 @@ public class WorkflowEngineTests : IDisposable
 
             var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
             Assert.Equal(
-                new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "back-end/Features/login", "front-end/app/login", "Program.cs" },
+                new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "Program.cs" },
                 prefixes);
         }
         finally

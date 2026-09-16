@@ -283,10 +283,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         // Entry gates run before a session is even opened — a role that never gets past its
         // own entry gates has no need for one yet, and shouldn't pay for it.
-        if (!await RunEntryGatesAsync(role, featureKey, workspacePath, stageRun, db, ct))
+        if (!await RunEntryGatesAsync(role, featureKey, workspacePath, workflow, stageRun, db, ct))
             return stageRun;
 
-        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey);
+        var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey, workflow);
         var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
         stageRun.AcpSessionId = session.SessionId.ToString();
         await db.SaveChangesAsync(ct);
@@ -294,7 +294,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // Run this role's leading builtins (e.g. scaffold_specs/context_bundle for
         // business-analyst) before the very first chat message goes out, so the agent
         // starts with a scaffold already in place instead of discovering it mid-conversation.
-        await RunLeadingBuiltinsAsync(role, featureKey, workspacePath, stageRun, db, ct);
+        await RunLeadingBuiltinsAsync(role, featureKey, workspacePath, workflow, stageRun, db, ct);
         await db.SaveChangesAsync(ct);
 
         var guidanceContext = BuildGuidanceContext(feature);
@@ -306,7 +306,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // instruction — see WorkflowYaml.DefaultPipeline) instead of a name check, so a
         // custom/renamed first stage doesn't silently inherit BA-specific instructions it
         // never asked for.
-        var requirementsAuthoring = role.SeedPrompt?.Replace("<F>", featureKey) ?? string.Empty;
+        var requirementsAuthoring = role.SeedPrompt is null
+            ? string.Empty
+            : ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
 
         var finalPrompt = resolvedPrompt.OverridesBuiltIn
             ? resolvedPrompt.Text
@@ -326,7 +328,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         using var agentCts = InteractiveTurnCts();
         try
         {
-            await PromptWithDelegationAsync(session.SessionId, finalPrompt, stageRun, workspacePath, featureKey, db, agentCts.Token);
+            await PromptWithDelegationAsync(session.SessionId, finalPrompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
             ClearPromptFailure(stageRun);
             await db.SaveChangesAsync(ct);
         }
@@ -466,7 +468,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var missingArtifacts = new List<string>();
         foreach (var artifactPattern in role.ExpectedArtifacts)
         {
-            var artifactPath = artifactPattern.Replace("<F>", featureKey);
+            var artifactPath = ResolvePlaceholders(artifactPattern, workflow, workspacePath, featureKey);
             var fullPath = Path.Combine(workspacePath, artifactPath);
             if (!Directory.Exists(fullPath) && !File.Exists(fullPath))
             {
@@ -500,7 +502,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 continue;
             }
             if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
+            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, workflow, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -630,7 +632,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
             // Entry gates run before a session is even opened — a role that never gets past
             // its own entry gates has no need for one yet, and shouldn't pay for it.
-            if (!await RunEntryGatesAsync(role, featureKey, workspacePath, stageRun, db, ct))
+            if (!await RunEntryGatesAsync(role, featureKey, workspacePath, workflow, stageRun, db, ct))
             {
                 await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
                 {
@@ -642,7 +644,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 return await LoadReleaseAsync(db, feature.ReleaseId, ct);
             }
 
-            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey);
+            var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey, workflow);
             var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
             stageRun.AcpSessionId = session.SessionId.ToString();
             await db.SaveChangesAsync(ct);
@@ -678,7 +680,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                   "When you are done, say DONE and provide a summary of what you changed.";
             try
             {
-                await PromptWithDelegationAsync(acpSessionId, prompt, stageRun, workspacePath, featureKey, db, agentCts.Token);
+                await PromptWithDelegationAsync(acpSessionId, prompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
                 ClearPromptFailure(stageRun);
                 await db.SaveChangesAsync(ct);
             }
@@ -707,7 +709,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 case WorkflowStepKind.Builtin:
                 case WorkflowStepKind.GatePrompt:
                 case WorkflowStepKind.RequiresSpecialist:
-                    var builtin = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
+                case WorkflowStepKind.RequiresArtifact:
+                    var builtin = await ExecuteStepAsync(step, role, featureKey, workspacePath, workflow, stageRun, db, ct);
                     db.ReleaseGateChecks.Add(new ReleaseGateCheck
                     {
                         StageRun = stageRun,
@@ -740,7 +743,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                                 continue;
                             }
 
-                            var inner = await ExecuteStepAsync(innerStep, role, featureKey, workspacePath, stageRun, db, ct);
+                            var inner = await ExecuteStepAsync(innerStep, role, featureKey, workspacePath, workflow, stageRun, db, ct);
                             db.ReleaseGateChecks.Add(new ReleaseGateCheck
                             {
                                 StageRun = stageRun,
@@ -1060,6 +1063,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 case WorkflowStepKind.RequiresSpecialist:
                     names.Add($"requires_specialist:{step.RequiredSpecialist}");
                     break;
+                case WorkflowStepKind.RequiresArtifact:
+                    names.Add($"requires_artifact:{step.RequiredArtifactStage}");
+                    break;
             }
         }
         return names;
@@ -1083,7 +1089,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var results = new List<StageArtifactDto>();
         foreach (var pattern in role.ExpectedArtifacts)
         {
-            var relativePath = pattern.Replace("<F>", featureKey);
+            var relativePath = ResolvePlaceholders(pattern, workflow, workspacePath, featureKey);
             var fullPath = Path.Combine(workspacePath, relativePath);
 
             if (File.Exists(fullPath))
@@ -1147,7 +1153,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var missingArtifacts = new List<string>();
         foreach (var artifactPattern in role.ExpectedArtifacts)
         {
-            var artifactPath = artifactPattern.Replace("<F>", featureKey);
+            var artifactPath = ResolvePlaceholders(artifactPattern, workflow, feature.Release.WorkspacePath, featureKey);
             var fullPath = Path.Combine(feature.Release.WorkspacePath, artifactPath);
             if (!Directory.Exists(fullPath) && !File.Exists(fullPath))
             {
@@ -1175,7 +1181,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         foreach (var step in role.Steps)
         {
             if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, role, featureKey, feature.Release.WorkspacePath, stageRun, db, ct);
+            var result = await ExecuteStepAsync(step, role, featureKey, feature.Release.WorkspacePath, workflow, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -1440,11 +1446,16 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// if the manifest is unexpectedly missing. Takes the primitives rather than a WorkflowRole
     /// so it serves both pipeline roles and specialist delegates (Part 3) identically.
     /// </summary>
-    private IReadOnlyList<string> ResolveAllowedWritePrefixes(bool writesCode, string ownerName, string workspacePath, string featureKey)
+    private IReadOnlyList<string> ResolveAllowedWritePrefixes(
+        bool writesCode, string ownerName, string workspacePath, string featureKey, WorkflowDefinition workflow)
     {
         var featureDir = ArtifactPaths.FeatureDirRelative(featureKey);
+        // Unconditional, independent of WritesCode — same treatment featureDir already gets —
+        // so any role's agent can create its declared Artifact (see WorkflowRole.Artifact)
+        // under docs-root/<own-stage-name>/ without needing code write access.
+        var docsRoot = workflow.DocsRoot;
         if (!writesCode)
-            return [featureDir];
+            return [featureDir, docsRoot];
 
         var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
         if (manifest is null)
@@ -1452,12 +1463,150 @@ public sealed class WorkflowEngine : IWorkflowEngine
             _logger.LogWarning(
                 "No slice manifest found for feature '{FeatureKey}' when scoping '{Owner}'; " +
                 "restricting write access to the feature docs directory only.", featureKey, ownerName);
-            return [featureDir];
+            return [featureDir, docsRoot];
         }
 
-        var prefixes = new List<string> { featureDir, manifest.CodePathBack, manifest.CodePathFront };
+        var prefixes = new List<string> { featureDir, docsRoot, manifest.CodePathBack, manifest.CodePathFront };
         prefixes.AddRange(manifest.Shared);
         return prefixes;
+    }
+
+    /// <summary>
+    /// Resolves one of the fixed ArtifactRoots keys to a workspace-relative directory. Used by
+    /// both ResolveStageArtifactPath (structured RequiresArtifact checks) and
+    /// ResolvePlaceholders (free-text prompt tokens).
+    /// </summary>
+    private static string ResolveRootDirectory(string rootKey, WorkflowDefinition workflow, string workspacePath, string featureKey)
+    {
+        switch (rootKey)
+        {
+            case ArtifactRoots.DocsRoot:
+                return FileSystemLookup.FindEntry(workspacePath, workflow.DocsRoot) ?? Path.Combine(workspacePath, workflow.DocsRoot);
+            case ArtifactRoots.FeatureDocsRoot:
+                return ArtifactPaths.FeatureDir(workspacePath, featureKey);
+            case ArtifactRoots.FeatureCodeRootBack:
+            case ArtifactRoots.FeatureCodeRootFront:
+                var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
+                // Pre-scaffold (no manifest yet), fall back to the declared pattern instead of
+                // failing outright — same "soft degrade" treatment ResolveAllowedWritePrefixes
+                // already gives a missing manifest.
+                var relative = rootKey == ArtifactRoots.FeatureCodeRootBack
+                    ? (manifest?.CodePathBack ?? workflow.Slices.CodeBack.Replace("<F>", featureKey))
+                    : (manifest?.CodePathFront ?? workflow.Slices.CodeFront.Replace("<F>", featureKey));
+                return Path.Combine(workspacePath, relative);
+            case ArtifactRoots.WorkspaceRoot:
+                return workspacePath;
+            default:
+                throw new InvalidOperationException($"Unknown artifact root '{rootKey}'.");
+        }
+    }
+
+    /// <summary>
+    /// Resolves the named stage's declared Artifact to its real path — always
+    /// &lt;resolved root&gt;/&lt;stage name&gt;/&lt;fileName&gt; (see WorkflowArtifact). Returns
+    /// the on-disk path if it already exists (tolerant of filesystem case differences via
+    /// FileSystemLookup) or the expected path otherwise, so a "not found" gate failure can
+    /// still report where it looked. Returns null if the named stage has no declared artifact
+    /// (callers only reach this after load-time validation has already ruled that out for
+    /// RequiresArtifact steps, but GatePromptText placeholders aren't load-time validated the
+    /// same way, so this stays defensive).
+    /// </summary>
+    private static string? ResolveStageArtifactPath(string stageName, WorkflowDefinition workflow, string workspacePath, string featureKey)
+    {
+        var role = workflow.Pipeline.FirstOrDefault(r => r.Name == stageName);
+        if (role?.Artifact is null)
+            return null;
+
+        var rootDir = ResolveRootDirectory(role.Artifact.Root, workflow, workspacePath, featureKey);
+        var stageDir = FileSystemLookup.FindEntry(rootDir, stageName) ?? Path.Combine(rootDir, stageName);
+        var found = FileSystemLookup.FindEntry(stageDir, role.Artifact.FileName);
+        return found ?? Path.Combine(stageDir, role.Artifact.FileName);
+    }
+
+    /// <summary>
+    /// Makes a stage's declared Artifact (Part 4) enforceable: passes only if the named
+    /// stage's file exists (and, for ArtifactKind.Json, parses). Deterministic — no LLM call,
+    /// unlike GatePrompt — reusing FileSystemLookup so the check is cross-platform-safe.
+    /// </summary>
+    private static StepExecutionResult ExecuteRequiresArtifactAsync(
+        string stageName, WorkflowDefinition workflow, string workspacePath, string featureKey)
+    {
+        var role = workflow.Pipeline.FirstOrDefault(r => r.Name == stageName);
+        var artifact = role?.Artifact;
+        var stepName = $"requires_artifact:{stageName}";
+        if (artifact is null)
+        {
+            return new StepExecutionResult
+            {
+                StepName = stepName,
+                Passed = false,
+                Reason = $"'{stageName}' has no declared artifact.",
+                Evidence = $"'{stageName}' has no declared artifact.",
+            };
+        }
+
+        var path = ResolveStageArtifactPath(stageName, workflow, workspacePath, featureKey);
+        if (path is null || !File.Exists(path))
+        {
+            return new StepExecutionResult
+            {
+                StepName = stepName,
+                Passed = false,
+                Reason = $"{stageName}'s declared artifact has not been produced yet.",
+                Evidence = $"Expected a file at {path ?? "(unresolved)"} — not found.",
+            };
+        }
+
+        if (artifact.Kind == ArtifactKind.Json)
+        {
+            try
+            {
+                using var _ = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                return new StepExecutionResult
+                {
+                    StepName = stepName,
+                    Passed = false,
+                    Reason = $"{stageName}'s declared artifact is not valid JSON.",
+                    Evidence = $"{path}: {ex.Message}",
+                };
+            }
+        }
+
+        return new StepExecutionResult
+        {
+            StepName = stepName,
+            Passed = true,
+            Evidence = $"{stageName}'s declared artifact is present at {path}.",
+        };
+    }
+
+    /// <summary>
+    /// Resolves every known placeholder token in free-text prompt surfaces (GatePromptText,
+    /// SeedPrompt, ExpectedArtifacts patterns) — a closed-set sequential string-replace, not a
+    /// template engine, so there's no open-ended parsing/injection surface. Tokens: "&lt;F&gt;"
+    /// (the existing feature-key convention), each ArtifactRoots key, and one
+    /// "&lt;stage-name/artifact.file&gt;" entry per role that declares an Artifact, resolving to
+    /// its fully-resolved real path.
+    /// </summary>
+    private static string ResolvePlaceholders(string text, WorkflowDefinition workflow, string workspacePath, string featureKey)
+    {
+        var resolved = text.Replace("<F>", featureKey);
+
+        foreach (var rootKey in ArtifactRoots.All)
+            resolved = resolved.Replace($"<{rootKey}>", ResolveRootDirectory(rootKey, workflow, workspacePath, featureKey));
+
+        foreach (var role in workflow.Pipeline)
+        {
+            if (role.Artifact is null) continue;
+            var token = $"<{role.Name}/artifact.file>";
+            if (resolved.Contains(token, StringComparison.Ordinal))
+                resolved = resolved.Replace(token, ResolveStageArtifactPath(role.Name, workflow, workspacePath, featureKey));
+        }
+
+        return resolved;
     }
 
     private sealed record DelegateRequestPayload(string? Role, string? Question);
@@ -1486,14 +1635,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// </summary>
     private async Task<PromptResponse> PromptWithDelegationAsync(
         Guid acpSessionId, string prompt, ReleaseStageRun stageRun, string workspacePath, string featureKey,
-        DevTeamDbContext db, CancellationToken ct)
+        WorkflowDefinition workflow, DevTeamDbContext db, CancellationToken ct)
     {
         var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, ct, isPriming: true);
         var requestPath = ArtifactPaths.DelegateRequestPath(workspacePath, featureKey);
 
         for (var round = 0; round < MaxDelegationRoundTrips && File.Exists(requestPath); round++)
         {
-            var followUp = await HandleDelegationRequestAsync(requestPath, stageRun, workspacePath, featureKey, db, ct);
+            var followUp = await HandleDelegationRequestAsync(requestPath, stageRun, workspacePath, featureKey, workflow, db, ct);
             response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, followUp, ct, isPriming: false);
         }
 
@@ -1509,7 +1658,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     private async Task<string> HandleDelegationRequestAsync(
         string requestPath, ReleaseStageRun stageRun, string workspacePath, string featureKey,
-        DevTeamDbContext db, CancellationToken ct)
+        WorkflowDefinition workflow, DevTeamDbContext db, CancellationToken ct)
     {
         string requestJson;
         try
@@ -1550,7 +1699,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         try
         {
-            var allowedPrefixes = ResolveAllowedWritePrefixes(specialist.WritesCode, specialist.Name, workspacePath, featureKey);
+            var allowedPrefixes = ResolveAllowedWritePrefixes(specialist.WritesCode, specialist.Name, workspacePath, featureKey, workflow);
             var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedPrefixes, ct);
             await _coordinator.PromptWithSessionRecoveryAsync(
                 session.SessionId, specialist.PrimingPrompt + "\n\nQuestion from another stage: " + request.Question,
@@ -1588,12 +1737,13 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// failed after it ran) and stops short of ever sending the first prompt.
     /// </summary>
     private async Task<bool> RunEntryGatesAsync(
-        WorkflowRole role, string featureKey, string workspacePath, ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
+        WorkflowRole role, string featureKey, string workspacePath, WorkflowDefinition workflow,
+        ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
     {
         var allPassed = true;
         foreach (var gate in role.EntryGates ?? [])
         {
-            var result = await ExecuteStepAsync(gate, role, featureKey, workspacePath, stageRun, db, ct);
+            var result = await ExecuteStepAsync(gate, role, featureKey, workspacePath, workflow, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -1616,7 +1766,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
     }
 
     private async Task<bool> RunLeadingBuiltinsAsync(
-        WorkflowRole role, string featureKey, string workspacePath, ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
+        WorkflowRole role, string featureKey, string workspacePath, WorkflowDefinition workflow,
+        ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
     {
         var allPassed = true;
         foreach (var step in role.Steps)
@@ -1624,7 +1775,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
                 break;
 
-            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
+            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, workflow, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
@@ -1684,21 +1835,22 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // ─── internal execution ────────────────────────────────────────────────
 
     private async Task<StepExecutionResult> ExecuteStepAsync(
-        WorkflowStep step, WorkflowRole role, string featureKey, string workspacePath,
+        WorkflowStep step, WorkflowRole role, string featureKey, string workspacePath, WorkflowDefinition workflow,
         ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
     {
         var result = step.Kind switch
         {
             WorkflowStepKind.Builtin => await ExecuteBuiltinAsync(step.Builtin!, featureKey, workspacePath, ct),
             WorkflowStepKind.Agent => new StepExecutionResult { StepName = $"agent:{step.AgentMode}", Passed = true, Evidence = "Interactive — handled via chat." },
-            WorkflowStepKind.Loop => await ExecuteLoopAsync(step, role, featureKey, workspacePath, stageRun, db, ct),
+            WorkflowStepKind.Loop => await ExecuteLoopAsync(step, role, featureKey, workspacePath, workflow, stageRun, db, ct),
             WorkflowStepKind.GatePrompt => await ExecuteGatePromptAsync(
-                step.GatePromptText!,
+                ResolvePlaceholders(step.GatePromptText!, workflow, workspacePath, featureKey),
                 $"gate_prompt:{role.Name}:{Truncate(step.GatePromptText!, 40)}",
                 role.Name,
                 $"Gate prompt found issues with {role.Name}'s work.",
                 stageRun, workspacePath, db, ct),
             WorkflowStepKind.RequiresSpecialist => await ExecuteRequiresSpecialistAsync(step.RequiredSpecialist!, stageRun, db, ct),
+            WorkflowStepKind.RequiresArtifact => ExecuteRequiresArtifactAsync(step.RequiredArtifactStage!, workflow, workspacePath, featureKey),
             _ => throw new InvalidOperationException($"Unknown step kind: {step.Kind}"),
         };
         return result with { ResponsibleRole = step.ResponsibleRole ?? result.ResponsibleRole };
@@ -1784,7 +1936,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     }
 
     private async Task<StepExecutionResult> ExecuteLoopAsync(
-        WorkflowStep step, WorkflowRole role, string featureKey, string workspacePath,
+        WorkflowStep step, WorkflowRole role, string featureKey, string workspacePath, WorkflowDefinition workflow,
         ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
     {
         var maxAttempts = step.LoopAttempts ?? 3;
@@ -1794,7 +1946,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             foreach (var innerStep in step.LoopSteps ?? [])
             {
                 if (innerStep.Kind == WorkflowStepKind.Agent) continue;
-                lastResult = await ExecuteStepAsync(innerStep, role, featureKey, workspacePath, stageRun, db, ct);
+                lastResult = await ExecuteStepAsync(innerStep, role, featureKey, workspacePath, workflow, stageRun, db, ct);
                 if (!lastResult.Passed) break;
             }
             if (lastResult.Passed) break;

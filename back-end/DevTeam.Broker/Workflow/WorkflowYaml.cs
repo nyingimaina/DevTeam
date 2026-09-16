@@ -7,6 +7,10 @@ public sealed class WorkflowYaml
 {
     public bool Opinionated { get; set; } = true;
 
+    // A workspace-wide (not per-feature) folder for cross-cutting docs artifacts — see
+    // ArtifactRoots.DocsRoot / WorkflowArtifact.
+    public string DocsRoot { get; set; } = "docs";
+
     public ReleaseYaml Release { get; set; } = new();
 
     public SlicesYaml Slices { get; set; } = new();
@@ -155,6 +159,20 @@ public sealed class RoleYaml
     public List<StepYaml> EntryGates { get; set; } = [];
 
     public List<string> ExpectedArtifacts { get; set; } = [];
+
+    // The single artifact this stage produces, if any — see WorkflowArtifact.
+    public ArtifactYaml? Artifact { get; set; }
+}
+
+public sealed class ArtifactYaml
+{
+    // One of ArtifactRoots.All — validated by WorkflowDefinitionLoader.
+    public string? Root { get; set; }
+
+    public string? FileName { get; set; }
+
+    // "text" | "json" — validated by WorkflowDefinitionLoader.
+    public string Kind { get; set; } = "text";
 }
 
 public sealed class StepYaml
@@ -171,6 +189,11 @@ public sealed class StepYaml
     // A deterministic "has this specialist been consulted yet" check — see
     // WorkflowStepKind.RequiresSpecialist. Value is the SpecialistRole.Name required.
     public string? RequiresSpecialist { get; set; }
+
+    // A deterministic "has this stage produced its declared Artifact yet" check — see
+    // WorkflowStepKind.RequiresArtifact. Value is the name of the role whose Artifact is
+    // required.
+    public string? RequiresArtifact { get; set; }
 
     // See WorkflowStep.ResponsibleRole.
     public string? ResponsibleRole { get; set; }

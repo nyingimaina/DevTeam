@@ -80,6 +80,7 @@ public sealed class WorkflowDefinitionLoader
 
         var pipeline = BuildPipeline(yaml, errors);
         var challenges = BuildChallenges(yaml, pipeline.Select(r => r.Name).ToHashSet(), challengesProvided, errors);
+        ValidateArtifactReferences(pipeline, errors);
 
         if (errors.Count > 0)
             throw new WorkflowConfigurationException(
@@ -94,7 +95,8 @@ public sealed class WorkflowDefinitionLoader
                 yaml.Slices.CodeBack,
                 yaml.Slices.CodeFront),
             pipeline,
-            challenges);
+            challenges,
+            string.IsNullOrWhiteSpace(yaml.DocsRoot) ? "docs" : yaml.DocsRoot);
     }
 
     private static IReadOnlyList<WorkflowRole> BuildPipeline(WorkflowYaml yaml, List<string> errors)
@@ -131,12 +133,73 @@ public sealed class WorkflowDefinitionLoader
                 .Where(step => step is not null)
                 .Select(step => step!)
                 .ToList();
+            var artifact = ConvertArtifact(name, role.Artifact, errors);
             roles.Add(new WorkflowRole(
                 name, steps, role.Signoff, role.UserInputRequired, role.ExpectedArtifacts,
-                role.WritesCode, role.SeedPrompt, entryGates));
+                role.WritesCode, role.SeedPrompt, entryGates, artifact));
         }
 
         return roles;
+    }
+
+    private static WorkflowArtifact? ConvertArtifact(string roleName, ArtifactYaml? yaml, List<string> errors)
+    {
+        if (yaml is null)
+            return null;
+
+        if (string.IsNullOrWhiteSpace(yaml.Root) || !ArtifactRoots.IsKnown(yaml.Root))
+            errors.Add(
+                $"role '{roleName}' artifact 'root' must be one of: " + string.Join(", ", ArtifactRoots.All.OrderBy(x => x)));
+
+        if (string.IsNullOrWhiteSpace(yaml.FileName))
+            errors.Add($"role '{roleName}' artifact 'fileName' must be non-empty");
+
+        var kind = yaml.Kind.Trim().ToLowerInvariant() switch
+        {
+            "json" => ArtifactKind.Json,
+            "text" => ArtifactKind.Text,
+            _ => (ArtifactKind?)null,
+        };
+        if (kind is null)
+        {
+            errors.Add($"role '{roleName}' artifact 'kind' must be 'text' or 'json' (got '{yaml.Kind}')");
+            kind = ArtifactKind.Text;
+        }
+
+        return new WorkflowArtifact(yaml.Root ?? string.Empty, yaml.FileName ?? string.Empty, kind.Value);
+    }
+
+    // Cross-references a RequiresArtifact step's target stage exists and actually declares an
+    // Artifact — checked after the whole pipeline is built (mirrors BuildChallenges' producer
+    // validation), since it needs every role's Artifact to already be resolved.
+    private static void ValidateArtifactReferences(IReadOnlyList<WorkflowRole> roles, List<string> errors)
+    {
+        var artifactByRole = roles.ToDictionary(r => r.Name, r => r.Artifact);
+        foreach (var role in roles)
+        {
+            foreach (var step in FlattenSteps(role.Steps).Concat(FlattenSteps(role.EntryGates ?? [])))
+            {
+                if (step.Kind != WorkflowStepKind.RequiresArtifact)
+                    continue;
+
+                var target = step.RequiredArtifactStage!;
+                if (!artifactByRole.TryGetValue(target, out var artifact))
+                    errors.Add($"role '{role.Name}' references artifact stage '{target}', which is not a role in the pipeline");
+                else if (artifact is null)
+                    errors.Add($"role '{role.Name}' references artifact stage '{target}', which has no declared artifact");
+            }
+        }
+    }
+
+    private static IEnumerable<WorkflowStep> FlattenSteps(IReadOnlyList<WorkflowStep> steps)
+    {
+        foreach (var step in steps)
+        {
+            yield return step;
+            if (step.Kind == WorkflowStepKind.Loop)
+                foreach (var inner in FlattenSteps(step.LoopSteps ?? []))
+                    yield return inner;
+        }
     }
 
     private static IReadOnlyList<WorkflowStep> ResolveRoleSteps(string roleName, RoleYaml role, List<string> errors)
@@ -179,18 +242,21 @@ public sealed class WorkflowDefinitionLoader
 
     private static WorkflowStep? ConvertStep(string roleName, StepYaml step, int index, List<string> errors)
     {
-        var set = new[] { step.Builtin is not null, step.Agent is not null, step.Loop is not null, step.GatePrompt is not null, step.RequiresSpecialist is not null }
-            .Count(v => v);
+        var set = new[]
+        {
+            step.Builtin is not null, step.Agent is not null, step.Loop is not null,
+            step.GatePrompt is not null, step.RequiresSpecialist is not null, step.RequiresArtifact is not null,
+        }.Count(v => v);
 
         if (set == 0)
         {
-            errors.Add($"role '{roleName}' step #{index + 1} must define one of 'builtin', 'agent', 'loop', 'gatePrompt' or 'requiresSpecialist'");
+            errors.Add($"role '{roleName}' step #{index + 1} must define one of 'builtin', 'agent', 'loop', 'gatePrompt', 'requiresSpecialist' or 'requiresArtifact'");
             return null;
         }
 
         if (set > 1)
         {
-            errors.Add($"role '{roleName}' step #{index + 1} must define exactly one of 'builtin', 'agent', 'loop', 'gatePrompt' or 'requiresSpecialist'");
+            errors.Add($"role '{roleName}' step #{index + 1} must define exactly one of 'builtin', 'agent', 'loop', 'gatePrompt', 'requiresSpecialist' or 'requiresArtifact'");
             return null;
         }
 
@@ -228,6 +294,16 @@ public sealed class WorkflowDefinitionLoader
             return new WorkflowStep(
                 WorkflowStepKind.RequiresSpecialist, null, null, null, null,
                 ResponsibleRole: step.ResponsibleRole, RequiredSpecialist: step.RequiresSpecialist);
+        }
+
+        if (step.RequiresArtifact is not null)
+        {
+            if (string.IsNullOrWhiteSpace(step.RequiresArtifact))
+                errors.Add($"role '{roleName}' step #{index + 1} requiresArtifact must be non-empty");
+
+            return new WorkflowStep(
+                WorkflowStepKind.RequiresArtifact, null, null, null, null,
+                ResponsibleRole: step.ResponsibleRole, RequiredArtifactStage: step.RequiresArtifact);
         }
 
         var attempts = step.Loop!.Attempts ?? 3;

@@ -120,6 +120,140 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void Load_ParsesADeclaredArtifactAndARequiresArtifactStep()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                  kind: json
+                steps:
+                  - agent: { mode: code-map }
+                  - requiresArtifact: code-map
+              business-analyst:
+                entryGates:
+                  - requiresArtifact: code-map
+                agent: { mode: business-analyst }
+            """;
+        var definition = Load(yaml);
+        var codeMap = definition.Pipeline.Single(r => r.Name == "code-map");
+
+        Assert.NotNull(codeMap.Artifact);
+        Assert.Equal("docs-root", codeMap.Artifact!.Root);
+        Assert.Equal("codemap.json", codeMap.Artifact.FileName);
+        Assert.Equal(ArtifactKind.Json, codeMap.Artifact.Kind);
+
+        var exitGate = codeMap.Steps.Single(s => s.Kind == WorkflowStepKind.RequiresArtifact);
+        Assert.Equal("code-map", exitGate.RequiredArtifactStage);
+
+        var ba = definition.Pipeline.Single(r => r.Name == "business-analyst");
+        var entryGate = Assert.Single(ba.EntryGates!);
+        Assert.Equal(WorkflowStepKind.RequiresArtifact, entryGate.Kind);
+        Assert.Equal("code-map", entryGate.RequiredArtifactStage);
+    }
+
+    [Fact]
+    public void Load_ArtifactWithUnknownRoot_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: not-a-real-root
+                  fileName: codemap.json
+                agent: { mode: code-map }
+            """;
+        Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+    }
+
+    [Fact]
+    public void Load_ArtifactWithEmptyFileName_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: ""
+                agent: { mode: code-map }
+            """;
+        Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+    }
+
+    [Fact]
+    public void Load_ArtifactWithUnknownKind_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                  kind: yaml
+                agent: { mode: code-map }
+            """;
+        Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+    }
+
+    [Fact]
+    public void Load_RequiresArtifactStepWithoutAName_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              developer:
+                steps:
+                  - requiresArtifact: ""
+            """;
+        Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+    }
+
+    [Fact]
+    public void Load_RequiresArtifactReferencingAnUnknownStage_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              developer:
+                steps:
+                  - agent: { mode: developer }
+                  - requiresArtifact: not-a-real-stage
+            """;
+        var exception = Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+        Assert.Contains("not-a-real-stage", exception.Message);
+    }
+
+    [Fact]
+    public void Load_RequiresArtifactReferencingAStageWithNoDeclaredArtifact_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              code-map:
+                agent: { mode: code-map }
+              developer:
+                steps:
+                  - agent: { mode: developer }
+                  - requiresArtifact: code-map
+            """;
+        var exception = Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+        Assert.Contains("no declared artifact", exception.Message);
+    }
+
+    [Fact]
+    public void Load_DocsRootDefaultsToDocsAndCanBeOverridden()
+    {
+        Assert.Equal("docs", LoadDefault().DocsRoot);
+        Assert.Equal("shared-docs", Load("docsRoot: shared-docs").DocsRoot);
+    }
+
+    [Fact]
     public void LoadDefault_DefinesChallengePairs()
     {
         var definition = LoadDefault();

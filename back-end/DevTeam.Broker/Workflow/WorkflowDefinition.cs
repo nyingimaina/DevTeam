@@ -15,13 +15,33 @@ public enum WorkflowStepKind
     // makes delegation (Part 3) enforceable instead of purely advisory, e.g. "this stage
     // can't finish until database-admin has been consulted."
     RequiresSpecialist,
+    // A deterministic check (Part 4): passes only if the named stage's own declared Artifact
+    // exists on disk (and, if it declares ArtifactKind.Json, parses as valid JSON). No LLM
+    // call — a cheap, reliable alternative to a GatePrompt for "has stage X produced its
+    // output" questions.
+    RequiresArtifact,
 }
+
+public enum ArtifactKind
+{
+    Text,
+    Json,
+}
+
+// A stage may declare at most one of these — see WorkflowRole.Artifact. Its real path is
+// always <resolved Root>/<owning stage's own name>/<FileName>, so the owning stage's
+// (already-unique) name doubles as the artifact's key: no separate artifact-naming system is
+// needed, and two stages can never collide on output location even by accident.
+public sealed record WorkflowArtifact(string Root, string FileName, ArtifactKind Kind);
 
 public sealed record WorkflowDefinition(
     WorkflowRelease Release,
     WorkflowSlices Slices,
     IReadOnlyList<WorkflowRole> Pipeline,
-    IReadOnlyList<WorkflowChallenge> Challenges);
+    IReadOnlyList<WorkflowChallenge> Challenges,
+    // A workspace-wide (not per-feature) folder for cross-cutting docs artifacts — see
+    // ArtifactRoots.DocsRoot.
+    string DocsRoot = "docs");
 
 public sealed record WorkflowRelease(string Versioning);
 
@@ -46,7 +66,11 @@ public sealed record WorkflowRole(
     // Checks that must pass before this role's own turn starts — symmetric to the existing
     // exit-side Steps, which must pass before the role can finish. Same WorkflowStep shape,
     // so an entry gate can be a builtin or a GatePrompt just like an exit one.
-    IReadOnlyList<WorkflowStep>? EntryGates = null);
+    IReadOnlyList<WorkflowStep>? EntryGates = null,
+    // The single artifact this stage is expected to produce, if any — see WorkflowArtifact.
+    // Referenced by other stages' RequiresArtifact gates and by the <stage-name/artifact.file>
+    // placeholder in prompt text.
+    WorkflowArtifact? Artifact = null);
 
 public sealed record WorkflowStep(
     WorkflowStepKind Kind,
@@ -63,7 +87,10 @@ public sealed record WorkflowStep(
     string? ResponsibleRole = null,
     // Only used when Kind == RequiresSpecialist — the SpecialistRole.Name that must have a
     // recorded SpecialistConsultation for this stage run.
-    string? RequiredSpecialist = null);
+    string? RequiredSpecialist = null,
+    // Only used when Kind == RequiresArtifact — the name of the role whose declared Artifact
+    // must exist (and, if it declares ArtifactKind.Json, parse) for this gate to pass.
+    string? RequiredArtifactStage = null);
 
 public sealed record WorkflowChallenge(string Producer, string? AntagonistMode, string? LintBuiltin, int Attempts);
 
