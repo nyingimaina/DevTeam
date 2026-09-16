@@ -12,6 +12,15 @@ public sealed class WorkflowDefinitionLoader
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .Build();
 
+    // Deliberately NOT DefaultValuesHandling.OmitDefaults: YamlDotNet compares against the
+    // CLR type default (false for bool), not a property's own initializer default — several
+    // properties here (e.g. Opinionated) default to true, so an explicit false would be
+    // silently stripped as "same as unset" and revert to true on the next read.
+    private static readonly ISerializer Serializer = new SerializerBuilder()
+        .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull | DefaultValuesHandling.OmitEmptyCollections)
+        .Build();
+
     public WorkflowDefinition LoadDefault() => Convert(new WorkflowYaml(), challengesProvided: false);
 
     public WorkflowDefinition Load(string yamlText)
@@ -30,6 +39,30 @@ public sealed class WorkflowDefinitionLoader
 
         return Convert(parsed, challengesProvided);
     }
+
+    /// <summary>
+    /// Parses raw YAML into the mutable WorkflowYaml object model (rather than the validated,
+    /// immutable WorkflowDefinition Load() produces) — for callers that need to edit and
+    /// re-serialize a pipeline (see PipelineEditorService), not just execute it. Applies the
+    /// same "missing key keeps the default" semantics as Load().
+    /// </summary>
+    public WorkflowYaml ParseYamlObject(string? yamlText)
+    {
+        if (string.IsNullOrWhiteSpace(yamlText))
+            return new WorkflowYaml();
+
+        var rootKeys = GetRootKeys(yamlText);
+        var parsed = _deserializer.Deserialize<WorkflowYaml>(yamlText) ?? new WorkflowYaml();
+
+        if (!rootKeys.Contains("pipeline"))
+            parsed.Pipeline = WorkflowYaml.DefaultPipeline();
+        if (!rootKeys.Contains("challenges"))
+            parsed.Challenges = WorkflowYaml.DefaultChallenges();
+
+        return parsed;
+    }
+
+    public static string SerializeYamlObject(WorkflowYaml yaml) => Serializer.Serialize(yaml);
 
     private static HashSet<string> GetRootKeys(string yamlText)
     {

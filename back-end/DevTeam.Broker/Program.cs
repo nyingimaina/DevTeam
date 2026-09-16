@@ -69,6 +69,7 @@ public partial class Program
         });
         builder.Services.AddSingleton<IGateRunner, GateRunner>();
         builder.Services.AddSingleton<WorkflowDefinitionLoader>();
+        builder.Services.AddSingleton<PipelineEditorService>();
         builder.Services.AddScoped<IWorkflowEngine, WorkflowEngine>();
         builder.Services.AddSingleton<IGitService, GitService>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>

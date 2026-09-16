@@ -6,6 +6,7 @@ using DevTeam.Broker.Domain;
 using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
+using DevTeam.Broker.Workflow;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -1047,6 +1048,40 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var remaining = Assert.Single(list!);
         Assert.Equal(second.Id, remaining.Id);
         Assert.True(remaining.IsDefault);
+    }
+
+    [Fact]
+    public async Task WorkspacePipeline_GetThenPut_RoundTripsAReorderedPipelineThroughTheRealHttpApi()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-pipeline-api-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var client = _factory.CreateClient();
+
+        try
+        {
+            var loaded = await client.GetFromJsonAsync<PipelineEditorDto>(
+                $"/api/workspace/pipeline?workspacePath={Uri.EscapeDataString(workspace)}", JsonOptions);
+            Assert.Equal(["business-analyst", "developer", "qa"], loaded!.Roles.Select(r => r.Name).ToArray());
+
+            var reordered = new[] { loaded.Roles[2], loaded.Roles[1], loaded.Roles[0] };
+            var putResponse = await client.PutAsJsonAsync("/api/workspace/pipeline", new
+            {
+                workspacePath = workspace,
+                roles = reordered,
+            }, JsonOptions);
+            putResponse.EnsureSuccessStatusCode();
+
+            var afterPut = await putResponse.Content.ReadFromJsonAsync<PipelineEditorDto>(JsonOptions);
+            Assert.Equal(["qa", "developer", "business-analyst"], afterPut!.Roles.Select(r => r.Name).ToArray());
+
+            var reGet = await client.GetFromJsonAsync<PipelineEditorDto>(
+                $"/api/workspace/pipeline?workspacePath={Uri.EscapeDataString(workspace)}", JsonOptions);
+            Assert.Equal(["qa", "developer", "business-analyst"], reGet!.Roles.Select(r => r.Name).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
     }
 
     [Fact]

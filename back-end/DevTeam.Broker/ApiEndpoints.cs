@@ -283,6 +283,36 @@ public static class ApiEndpoints
             return Results.Ok(new WorkspaceProfileDto(settings.ProfileId));
         });
 
+        // ─── pipeline authoring (Part 2C) ───────────────────────────────────
+
+        app.MapGet("/api/workspace/pipeline", (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var editor = ctx.RequestServices.GetRequiredService<PipelineEditorService>();
+            return Results.Ok(editor.Load(workspacePath));
+        });
+
+        app.MapPut("/api/workspace/pipeline", (SavePipelineEditorRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+            if (request.Roles.Count == 0)
+                return Results.BadRequest("A pipeline must have at least one role.");
+
+            var editor = ctx.RequestServices.GetRequiredService<PipelineEditorService>();
+            try
+            {
+                editor.Save(request.WorkspacePath, request.Roles);
+            }
+            catch (WorkflowConfigurationException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+            return Results.Ok(editor.Load(request.WorkspacePath));
+        });
+
         // ─── feature-scoped pipeline endpoints (GitFlow) ───────────────────
         app.MapPost("/api/features/{featureId:guid}/start-stage", async (Guid featureId, HttpContext ctx) =>
         {
