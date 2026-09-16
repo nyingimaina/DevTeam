@@ -1,0 +1,116 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.error {
+  color: var(--zest-color-danger-bg, #dc2626);
+}
+
+.hint {
+  font-size: 0.85em;
+  color: var(--text-muted, #888);
+}
+
+.roleList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.roleCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.roleHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.roleName {
+  font-weight: 600;
+}
+
+.roleControls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.inlineLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9em;
+}
+
+.stepSummary {
+  font-size: 0.85em;
+  color: var(--text-muted, #888);
+}
+
+.gateEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border-color, #333);
+  padding-top: 8px;
+}
+
+.gateEditorLabel {
+  font-weight: 500;
+  font-size: 0.9em;
+}
+
+.gateEditorHint {
+  font-size: 0.8em;
+  color: var(--text-muted, #888);
+}
+
+.gateEditorEmpty {
+  font-size: 0.85em;
+  color: var(--text-muted, #888);
+}
+
+.gateList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gateRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gateText {
+  flex: 1 1 auto;
+  min-width: 160px;
+  font-size: 0.9em;
+}
+
+.gateAddRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.newRole {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}

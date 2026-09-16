@@ -335,6 +335,29 @@ export interface WorkspaceProfileDto {
   profileId: string | null;
 }
 
+// ─── pipeline authoring (Part 2C) ────────────────────────────────────────────
+
+export interface GateStepEditorDto {
+  kind: "builtin" | "gatePrompt";
+  builtin?: string | null;
+  gatePromptText?: string | null;
+  responsibleRole?: string | null;
+}
+
+export interface PipelineEditorRoleDto {
+  name: string;
+  writesCode: boolean;
+  signoff?: string | null;
+  userInputRequired: boolean;
+  stepSummary: string[];
+  entryGates: GateStepEditorDto[];
+  exitGatePrompts: GateStepEditorDto[];
+}
+
+export interface PipelineEditorDto {
+  roles: PipelineEditorRoleDto[];
+}
+
 export interface StagePromptResult {
   response: string;
   inputTokens: number;

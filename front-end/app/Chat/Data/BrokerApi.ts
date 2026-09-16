@@ -10,6 +10,8 @@ import {
   HealthResponse,
   MessageDto,
   ModelOption,
+  PipelineEditorDto,
+  PipelineEditorRoleDto,
   PipelineStageDto,
   ProfileDto,
   ReleaseDto,
@@ -240,6 +242,19 @@ export default class BrokerApi {
 
   getWorkspaceProfileAsync(workspacePath: string): Promise<WorkspaceProfileDto> {
     return this.requestAsync<WorkspaceProfileDto>(`/api/workspace/profile?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  // ─── pipeline authoring ─────────────────────────────────────────────────
+
+  getWorkspacePipelineAsync(workspacePath: string): Promise<PipelineEditorDto> {
+    return this.requestAsync<PipelineEditorDto>(`/api/workspace/pipeline?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  saveWorkspacePipelineAsync(workspacePath: string, roles: PipelineEditorRoleDto[]): Promise<PipelineEditorDto> {
+    return this.requestAsync<PipelineEditorDto>("/api/workspace/pipeline", {
+      method: "PUT",
+      body: JSON.stringify({ workspacePath, roles }),
+    });
   }
 
   setWorkspaceProfileAsync(workspacePath: string, profileId: string): Promise<WorkspaceProfileDto> {
