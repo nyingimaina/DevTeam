@@ -1503,13 +1503,16 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
     /// <summary>
     /// Resolves the named stage's declared Artifact to its real path — always
-    /// &lt;resolved root&gt;/&lt;stage name&gt;/&lt;fileName&gt; (see WorkflowArtifact). Returns
-    /// the on-disk path if it already exists (tolerant of filesystem case differences via
-    /// FileSystemLookup) or the expected path otherwise, so a "not found" gate failure can
-    /// still report where it looked. Returns null if the named stage has no declared artifact
-    /// (callers only reach this after load-time validation has already ruled that out for
-    /// RequiresArtifact steps, but GatePromptText placeholders aren't load-time validated the
-    /// same way, so this stays defensive).
+    /// &lt;resolved root&gt;/&lt;fileName&gt; (see WorkflowArtifact). No per-stage subfolder: the
+    /// filename itself is expected to already be stage-specific (the pipeline editor derives
+    /// it as "&lt;stage-key&gt;.&lt;ext&gt;"), and WorkflowDefinitionLoader's
+    /// ValidateArtifactUniqueness rejects two roles sharing the same (Root, FileName) pair, so
+    /// a flat layout can't collide. Returns the on-disk path if it already exists (tolerant of
+    /// filesystem case differences via FileSystemLookup) or the expected path otherwise, so a
+    /// "not found" gate failure can still report where it looked. Returns null if the named
+    /// stage has no declared artifact (callers only reach this after load-time validation has
+    /// already ruled that out for RequiresArtifact steps, but GatePromptText placeholders
+    /// aren't load-time validated the same way, so this stays defensive).
     /// </summary>
     private static string? ResolveStageArtifactPath(string stageName, WorkflowDefinition workflow, string workspacePath, string featureKey)
     {
@@ -1518,9 +1521,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
             return null;
 
         var rootDir = ResolveRootDirectory(role.Artifact.Root, workflow, workspacePath, featureKey);
-        var stageDir = FileSystemLookup.FindEntry(rootDir, stageName) ?? Path.Combine(rootDir, stageName);
-        var found = FileSystemLookup.FindEntry(stageDir, role.Artifact.FileName);
-        return found ?? Path.Combine(stageDir, role.Artifact.FileName);
+        var found = FileSystemLookup.FindEntry(rootDir, role.Artifact.FileName);
+        return found ?? Path.Combine(rootDir, role.Artifact.FileName);
     }
 
     /// <summary>

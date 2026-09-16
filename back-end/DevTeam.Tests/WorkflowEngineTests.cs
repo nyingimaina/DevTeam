@@ -970,7 +970,7 @@ public class WorkflowEngineTests : IDisposable
 
         try
         {
-            var artifactDir = Path.Combine(workspace, "docs", "code-map");
+            var artifactDir = Path.Combine(workspace, "docs");
             Directory.CreateDirectory(artifactDir);
             File.WriteAllText(Path.Combine(artifactDir, "codemap.md"), "# Code Map\n");
 
@@ -1012,7 +1012,7 @@ public class WorkflowEngineTests : IDisposable
 
         try
         {
-            var artifactDir = Path.Combine(workspace, "docs", "code-map");
+            var artifactDir = Path.Combine(workspace, "docs");
             Directory.CreateDirectory(artifactDir);
             var artifactPath = Path.Combine(artifactDir, "codemap.json");
             File.WriteAllText(artifactPath, "{ not valid json");
@@ -1123,7 +1123,7 @@ public class WorkflowEngineTests : IDisposable
             Assert.Contains("Feature feat-001:", gatePrompt);
             Assert.Contains(Path.Combine(workspace, "docs"), gatePrompt);
             Assert.Contains(ArtifactPaths.FeatureDir(workspace, "feat-001"), gatePrompt);
-            Assert.Contains(Path.Combine(workspace, "docs", "code-map", "codemap.json"), gatePrompt);
+            Assert.Contains(Path.Combine(workspace, "docs", "codemap.json"), gatePrompt);
             Assert.DoesNotContain("<F>", gatePrompt);
             Assert.DoesNotContain("<docs-root>", gatePrompt);
         }

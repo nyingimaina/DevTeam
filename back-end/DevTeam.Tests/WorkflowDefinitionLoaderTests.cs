@@ -247,6 +247,28 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void Load_TwoRolesDeclaringTheSameRootAndFileName_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              code-map:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                agent: { mode: code-map }
+              other-mapper:
+                artifact:
+                  root: docs-root
+                  fileName: codemap.json
+                agent: { mode: other-mapper }
+            """;
+        var exception = Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+        Assert.Contains("code-map", exception.Message);
+        Assert.Contains("other-mapper", exception.Message);
+    }
+
+    [Fact]
     public void Load_DocsRootDefaultsToDocsAndCanBeOverridden()
     {
         Assert.Equal("docs", LoadDefault().DocsRoot);

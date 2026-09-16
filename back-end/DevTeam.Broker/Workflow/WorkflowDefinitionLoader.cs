@@ -81,6 +81,7 @@ public sealed class WorkflowDefinitionLoader
         var pipeline = BuildPipeline(yaml, errors);
         var challenges = BuildChallenges(yaml, pipeline.Select(r => r.Name).ToHashSet(), challengesProvided, errors);
         ValidateArtifactReferences(pipeline, errors);
+        ValidateArtifactUniqueness(pipeline, errors);
 
         if (errors.Count > 0)
             throw new WorkflowConfigurationException(
@@ -188,6 +189,24 @@ public sealed class WorkflowDefinitionLoader
                 else if (artifact is null)
                     errors.Add($"role '{role.Name}' references artifact stage '{target}', which has no declared artifact");
             }
+        }
+    }
+
+    // A stage's Artifact resolves to a flat <root>/<fileName> path (see
+    // WorkflowEngine.ResolveStageArtifactPath) with no automatic per-stage subfolder, so two
+    // roles declaring the same (Root, FileName) pair would silently collide on disk — reject
+    // that at load time rather than let one role's artifact overwrite another's.
+    private static void ValidateArtifactUniqueness(IReadOnlyList<WorkflowRole> roles, List<string> errors)
+    {
+        var byLocation = roles
+            .Where(r => r.Artifact is not null)
+            .GroupBy(r => (r.Artifact!.Root, r.Artifact.FileName));
+
+        foreach (var group in byLocation)
+        {
+            if (group.Count() <= 1) continue;
+            var names = string.Join(", ", group.Select(r => r.Name));
+            errors.Add($"roles {names} all declare the same artifact location ('{group.Key.Root}/{group.Key.FileName}') — each stage's artifact must be unique");
         }
     }
 
