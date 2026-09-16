@@ -201,6 +201,7 @@ public sealed class ReleaseStageRun
     public List<ReleaseGateCheck> GateChecks { get; set; } = [];
     public List<ReviewFinding> Findings { get; set; } = [];
     public List<ReleaseGuidanceNote> GuidanceNotes { get; set; } = [];
+    public List<SpecialistConsultation> SpecialistConsultations { get; set; } = [];
 }
 
 public sealed class ReleaseGateCheck

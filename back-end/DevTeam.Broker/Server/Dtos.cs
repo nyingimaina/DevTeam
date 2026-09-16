@@ -144,3 +144,11 @@ public sealed record UpdateProfileRequest(string Name, string? Description, IRea
 public sealed record WorkspaceProfileDto(Guid? ProfileId);
 
 public sealed record SetWorkspaceProfileRequest(string WorkspacePath, Guid ProfileId);
+
+// ─── specialists ──────────────────────────────────────────────────────────────
+
+public sealed record SpecialistRoleDto(Guid Id, string Name, string Description, string PrimingPrompt, bool WritesCode);
+
+public sealed record SaveSpecialistRoleRequest(string Name, string Description, string PrimingPrompt, bool WritesCode);
+
+public sealed record SpecialistConsultationDto(Guid Id, Guid StageRunId, string SpecialistName, string Question, string ResponseText, DateTimeOffset CreatedAt);

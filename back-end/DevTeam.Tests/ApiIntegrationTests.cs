@@ -1084,6 +1084,59 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         }
     }
 
+    private async Task ClearSpecialistsAsync()
+    {
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+        await using var db = await dbFactory.CreateDbContextAsync();
+        db.SpecialistRoles.RemoveRange(db.SpecialistRoles);
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task Specialists_CreateUpdateDelete_RoundTripsThroughTheRealHttpApi()
+    {
+        await ClearSpecialistsAsync();
+        var client = _factory.CreateClient();
+
+        var created = await (await client.PostAsJsonAsync("/api/specialists", new
+        {
+            name = "database-admin",
+            description = "Knows how to prepare a safe production migration.",
+            primingPrompt = "You are a database administrator...",
+            writesCode = false,
+        })).Content.ReadFromJsonAsync<SpecialistRoleDto>(JsonOptions);
+        Assert.Equal("database-admin", created!.Name);
+
+        var duplicate = await client.PostAsJsonAsync("/api/specialists", new
+        {
+            name = "database-admin",
+            description = "",
+            primingPrompt = "",
+            writesCode = false,
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, duplicate.StatusCode);
+
+        var updateResponse = await client.PutAsJsonAsync($"/api/specialists/{created.Id}", new
+        {
+            name = "database-admin",
+            description = "Updated description.",
+            primingPrompt = "Updated prompt.",
+            writesCode = true,
+        });
+        updateResponse.EnsureSuccessStatusCode();
+        var updated = await updateResponse.Content.ReadFromJsonAsync<SpecialistRoleDto>(JsonOptions);
+        Assert.Equal("Updated description.", updated!.Description);
+        Assert.True(updated.WritesCode);
+
+        var list = await client.GetFromJsonAsync<SpecialistRoleDto[]>("/api/specialists", JsonOptions);
+        Assert.Single(list!);
+
+        var delete = await client.DeleteAsync($"/api/specialists/{created.Id}");
+        delete.EnsureSuccessStatusCode();
+        var afterDelete = await client.GetFromJsonAsync<SpecialistRoleDto[]>("/api/specialists", JsonOptions);
+        Assert.Empty(afterDelete!);
+    }
+
     [Fact]
     public async Task WorkspaceProfile_WithNoExplicitSetting_ResolvesToAndPersistsTheGlobalDefault()
     {

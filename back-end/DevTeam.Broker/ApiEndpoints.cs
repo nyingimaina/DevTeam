@@ -244,6 +244,73 @@ public static class ApiEndpoints
             return Results.Ok(ToProfileDto(target));
         });
 
+        // ─── specialists (on-demand delegates any stage can consult — Part 3) ──
+
+        static SpecialistRoleDto ToSpecialistDto(SpecialistRole s) => new(s.Id, s.Name, s.Description, s.PrimingPrompt, s.WritesCode);
+
+        app.MapGet("/api/specialists", async (HttpContext ctx) =>
+        {
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var specialists = await context.SpecialistRoles.OrderBy(s => s.Name).ToListAsync(ctx.RequestAborted);
+            return Results.Ok(specialists.Select(ToSpecialistDto).ToArray());
+        });
+
+        app.MapPost("/api/specialists", async (SaveSpecialistRoleRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return Results.BadRequest("Name is required.");
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            if (await context.SpecialistRoles.AnyAsync(s => s.Name == request.Name, ctx.RequestAborted))
+                return Results.BadRequest($"A specialist named '{request.Name}' already exists.");
+
+            var specialist = new SpecialistRole
+            {
+                Name = request.Name,
+                Description = request.Description,
+                PrimingPrompt = request.PrimingPrompt,
+                WritesCode = request.WritesCode,
+            };
+            context.SpecialistRoles.Add(specialist);
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToSpecialistDto(specialist));
+        });
+
+        app.MapPut("/api/specialists/{id:guid}", async (Guid id, SaveSpecialistRoleRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return Results.BadRequest("Name is required.");
+
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var specialist = await context.SpecialistRoles.FirstOrDefaultAsync(s => s.Id == id, ctx.RequestAborted);
+            if (specialist is null) return Results.NotFound();
+
+            if (await context.SpecialistRoles.AnyAsync(s => s.Name == request.Name && s.Id != id, ctx.RequestAborted))
+                return Results.BadRequest($"A specialist named '{request.Name}' already exists.");
+
+            specialist.Name = request.Name;
+            specialist.Description = request.Description;
+            specialist.PrimingPrompt = request.PrimingPrompt;
+            specialist.WritesCode = request.WritesCode;
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToSpecialistDto(specialist));
+        });
+
+        app.MapDelete("/api/specialists/{id:guid}", async (Guid id, HttpContext ctx) =>
+        {
+            var db = ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>();
+            await using var context = await db.CreateDbContextAsync(ctx.RequestAborted);
+            var specialist = await context.SpecialistRoles.FirstOrDefaultAsync(s => s.Id == id, ctx.RequestAborted);
+            if (specialist is null) return Results.NotFound();
+
+            context.SpecialistRoles.Remove(specialist);
+            await context.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(new { ok = true });
+        });
+
         app.MapGet("/api/workspace/profile", async (string workspacePath, HttpContext ctx) =>
         {
             if (string.IsNullOrWhiteSpace(workspacePath))

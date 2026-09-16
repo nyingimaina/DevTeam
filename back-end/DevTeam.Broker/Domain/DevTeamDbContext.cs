@@ -30,6 +30,8 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<Profile> Profiles => Set<Profile>();
     public DbSet<ProfilePrompt> ProfilePrompts => Set<ProfilePrompt>();
     public DbSet<WorkspaceProfileSettings> WorkspaceProfileSettings => Set<WorkspaceProfileSettings>();
+    public DbSet<SpecialistRole> SpecialistRoles => Set<SpecialistRole>();
+    public DbSet<SpecialistConsultation> SpecialistConsultations => Set<SpecialistConsultation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -107,6 +109,28 @@ public sealed class DevTeamDbContext : DbContext
         modelBuilder.Entity<WorkspaceProfileSettings>(settings =>
         {
             settings.HasKey(e => e.WorkspacePath);
+        });
+
+        modelBuilder.Entity<SpecialistRole>(specialist =>
+        {
+            specialist.HasKey(e => e.Id);
+            specialist.Property(e => e.Name).IsRequired().HasMaxLength(256);
+            specialist.HasIndex(e => e.Name).IsUnique();
+            specialist.Property(e => e.Description).HasColumnType("TEXT");
+            specialist.Property(e => e.PrimingPrompt).HasColumnType("TEXT");
+            specialist.Property(e => e.WritesCode).HasDefaultValue(false);
+        });
+
+        modelBuilder.Entity<SpecialistConsultation>(consultation =>
+        {
+            consultation.HasKey(e => e.Id);
+            consultation.HasOne(e => e.StageRun)
+                .WithMany(sr => sr.SpecialistConsultations)
+                .HasForeignKey(e => e.StageRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+            consultation.Property(e => e.SpecialistName).IsRequired().HasMaxLength(256);
+            consultation.Property(e => e.Question).HasColumnType("TEXT");
+            consultation.Property(e => e.ResponseText).HasColumnType("TEXT");
         });
     }
 
