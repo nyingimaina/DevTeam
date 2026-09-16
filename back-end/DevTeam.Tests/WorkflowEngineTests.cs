@@ -822,6 +822,97 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_RequiresSpecialistExitGate_BlocksWhenNoConsultationIsOnRecord()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                steps:
+                  - agent: { mode: researcher }
+                  - requiresSpecialist: database-admin
+            """);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "researcher");
+            Assert.Equal(ReleaseStageStatus.BlockedGate, stageRun.Status);
+            var gateCheck = stageRun.GateChecks.Single(gc => gc.Name == "requires_specialist:database-admin");
+            Assert.False(gateCheck.Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_RequiresSpecialistExitGate_PassesOnceTheAgentDelegatesWithinTheSameStageRun()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-requires-specialist-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                signoff: reviewed
+                steps:
+                  - agent: { mode: researcher }
+                  - requiresSpecialist: database-admin
+            """);
+
+        try
+        {
+            var featureDir = Path.Combine(workspace, "devteam", "features", "feat-001");
+            Directory.CreateDirectory(featureDir);
+
+            var specialistSessionId = Guid.NewGuid();
+            await using (var db = CreateFactory().CreateDbContext())
+            {
+                db.SpecialistRoles.Add(new SpecialistRole { Name = "database-admin", Description = "DB expert", PrimingPrompt = "You are a DBA." });
+                db.Sessions.Add(new DevTeamSession { Id = specialistSessionId, WorkspacePath = workspace, AcpSessionId = "acp-dba" });
+                db.Messages.Add(new Message { SessionId = specialistSessionId, Role = "assistant", BodyText = "Add it nullable, backfill, then add the NOT NULL constraint." });
+                await db.SaveChangesAsync();
+            }
+
+            // Pre-seeded so PromptWithDelegationAsync's post-prompt check sees it right after
+            // the researcher's own first turn — simulating the agent writing it and ending its
+            // turn, same convention the Part 3B delegation tests already rely on.
+            File.WriteAllText(Path.Combine(featureDir, "delegate-request.json"),
+                """{"role": "database-admin", "question": "How do I add a NOT NULL column safely?"}""");
+            _coordinator.SessionIdsToReturn.Enqueue(Guid.NewGuid());
+            _coordinator.SessionIdsToReturn.Enqueue(specialistSessionId);
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "researcher");
+            var gateCheck = stageRun.GateChecks.Single(gc => gc.Name == "requires_specialist:database-admin");
+            Assert.True(gateCheck.Passed);
+            Assert.NotEqual(ReleaseStageStatus.BlockedGate, stageRun.Status);
+
+            await using var verifyDb = CreateFactory().CreateDbContext();
+            var consultation = await verifyDb.SpecialistConsultations.SingleAsync();
+            Assert.Equal(stageRun.Id, consultation.StageRunId);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunStage_QaGateFailureWithResponsibleRoleDeveloper_RoutesBackToDeveloperInsteadOfLoopingQa()
     {
         var engine = CreateEngine();

@@ -168,6 +168,10 @@ public sealed class StepYaml
     // A user-authored, LLM-graded check — see WorkflowStepKind.GatePrompt.
     public string? GatePrompt { get; set; }
 
+    // A deterministic "has this specialist been consulted yet" check — see
+    // WorkflowStepKind.RequiresSpecialist. Value is the SpecialistRole.Name required.
+    public string? RequiresSpecialist { get; set; }
+
     // See WorkflowStep.ResponsibleRole.
     public string? ResponsibleRole { get; set; }
 }

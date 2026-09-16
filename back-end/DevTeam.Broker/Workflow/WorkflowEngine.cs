@@ -706,6 +706,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     break;
                 case WorkflowStepKind.Builtin:
                 case WorkflowStepKind.GatePrompt:
+                case WorkflowStepKind.RequiresSpecialist:
                     var builtin = await ExecuteStepAsync(step, role, featureKey, workspacePath, stageRun, db, ct);
                     db.ReleaseGateChecks.Add(new ReleaseGateCheck
                     {
@@ -1052,6 +1053,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     break;
                 case WorkflowStepKind.Loop:
                     names.AddRange(FlattenStepNames(step.LoopSteps ?? []));
+                    break;
+                case WorkflowStepKind.GatePrompt:
+                    names.Add($"gate_prompt:{Truncate(step.GatePromptText ?? string.Empty, 20)}");
+                    break;
+                case WorkflowStepKind.RequiresSpecialist:
+                    names.Add($"requires_specialist:{step.RequiredSpecialist}");
                     break;
             }
         }
@@ -1691,6 +1698,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 role.Name,
                 $"Gate prompt found issues with {role.Name}'s work.",
                 stageRun, workspacePath, db, ct),
+            WorkflowStepKind.RequiresSpecialist => await ExecuteRequiresSpecialistAsync(step.RequiredSpecialist!, stageRun, db, ct),
             _ => throw new InvalidOperationException($"Unknown step kind: {step.Kind}"),
         };
         return result with { ResponsibleRole = step.ResponsibleRole ?? result.ResponsibleRole };
@@ -1704,6 +1712,28 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: await BuildBuiltinInputsAsync(gateName, featureKey, workspacePath, ct));
         var result = await _gateRunner.RunAsync(gateName, request, ct);
         return new StepExecutionResult { StepName = gateName, Passed = result.Passed, Reason = result.Reason, Evidence = result.EvidenceText };
+    }
+
+    /// <summary>
+    /// Makes delegation (Part 3) enforceable instead of purely advisory: passes only if a
+    /// SpecialistConsultation already exists for this exact stage run and the named
+    /// specialist. Deterministic — a plain DB fact, not LLM-graded like GatePrompt.
+    /// </summary>
+    private static async Task<StepExecutionResult> ExecuteRequiresSpecialistAsync(
+        string specialistName, ReleaseStageRun stageRun, DevTeamDbContext db, CancellationToken ct)
+    {
+        var consulted = await db.SpecialistConsultations
+            .AnyAsync(c => c.StageRunId == stageRun.Id && c.SpecialistName == specialistName, ct);
+
+        return new StepExecutionResult
+        {
+            StepName = $"requires_specialist:{specialistName}",
+            Passed = consulted,
+            Reason = consulted ? null : $"{specialistName} has not been consulted yet for this stage run.",
+            Evidence = consulted
+                ? $"A consultation with {specialistName} is on record for this stage run."
+                : $"Write devteam/features/<F>/delegate-request.json with role \"{specialistName}\" to consult them before this can pass.",
+        };
     }
 
     private static async Task<IReadOnlyDictionary<string, string>> BuildBuiltinInputsAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)

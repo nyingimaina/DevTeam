@@ -10,6 +10,11 @@ public enum WorkflowStepKind
     // generalized to run at any position (entry or exit) on any role, not just one fixed
     // post-hoc slot per producer.
     GatePrompt,
+    // A deterministic check (not LLM-graded, unlike GatePrompt): passes only if a
+    // SpecialistConsultation already exists for this stage run and the named specialist —
+    // makes delegation (Part 3) enforceable instead of purely advisory, e.g. "this stage
+    // can't finish until database-admin has been consulted."
+    RequiresSpecialist,
 }
 
 public sealed record WorkflowDefinition(
@@ -55,7 +60,10 @@ public sealed record WorkflowStep(
     // (today's implicit behavior) when unset. Set to a different role when the gate checks
     // something only that other role can actually fix (e.g. QA's verify_code failing because
     // the developer didn't write tests — QA cannot author tests itself).
-    string? ResponsibleRole = null);
+    string? ResponsibleRole = null,
+    // Only used when Kind == RequiresSpecialist — the SpecialistRole.Name that must have a
+    // recorded SpecialistConsultation for this stage run.
+    string? RequiredSpecialist = null);
 
 public sealed record WorkflowChallenge(string Producer, string? AntagonistMode, string? LintBuiltin, int Attempts);
 

@@ -84,6 +84,42 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void Load_ParsesRequiresSpecialistStepsAsEntryOrExitGates()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              developer:
+                entryGates:
+                  - requiresSpecialist: business-analyst-reviewer
+                steps:
+                  - agent: { mode: developer }
+                  - requiresSpecialist: database-admin
+            """;
+        var role = Load(yaml).Pipeline.Single();
+
+        var entryGate = Assert.Single(role.EntryGates!);
+        Assert.Equal(WorkflowStepKind.RequiresSpecialist, entryGate.Kind);
+        Assert.Equal("business-analyst-reviewer", entryGate.RequiredSpecialist);
+
+        var exitGate = role.Steps.Single(s => s.Kind == WorkflowStepKind.RequiresSpecialist);
+        Assert.Equal("database-admin", exitGate.RequiredSpecialist);
+    }
+
+    [Fact]
+    public void Load_RequiresSpecialistStepWithoutAName_Throws()
+    {
+        const string yaml = """
+            opinionated: false
+            pipeline:
+              developer:
+                steps:
+                  - requiresSpecialist: ""
+            """;
+        Assert.Throws<WorkflowConfigurationException>(() => Load(yaml));
+    }
+
+    [Fact]
     public void LoadDefault_DefinesChallengePairs()
     {
         var definition = LoadDefault();

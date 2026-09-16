@@ -179,18 +179,18 @@ public sealed class WorkflowDefinitionLoader
 
     private static WorkflowStep? ConvertStep(string roleName, StepYaml step, int index, List<string> errors)
     {
-        var set = new[] { step.Builtin is not null, step.Agent is not null, step.Loop is not null, step.GatePrompt is not null }
+        var set = new[] { step.Builtin is not null, step.Agent is not null, step.Loop is not null, step.GatePrompt is not null, step.RequiresSpecialist is not null }
             .Count(v => v);
 
         if (set == 0)
         {
-            errors.Add($"role '{roleName}' step #{index + 1} must define one of 'builtin', 'agent', 'loop' or 'gatePrompt'");
+            errors.Add($"role '{roleName}' step #{index + 1} must define one of 'builtin', 'agent', 'loop', 'gatePrompt' or 'requiresSpecialist'");
             return null;
         }
 
         if (set > 1)
         {
-            errors.Add($"role '{roleName}' step #{index + 1} must define exactly one of 'builtin', 'agent', 'loop' or 'gatePrompt'");
+            errors.Add($"role '{roleName}' step #{index + 1} must define exactly one of 'builtin', 'agent', 'loop', 'gatePrompt' or 'requiresSpecialist'");
             return null;
         }
 
@@ -218,6 +218,16 @@ public sealed class WorkflowDefinitionLoader
                 errors.Add($"role '{roleName}' step #{index + 1} gatePrompt must be non-empty");
 
             return new WorkflowStep(WorkflowStepKind.GatePrompt, null, null, null, null, step.GatePrompt, step.ResponsibleRole);
+        }
+
+        if (step.RequiresSpecialist is not null)
+        {
+            if (string.IsNullOrWhiteSpace(step.RequiresSpecialist))
+                errors.Add($"role '{roleName}' step #{index + 1} requiresSpecialist must be non-empty");
+
+            return new WorkflowStep(
+                WorkflowStepKind.RequiresSpecialist, null, null, null, null,
+                ResponsibleRole: step.ResponsibleRole, RequiredSpecialist: step.RequiresSpecialist);
         }
 
         var attempts = step.Loop!.Attempts ?? 3;
