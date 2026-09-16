@@ -42,6 +42,7 @@ public sealed class PipelineEditorService
             role.WritesCode = roleDto.WritesCode;
             role.Signoff = roleDto.Signoff;
             role.UserInputRequired = roleDto.UserInputRequired;
+            role.SeedPrompt = roleDto.SeedPrompt;
             role.EntryGates = roleDto.EntryGates.Select(ToStepYaml).ToList();
             role.Artifact = roleDto.Artifact is null
                 ? null
@@ -96,7 +97,8 @@ public sealed class PipelineEditorService
         FlattenStepNames(role.Steps),
         role.EntryGates.Where(IsEditorOwnedGate).Select(ToGateDto).ToList(),
         role.Steps.Where(s => s.GatePrompt is not null || s.RequiresSpecialist is not null || s.RequiresArtifact is not null).Select(ToGateDto).ToList(),
-        ToArtifactDto(role.Artifact));
+        ToArtifactDto(role.Artifact),
+        role.SeedPrompt);
 
     private static bool IsEditorOwnedGate(StepYaml s) =>
         s.Builtin is not null || s.GatePrompt is not null || s.RequiresSpecialist is not null || s.RequiresArtifact is not null;

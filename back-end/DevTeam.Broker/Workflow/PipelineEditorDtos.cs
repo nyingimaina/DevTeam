@@ -29,7 +29,12 @@ public sealed record PipelineEditorRoleDto(
     IReadOnlyList<string> StepSummary,
     IReadOnlyList<GateStepEditorDto> EntryGates,
     IReadOnlyList<GateStepEditorDto> ExitGatePrompts,
-    ArtifactEditorDto? Artifact = null);
+    ArtifactEditorDto? Artifact = null,
+    // Text spliced into this role's opening prompt (with <F>/root/artifact placeholders
+    // resolved) — see WorkflowRole.SeedPrompt. This is what actually determines what the
+    // stage does; without it a role only gets the generic "produce the required artifacts"
+    // fallback.
+    string? SeedPrompt = null);
 
 public sealed record PipelineEditorDto(IReadOnlyList<PipelineEditorRoleDto> Roles);
 

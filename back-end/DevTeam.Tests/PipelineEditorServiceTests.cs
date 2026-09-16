@@ -185,6 +185,43 @@ public class PipelineEditorServiceTests
     }
 
     [Fact]
+    public void Load_ExposesTheDefaultBusinessAnalystSeedPrompt()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            var ba = CreateService().Load(workspace).Roles.Single(r => r.Name == "business-analyst");
+            Assert.Contains("BRS", ba.SeedPrompt);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Save_RoundTripsSeedPromptOnACustomRole()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            var service = CreateService();
+            var codeMap = new PipelineEditorRoleDto(
+                "code-map", WritesCode: false, Signoff: null, UserInputRequired: false,
+                StepSummary: [], EntryGates: [], ExitGatePrompts: [],
+                SeedPrompt: "Scan the codebase and emit its module graph.");
+            service.Save(workspace, [codeMap]);
+
+            var updated = service.Load(workspace).Roles.Single(r => r.Name == "code-map");
+            Assert.Equal("Scan the codebase and emit its module graph.", updated.SeedPrompt);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Save_RoundTripsADeclaredArtifactAndARequiresArtifactExitGate()
     {
         var workspace = CreateWorkspace();
