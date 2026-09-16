@@ -1,9 +1,10 @@
 "use client";
 import React, { useCallback, useEffect, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
-import { GateStepEditorDto, PipelineEditorRoleDto } from "../../Chat/Data/BrokerTypes";
+import { ArtifactEditorDto, ArtifactRootKey, GateStepEditorDto, PipelineEditorRoleDto } from "../../Chat/Data/BrokerTypes";
 import ZestButton from "jattac.libs.web.zest-button";
 import ZestTextbox from "jattac.libs.web.zest-textbox";
+import SelectWrapper from "../../Forms/SelectWrapper/UI/SelectWrapper";
 import { stageLabel } from "../Release/labels";
 import styles from "../Styles/PipelineView.module.css";
 
@@ -12,8 +13,43 @@ function toErrorMessage(error: unknown): string {
 }
 
 function emptyRole(name: string): PipelineEditorRoleDto {
-  return { name, writesCode: false, signoff: null, userInputRequired: false, stepSummary: [], entryGates: [], exitGatePrompts: [] };
+  return { name, writesCode: false, signoff: null, userInputRequired: false, stepSummary: [], entryGates: [], exitGatePrompts: [], artifact: null };
 }
+
+// A novice pipeline author types a human-readable title ("Code Mapping"); the stage's actual
+// key — used everywhere else (requiresArtifact/requiresSpecialist targets, responsible-role
+// pickers, placeholder tokens) — is auto-generated from it rather than hand-typed, so it's
+// always well-formed and safe to pick from a dropdown elsewhere.
+function slugify(title: string): string {
+  const slug = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "stage";
+}
+
+function uniqueStageKey(title: string, existingNames: string[]): string {
+  const base = slugify(title);
+  if (!existingNames.includes(base)) return base;
+  let suffix = 2;
+  while (existingNames.includes(`${base}-${suffix}`)) suffix += 1;
+  return `${base}-${suffix}`;
+}
+
+// react-select (via SelectWrapper) inspects each item with the `in` operator, which throws on
+// primitive strings — options must be objects (see ProfilesView's IStageOption for the same
+// convention).
+interface INamedOption {
+  name: string;
+  label: string;
+}
+
+const ARTIFACT_ROOT_OPTIONS: INamedOption[] = [
+  { name: "docs-root", label: "Docs root (workspace-wide)" },
+  { name: "feature-docs-root", label: "Feature docs root" },
+  { name: "feature-code-root-back", label: "Feature code root (back-end)" },
+  { name: "feature-code-root-front", label: "Feature code root (front-end)" },
+  { name: "workspace-root", label: "Workspace root" },
+];
+
+const RESPONSIBLE_ROLE_DEFAULT = "";
 
 interface IPipelineViewProps {
   api: BrokerApi;
@@ -23,15 +59,20 @@ interface IPipelineViewProps {
 
 export default function PipelineView({ api, workspacePath, testIdPrefix = "pipeline" }: IPipelineViewProps) {
   const [roles, setRoles] = useState<PipelineEditorRoleDto[]>([]);
-  const [newName, setNewName] = useState("");
+  const [specialistNames, setSpecialistNames] = useState<string[]>([]);
+  const [newTitle, setNewTitle] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const data = await api.getWorkspacePipelineAsync(workspacePath);
-      setRoles(data.roles);
+      const [pipeline, specialists] = await Promise.all([
+        api.getWorkspacePipelineAsync(workspacePath),
+        api.getSpecialistsAsync(),
+      ]);
+      setRoles(pipeline.roles);
+      setSpecialistNames(specialists.map((s) => s.name));
     } catch (e) {
       setError(toErrorMessage(e));
     }
@@ -58,11 +99,12 @@ export default function PipelineView({ api, workspacePath, testIdPrefix = "pipel
   }, []);
 
   const addRole = useCallback(() => {
-    const name = newName.trim();
-    if (!name) return;
-    setRoles((prev) => [...prev, emptyRole(name)]);
-    setNewName("");
-  }, [newName]);
+    const title = newTitle.trim();
+    if (!title) return;
+    const key = uniqueStageKey(title, roles.map((r) => r.name));
+    setRoles((prev) => [...prev, emptyRole(key)]);
+    setNewTitle("");
+  }, [newTitle, roles]);
 
   const handleSave = useCallback(async () => {
     setLoading(true);
@@ -76,6 +118,10 @@ export default function PipelineView({ api, workspacePath, testIdPrefix = "pipel
       setLoading(false);
     }
   }, [api, workspacePath, roles]);
+
+  const roleNames = roles.map((r) => r.name);
+  const artifactStageNames = roles.filter((r) => r.artifact != null).map((r) => r.name);
+  const generatedKey = newTitle.trim() ? uniqueStageKey(newTitle, roleNames) : "";
 
   return (
     <div className={styles.container} data-testid={testIdPrefix}>
@@ -135,12 +181,22 @@ export default function PipelineView({ api, workspacePath, testIdPrefix = "pipel
               Steps: {role.stepSummary.length > 0 ? role.stepSummary.join(" → ") : "(none yet — runs as a plain agent turn)"}
             </div>
 
+            <ArtifactEditor
+              artifact={role.artifact ?? null}
+              stageName={role.name}
+              onChange={(artifact) => updateRole(index, { artifact })}
+              testIdPrefix={`${testIdPrefix}-role-${role.name}`}
+            />
+
             <GateStepListEditor
               label="Entry checks"
               hint="Must pass before this stage's turn starts."
               gates={role.entryGates}
               onChange={(gates) => updateRole(index, { entryGates: gates })}
               testIdPrefix={`${testIdPrefix}-role-${role.name}-entry`}
+              roleNames={roleNames}
+              artifactStageNames={artifactStageNames}
+              specialistNames={specialistNames}
             />
             <GateStepListEditor
               label="Exit gate prompts"
@@ -148,6 +204,9 @@ export default function PipelineView({ api, workspacePath, testIdPrefix = "pipel
               gates={role.exitGatePrompts}
               onChange={(gates) => updateRole(index, { exitGatePrompts: gates })}
               testIdPrefix={`${testIdPrefix}-role-${role.name}-exit`}
+              roleNames={roleNames}
+              artifactStageNames={artifactStageNames}
+              specialistNames={specialistNames}
             />
           </li>
         ))}
@@ -156,15 +215,20 @@ export default function PipelineView({ api, workspacePath, testIdPrefix = "pipel
       <div className={styles.newRole}>
         <ZestTextbox
           data-testid={`${testIdPrefix}-new-name-input`}
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          placeholder="New stage name"
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          placeholder="New stage title, e.g. Code Mapping"
         />
+        {generatedKey && (
+          <span className={styles.generatedKeyHint} data-testid={`${testIdPrefix}-new-key-preview`}>
+            Key: {generatedKey}
+          </span>
+        )}
         <ZestButton
           type="button"
           data-testid={`${testIdPrefix}-add-btn`}
           onClick={addRole}
-          disabled={!newName.trim()}
+          disabled={!newTitle.trim()}
           zest={{ semanticType: "add" }}
         >
           Add stage
@@ -184,17 +248,74 @@ export default function PipelineView({ api, workspacePath, testIdPrefix = "pipel
   );
 }
 
+function ArtifactEditor({
+  artifact, stageName, onChange, testIdPrefix,
+}: {
+  artifact: ArtifactEditorDto | null;
+  stageName: string;
+  onChange: (artifact: ArtifactEditorDto | null) => void;
+  testIdPrefix: string;
+}) {
+  return (
+    <div className={styles.artifactEditor} data-testid={`${testIdPrefix}-artifact`}>
+      <label className={styles.inlineLabel}>
+        <input
+          type="checkbox"
+          checked={artifact != null}
+          onChange={(e) => onChange(
+            e.target.checked
+              ? { root: "docs-root", fileName: `${stageName}.json`, kind: "text" }
+              : null,
+          )}
+          data-testid={`${testIdPrefix}-artifact-toggle`}
+        />
+        Produces a shared artifact other stages can require/reference
+      </label>
+      {artifact && (
+        <div className={styles.artifactFields}>
+          <div className={styles.selectField} data-testid={`${testIdPrefix}-artifact-root`}>
+            <SelectWrapper<INamedOption>
+              data={ARTIFACT_ROOT_OPTIONS}
+              selectedResolver={(o) => o.name === artifact.root}
+              valueResolver={(o) => o.name}
+              labelResolver={(o) => o.label}
+              onChange={(items) => items[0] && onChange({ ...artifact, root: items[0].name as ArtifactRootKey })}
+            />
+          </div>
+          <ZestTextbox
+            data-testid={`${testIdPrefix}-artifact-filename`}
+            value={artifact.fileName}
+            onChange={(e) => onChange({ ...artifact, fileName: e.target.value })}
+            placeholder="File name, e.g. codemap.json"
+          />
+          <label className={styles.inlineLabel}>
+            <input
+              type="checkbox"
+              checked={artifact.kind === "json"}
+              onChange={(e) => onChange({ ...artifact, kind: e.target.checked ? "json" : "text" })}
+              data-testid={`${testIdPrefix}-artifact-json-toggle`}
+            />
+            Validate as JSON (not just check it exists)
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GateStepListEditor({
-  label, hint, gates, onChange, testIdPrefix,
+  label, hint, gates, onChange, testIdPrefix, roleNames, artifactStageNames, specialistNames,
 }: {
   label: string;
   hint: string;
   gates: GateStepEditorDto[];
   onChange: (gates: GateStepEditorDto[]) => void;
   testIdPrefix: string;
+  roleNames: string[];
+  artifactStageNames: string[];
+  specialistNames: string[];
 }) {
   const [draftText, setDraftText] = useState("");
-  const [draftSpecialist, setDraftSpecialist] = useState("");
 
   const addGate = () => {
     const text = draftText.trim();
@@ -203,18 +324,16 @@ function GateStepListEditor({
     setDraftText("");
   };
 
-  const addSpecialistGate = () => {
-    const name = draftSpecialist.trim();
-    if (!name) return;
-    onChange([...gates, { kind: "requiresSpecialist", requiredSpecialist: name, responsibleRole: null }]);
-    setDraftSpecialist("");
-  };
-
   const removeGate = (index: number) => onChange(gates.filter((_, i) => i !== index));
 
   const updateResponsibleRole = (index: number, responsibleRole: string) => {
     onChange(gates.map((g, i) => (i === index ? { ...g, responsibleRole: responsibleRole || null } : g)));
   };
+
+  const responsibleRoleOptions: INamedOption[] = [
+    { name: RESPONSIBLE_ROLE_DEFAULT, label: "(this stage)" },
+    ...roleNames.map((name) => ({ name, label: stageLabel(name) })),
+  ];
 
   return (
     <div className={styles.gateEditor} data-testid={testIdPrefix}>
@@ -232,14 +351,19 @@ function GateStepListEditor({
                   ? gate.gatePromptText
                   : gate.kind === "requiresSpecialist"
                     ? `specialist: ${gate.requiredSpecialist}`
-                    : `builtin: ${gate.builtin}`}
+                    : gate.kind === "requiresArtifact"
+                      ? `artifact from: ${gate.requiredArtifactStage}`
+                      : `builtin: ${gate.builtin}`}
               </span>
-              <ZestTextbox
-                data-testid={`${testIdPrefix}-${index}-responsible-role`}
-                value={gate.responsibleRole ?? ""}
-                onChange={(e) => updateResponsibleRole(index, e.target.value)}
-                placeholder="Owning stage (defaults to this one)"
-              />
+              <div className={styles.selectField} data-testid={`${testIdPrefix}-${index}-responsible-role`}>
+                <SelectWrapper<INamedOption>
+                  data={responsibleRoleOptions}
+                  selectedResolver={(o) => o.name === (gate.responsibleRole ?? RESPONSIBLE_ROLE_DEFAULT)}
+                  valueResolver={(o) => o.name}
+                  labelResolver={(o) => o.label}
+                  onChange={(items) => updateResponsibleRole(index, items[0]?.name ?? RESPONSIBLE_ROLE_DEFAULT)}
+                />
+              </div>
               <ZestButton
                 type="button"
                 onClick={() => removeGate(index)}
@@ -269,22 +393,33 @@ function GateStepListEditor({
           Add
         </ZestButton>
       </div>
-      <div className={styles.gateAddRow}>
-        <ZestTextbox
-          data-testid={`${testIdPrefix}-specialist-name`}
-          value={draftSpecialist}
-          onChange={(e) => setDraftSpecialist(e.target.value)}
-          placeholder="Required specialist name…"
-        />
-        <ZestButton
-          type="button"
-          onClick={addSpecialistGate}
-          disabled={!draftSpecialist.trim()}
-          data-testid={`${testIdPrefix}-specialist-add-btn`}
-          zest={{ semanticType: "add" }}
-        >
-          Add
-        </ZestButton>
+      <div className={styles.gateAddRow} data-testid={`${testIdPrefix}-specialist-picker`}>
+        <div className={styles.selectField}>
+          <SelectWrapper<INamedOption>
+            data={specialistNames.map((name) => ({ name, label: name }))}
+            selectedResolver={() => false}
+            valueResolver={(o) => o.name}
+            labelResolver={(o) => o.label}
+            placeholder="Add a required specialist…"
+            onChange={(items) => {
+              if (items[0]) onChange([...gates, { kind: "requiresSpecialist", requiredSpecialist: items[0].name, responsibleRole: null }]);
+            }}
+          />
+        </div>
+      </div>
+      <div className={styles.gateAddRow} data-testid={`${testIdPrefix}-artifact-picker`}>
+        <div className={styles.selectField}>
+          <SelectWrapper<INamedOption>
+            data={artifactStageNames.map((name) => ({ name, label: stageLabel(name) }))}
+            selectedResolver={() => false}
+            valueResolver={(o) => o.name}
+            labelResolver={(o) => o.label}
+            placeholder="Require another stage's artifact…"
+            onChange={(items) => {
+              if (items[0]) onChange([...gates, { kind: "requiresArtifact", requiredArtifactStage: items[0].name, responsibleRole: null }]);
+            }}
+          />
+        </div>
       </div>
     </div>
   );

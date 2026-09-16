@@ -358,11 +358,21 @@ export interface SpecialistRoleDto {
 // ─── pipeline authoring (Part 2C) ────────────────────────────────────────────
 
 export interface GateStepEditorDto {
-  kind: "builtin" | "gatePrompt" | "requiresSpecialist";
+  kind: "builtin" | "gatePrompt" | "requiresSpecialist" | "requiresArtifact";
   builtin?: string | null;
   gatePromptText?: string | null;
   responsibleRole?: string | null;
   requiredSpecialist?: string | null;
+  requiredArtifactStage?: string | null;
+}
+
+// One of ArtifactRoots.All on the backend.
+export type ArtifactRootKey = "docs-root" | "feature-docs-root" | "feature-code-root-back" | "feature-code-root-front" | "workspace-root";
+
+export interface ArtifactEditorDto {
+  root: ArtifactRootKey;
+  fileName: string;
+  kind: "text" | "json";
 }
 
 export interface PipelineEditorRoleDto {
@@ -373,6 +383,7 @@ export interface PipelineEditorRoleDto {
   stepSummary: string[];
   entryGates: GateStepEditorDto[];
   exitGatePrompts: GateStepEditorDto[];
+  artifact?: ArtifactEditorDto | null;
 }
 
 export interface PipelineEditorDto {

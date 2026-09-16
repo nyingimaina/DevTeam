@@ -113,4 +113,29 @@
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.generatedKeyHint {
+  font-size: 0.8em;
+  color: var(--text-muted, #888);
+}
+
+.artifactEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border-color, #333);
+  padding-top: 8px;
+}
+
+.artifactFields {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.selectField {
+  min-width: 200px;
 }
