@@ -18,6 +18,13 @@ public interface IGitService
     Task<GitResponse> HasRemoteAsync(string workspacePath, CancellationToken ct = default);
     Task<GitResponse> GetRemoteAsync(string workspacePath, CancellationToken ct = default);
     Task<GitResponse> SetRemoteAsync(string workspacePath, string remoteUrl, CancellationToken ct = default);
+    // tag identifies a specific stash entry (e.g. "devteam-feature-<id>") regardless of its
+    // position in the stack, since a workspace can accumulate stashes for several parked
+    // features/hotfixes at once.
+    Task<GitResponse> StashPushAsync(string workspacePath, string tag, CancellationToken ct = default);
+    Task<GitResponse> StashListAsync(string workspacePath, CancellationToken ct = default);
+    Task<GitResponse> StashApplyAsync(string workspacePath, string tag, CancellationToken ct = default);
+    Task<GitResponse> StashDropAsync(string workspacePath, string tag, CancellationToken ct = default);
 }
 
 public sealed class GitService : IGitService, IDisposable
@@ -77,6 +84,18 @@ public sealed class GitService : IGitService, IDisposable
 
     public async Task<GitResponse> SetRemoteAsync(string workspacePath, string remoteUrl, CancellationToken ct = default)
         => await SendAsync(new GitRequest("set-remote", workspacePath, RemoteUrl: remoteUrl), ct);
+
+    public async Task<GitResponse> StashPushAsync(string workspacePath, string tag, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("stash-push", workspacePath, Message: tag), ct);
+
+    public async Task<GitResponse> StashListAsync(string workspacePath, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("stash-list", workspacePath), ct);
+
+    public async Task<GitResponse> StashApplyAsync(string workspacePath, string tag, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("stash-apply", workspacePath, Message: tag), ct);
+
+    public async Task<GitResponse> StashDropAsync(string workspacePath, string tag, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("stash-drop", workspacePath, Message: tag), ct);
 
     private async Task<GitResponse> SendAsync(GitRequest request, CancellationToken ct)
     {
@@ -198,7 +217,8 @@ public record GitResponse(
     GitCommit[]? Commits = null,
     bool HasRemote = false,
     string? RemoteUrl = null,
-    string[]? ChangedFiles = null);
+    string[]? ChangedFiles = null,
+    string[]? StashEntries = null);
 
 public record GitCommit(
     string Hash,

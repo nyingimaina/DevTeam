@@ -18,6 +18,10 @@ public class GitCommandHandler
             "has-remote" => await HasRemoteAsync(request),
             "get-remote" => await GetRemoteAsync(request),
             "set-remote" => await SetRemoteAsync(request),
+            "stash-push" => await StashPushAsync(request),
+            "stash-list" => await StashListAsync(request),
+            "stash-apply" => await StashApplyAsync(request),
+            "stash-drop" => await StashDropAsync(request),
             _ => new GitResponse(false, $"Unknown command: {request.Command}"),
         };
 
@@ -298,6 +302,89 @@ public class GitCommandHandler
         if (exit != 0) return new GitResponse(false, $"git remote failed: {err}");
 
         return new GitResponse(true, "Remote set", HasRemote: true, RemoteUrl: request.RemoteUrl);
+    }
+
+    private static async Task<GitResponse> StashPushAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+        if (request.Message is null)
+            return new GitResponse(false, "message (stash tag) required");
+
+        // -u includes untracked files — an agent's newly-scaffolded files shouldn't be
+        // silently dropped when parking a feature's WIP.
+        var (exit, out_, err) = await RunGitAsync(request.WorkspacePath, "stash", "push", "-u", "-m", request.Message);
+        if (exit != 0) return new GitResponse(false, $"git stash push failed: {err}");
+        if (out_.Contains("No local changes to save"))
+            return new GitResponse(true, "No local changes to stash");
+
+        return new GitResponse(true, $"Stashed as '{request.Message}'");
+    }
+
+    private static async Task<GitResponse> StashListAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+
+        var (exit, out_, err) = await RunGitAsync(request.WorkspacePath, "stash", "list");
+        if (exit != 0) return new GitResponse(false, $"git stash list failed: {err}");
+
+        var entries = out_.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return new GitResponse(true, "OK", StashEntries: entries);
+    }
+
+    private static async Task<GitResponse> StashApplyAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+        if (request.Message is null)
+            return new GitResponse(false, "message (stash tag) required");
+
+        var (found, stashRef) = await FindStashRefAsync(request.WorkspacePath, request.Message);
+        if (!found) return new GitResponse(false, $"No stash found tagged '{request.Message}'");
+
+        // Deliberately "apply", not "pop": pop auto-drops the entry even when the apply
+        // conflicts, which would lose the parked work. The caller drops it explicitly (via
+        // stash-drop) only once it has confirmed the apply fully succeeded.
+        var (exit, _, err) = await RunGitAsync(request.WorkspacePath, "stash", "apply", stashRef!);
+        if (exit != 0) return new GitResponse(false, $"git stash apply failed: {err}");
+
+        var status = await GetStatusAsync(request.WorkspacePath);
+        return new GitResponse(true, $"Applied stash '{request.Message}'", Branch: status.branch, IsClean: status.isClean);
+    }
+
+    private static async Task<GitResponse> StashDropAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+        if (request.Message is null)
+            return new GitResponse(false, "message (stash tag) required");
+
+        var (found, stashRef) = await FindStashRefAsync(request.WorkspacePath, request.Message);
+        if (!found) return new GitResponse(false, $"No stash found tagged '{request.Message}'");
+
+        var (exit, _, err) = await RunGitAsync(request.WorkspacePath, "stash", "drop", stashRef!);
+        if (exit != 0) return new GitResponse(false, $"git stash drop failed: {err}");
+
+        return new GitResponse(true, $"Dropped stash '{request.Message}'");
+    }
+
+    // Resolves a caller-supplied tag to its current stash@{n} ref — a stash's position in the
+    // stack shifts as other entries are pushed/dropped, so callers must always look it up by
+    // tag rather than assuming a fixed index.
+    private static async Task<(bool Found, string? StashRef)> FindStashRefAsync(string workspacePath, string tag)
+    {
+        var (exit, out_, _) = await RunGitAsync(workspacePath, "stash", "list");
+        if (exit != 0) return (false, null);
+
+        foreach (var line in out_.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!line.Contains(tag, StringComparison.Ordinal)) continue;
+            var colonIndex = line.IndexOf(':');
+            if (colonIndex <= 0) continue;
+            return (true, line[..colonIndex].Trim());
+        }
+        return (false, null);
     }
 
     private static async Task<(bool hasRemote, string? url)> GetRemoteUrlAsync(string workspacePath)

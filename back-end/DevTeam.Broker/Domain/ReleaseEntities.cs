@@ -95,10 +95,17 @@ public sealed class DevTeamRelease
     /// <summary>Git branch this release ships from, e.g. "release/login-form". Set once, at creation.</summary>
     public string BranchName { get; set; } = string.Empty;
     /// <summary>
-    /// The feature currently in flight on this release, if any. v1 simplification:
-    /// only one feature can be worked at a time per release — the next one can't
-    /// start (POST .../features) until this one completes and clears the field.
+    /// The feature currently checked out in this release's workspace, if any — never a real
+    /// column. A release has no disk representation of its own; "what's checked out" is a
+    /// fact about the *workspace* (see WorkspaceActiveCheckout), since two releases can
+    /// legitimately share one WorkspacePath and each would otherwise stomp the other's
+    /// checkout state. Callers that load a DevTeamRelease for return (e.g.
+    /// WorkflowEngine.LoadReleaseAsync) are responsible for populating this from
+    /// WorkspaceActiveCheckout, filtered to a feature that actually belongs to this release —
+    /// everything below this point (StageRuns/Signoffs/FlowPosition, the pre-GitFlow wire
+    /// shape) is unchanged and keeps working exactly as before once this is set.
     /// </summary>
+    [NotMapped]
     public Guid? CurrentFeatureId { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -120,6 +127,19 @@ public sealed class DevTeamRelease
 
     [NotMapped]
     public ReleaseFlowPosition? FlowPosition => CurrentFeature?.FlowPosition;
+}
+
+/// <summary>
+/// The single source of truth for "which branch is physically checked out in this workspace
+/// right now" — a fact about the workspace folder, not about any one release, since two
+/// releases can share a WorkspacePath. Exactly one of ActiveReleaseFeatureId/ActiveHotfixId is
+/// ever set (or neither, for a workspace with nothing currently active).
+/// </summary>
+public sealed class WorkspaceActiveCheckout
+{
+    public string WorkspacePath { get; set; } = string.Empty;
+    public Guid? ActiveReleaseFeatureId { get; set; }
+    public Guid? ActiveHotfixId { get; set; }
 }
 
 public sealed class ReleaseFeature

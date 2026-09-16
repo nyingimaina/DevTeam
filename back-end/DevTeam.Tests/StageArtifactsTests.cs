@@ -32,7 +32,7 @@ public class StageArtifactsTests : IDisposable
     private WorkflowEngine CreateEngine() => new(
         CreateFactory(), _gateRunner, _coordinator, _broadcaster,
         _gitService, new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
-        new ModelCatalogService(_coordinator), _credentialStore);
+        new ModelCatalogService(_coordinator), _credentialStore, new ActiveTurnTracker());
 
     private sealed class TempDir(string path) : IDisposable
     {

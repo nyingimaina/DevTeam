@@ -26,6 +26,7 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<ReleaseGuidanceNote> ReleaseGuidanceNotes => Set<ReleaseGuidanceNote>();
     public DbSet<ReleaseUsageLedger> ReleaseUsageLedgers => Set<ReleaseUsageLedger>();
     public DbSet<ReleaseFlowPosition> ReleaseFlowPositions => Set<ReleaseFlowPosition>();
+    public DbSet<WorkspaceActiveCheckout> WorkspaceActiveCheckouts => Set<WorkspaceActiveCheckout>();
     public DbSet<WorkspaceGitSettings> WorkspaceGitSettings => Set<WorkspaceGitSettings>();
     public DbSet<Profile> Profiles => Set<Profile>();
     public DbSet<ProfilePrompt> ProfilePrompts => Set<ProfilePrompt>();
@@ -90,6 +91,11 @@ public sealed class DevTeamDbContext : DbContext
         {
             settings.HasKey(e => e.WorkspacePath);
             settings.Property(e => e.CredentialName).HasMaxLength(256);
+        });
+
+        modelBuilder.Entity<WorkspaceActiveCheckout>(checkout =>
+        {
+            checkout.HasKey(e => e.WorkspacePath);
         });
 
         modelBuilder.Entity<Profile>(profile =>

@@ -57,17 +57,21 @@ public class OpencodeFlowE2ETests : IDisposable
 
         _output.WriteLine("workspace: " + _workspace);
         using var spoke = new OpencodeAcpSpoke(new OpencodeAcpProcess(OpenCodePath, ["acp"]));
+        // Shared with WorkflowEngine below — SwitchFeatureAsync's "is a turn active in this
+        // workspace" guard only means anything if it inspects the same tracker instance
+        // BrokerCoordinator is actually updating, exactly like production DI wires them.
+        var turnTracker = new ActiveTurnTracker();
         await using var coordinator = new BrokerCoordinator(
             spoke,
             CreateFactory(),
             _broadcaster,
             NullLogger<BrokerCoordinator>.Instance,
-            new ActiveTurnTracker());
+            turnTracker);
 
         var engine = new WorkflowEngine(
             CreateFactory(), new FakeGateRunner(), coordinator, _broadcaster,
             new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
-            new ModelCatalogService(coordinator), new FakeGitCredentialStore());
+            new ModelCatalogService(coordinator), new FakeGitCredentialStore(), turnTracker);
 
         // Watchdog so a stalled agent turn fails loudly instead of hanging silently.
         var scenario = ScenarioAsync(spoke, engine);

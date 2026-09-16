@@ -1996,14 +1996,26 @@ public class WorkflowEngineTests : IDisposable
     // ─── GitFlow: feature lifecycle ──────────────────────────────────────
 
     [Fact]
-    public async Task CreateFeature_WhenFeatureAlreadyInFlight_Throws()
+    public async Task CreateFeature_WhileAnotherIsAlreadyInFlight_SucceedsAndBecomesTheWorkspacesActiveCheckout()
     {
+        // Part 7A: a release can have many concurrently-open features — creating a second one
+        // no longer requires the first to complete first.
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
 
-        // A feature is already in flight (created together with the release).
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None));
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        var updated = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        Assert.Equal(2, updated.Features.Count);
+        // Creating a feature checks out its branch immediately (today's UX, unchanged) — it
+        // becomes the workspace's active checkout, not the first one.
+        Assert.Equal(second.Id, updated.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, updated.Features.Single(f => f.Id == second.Id).Status);
+        // The displaced feature steps down to OnHold — at most one feature per workspace
+        // should ever read InProgress at a time.
+        Assert.Equal(ReleaseFeatureStatus.OnHold, updated.Features.Single(f => f.Id == firstFeatureId).Status);
+        Assert.NotEqual(firstFeatureId, second.Id);
     }
 
     [Fact]
@@ -2029,6 +2041,158 @@ public class WorkflowEngineTests : IDisposable
         // Second feature's pipeline runs independently of the first's completed one.
         var stageRun = await engine.StartStageAsync(feature2.Id, CancellationToken.None);
         Assert.Equal("business-analyst", stageRun.StageName);
+    }
+
+    [Fact]
+    public async Task SwitchFeature_ToADifferentFeature_UpdatesActiveCheckoutAndFeatureStatuses()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        var switched = await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+
+        Assert.Equal(firstFeatureId, switched.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, switched.Features.Single(f => f.Id == firstFeatureId).Status);
+        Assert.Equal(ReleaseFeatureStatus.OnHold, switched.Features.Single(f => f.Id == second.Id).Status);
+        Assert.Contains("checkout:feature/feat-001", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task SwitchFeature_WithADirtyWorkingTree_StashesTheOutgoingFeaturesChanges()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        _gitService.DirtyWorkingTree = true;
+        await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+
+        Assert.Contains(_gitService.Commands, c => c.StartsWith($"stash-push:devteam-feature-{second.Id:N}"));
+    }
+
+    [Fact]
+    public async Task SwitchFeature_RestoresAPreviouslyParkedFeaturesChanges()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+        // feat-002 is now the active checkout (CreateFeatureAsync checks it out immediately).
+
+        // Switching away from feat-002 (dirty) parks ITS WIP as a stash tagged with its own id.
+        _gitService.DirtyWorkingTree = true;
+        await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+        Assert.Contains($"stash-push:devteam-feature-{second.Id:N}", _gitService.Commands);
+
+        // Switching to feat-001 (clean, never dirtied, no stash of its own) must not touch
+        // any stash at all.
+        _gitService.Commands.Clear();
+        await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+        Assert.DoesNotContain(_gitService.Commands, c => c.StartsWith("stash-apply") || c.StartsWith("stash-drop"));
+
+        // Switching back to feat-002 must restore ITS parked stash from the first step —
+        // applied, then dropped once clean.
+        _gitService.Commands.Clear();
+        await engine.SwitchFeatureAsync(second.Id, CancellationToken.None);
+
+        Assert.Contains($"stash-apply:devteam-feature-{second.Id:N}", _gitService.Commands);
+        Assert.Contains($"stash-drop:devteam-feature-{second.Id:N}", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task SwitchFeature_WhenStashApplyConflicts_ThrowsAndLeavesTheStashInPlace()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        _gitService.DirtyWorkingTree = true;
+        await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+
+        _gitService.DirtyWorkingTree = false;
+        _gitService.FailStashApply = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.SwitchFeatureAsync(second.Id, CancellationToken.None));
+
+        Assert.DoesNotContain(_gitService.Commands, c => c.StartsWith("stash-drop"));
+    }
+
+    [Fact]
+    public async Task SwitchFeature_BlockedWhileATurnIsActiveInTheSameWorkspace()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        var sessionId = Guid.NewGuid();
+        await using (var db = CreateFactory().CreateDbContext())
+        {
+            db.Sessions.Add(new DevTeamSession { Id = sessionId, WorkspacePath = @"C:\work\proj", AcpSessionId = "acp-1" });
+            await db.SaveChangesAsync();
+        }
+        using var cts = new CancellationTokenSource();
+        using var _ = _turnTracker.Begin(sessionId, "acp-1", "working...", cts);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.SwitchFeatureAsync(second.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SwitchFeature_NotBlockedByATurnActiveInADifferentWorkspace()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        var sessionId = Guid.NewGuid();
+        await using (var db = CreateFactory().CreateDbContext())
+        {
+            db.Sessions.Add(new DevTeamSession { Id = sessionId, WorkspacePath = @"C:\work\other-proj", AcpSessionId = "acp-1" });
+            await db.SaveChangesAsync();
+        }
+        using var cts = new CancellationTokenSource();
+        using var _ = _turnTracker.Begin(sessionId, "acp-1", "working...", cts);
+
+        var switched = await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+        Assert.Equal(firstFeatureId, switched.CurrentFeatureId);
+    }
+
+    [Fact]
+    public async Task SwitchFeature_AcrossTwoReleasesSharingOneWorkspace_TracksCheckoutPerWorkspaceNotPerRelease()
+    {
+        // WorkspaceActiveCheckout is keyed by workspace path, not release id — two unrelated
+        // releases pointed at the same physical folder must not stomp each other's checkout
+        // state. This is the specific latent bug the workspace-scoped design closes.
+        var engine = CreateEngine();
+        var releaseA = await engine.StartReleaseAsync("feat-a", @"C:\work\shared", CancellationToken.None);
+        var featureA = releaseA.CurrentFeatureId!.Value;
+
+        var releaseB = await engine.StartReleaseAsync("feat-b", @"C:\work\shared", CancellationToken.None);
+        var featureB = releaseB.CurrentFeatureId!.Value;
+
+        // Starting release B's feature in the shared workspace displaces release A's feature —
+        // reflected via the workspace-scoped checkout regardless of which release we re-fetch.
+        var refreshedA = await engine.GetReleaseAsync(releaseA.Id, CancellationToken.None);
+        var refreshedB = await engine.GetReleaseAsync(releaseB.Id, CancellationToken.None);
+        Assert.Null(refreshedA.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.OnHold, refreshedA.Features.Single(f => f.Id == featureA).Status);
+        Assert.Equal(featureB, refreshedB.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, refreshedB.Features.Single(f => f.Id == featureB).Status);
+
+        // Switching back to release A's feature correctly displaces release B's — the two
+        // releases hand the same workspace's checkout back and forth without any cross-talk.
+        var switchedBack = await engine.SwitchFeatureAsync(featureA, CancellationToken.None);
+        Assert.Equal(featureA, switchedBack.CurrentFeatureId);
+
+        var refreshedBAfter = await engine.GetReleaseAsync(releaseB.Id, CancellationToken.None);
+        Assert.Null(refreshedBAfter.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.OnHold, refreshedBAfter.Features.Single(f => f.Id == featureB).Status);
     }
 
     [Fact]
@@ -2128,11 +2292,12 @@ public class WorkflowEngineTests : IDisposable
     }
 
     private readonly FakeBrokerCoordinator _coordinator = new();
+    private readonly ActiveTurnTracker _turnTracker = new();
 
     private WorkflowEngine CreateEngine() => new(
         CreateFactory(), _gateRunner, _coordinator, _broadcaster,
         _gitService, new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
-        new ModelCatalogService(_coordinator), _credentialStore);
+        new ModelCatalogService(_coordinator), _credentialStore, _turnTracker);
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()
         => new TestDbContextFactory(_connection);
@@ -2187,7 +2352,7 @@ internal sealed class FakeGitService : IGitService
     public Task<GitResponse> StatusAsync(string workspacePath, CancellationToken ct = default)
     {
         Commands.Add($"status:{workspacePath}");
-        return Task.FromResult(new GitResponse(true, "OK", IsRepo: true, IsClean: true, ChangedFiles: ChangedFiles));
+        return Task.FromResult(new GitResponse(true, "OK", IsRepo: true, IsClean: !DirtyWorkingTree, ChangedFiles: ChangedFiles));
     }
 
     public Task<GitResponse> EnsureBranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
@@ -2261,6 +2426,44 @@ internal sealed class FakeGitService : IGitService
         Commands.Add($"set-remote:{remoteUrl}");
         RemoteConfigured = true;
         return Task.FromResult(new GitResponse(true, "Remote set", HasRemote: true, RemoteUrl: remoteUrl));
+    }
+
+    // Simulated dirty-working-tree flag (StatusAsync reports it), and an in-memory stash
+    // stack keyed by tag — enough to exercise SwitchFeatureAsync's "stash if dirty, apply by
+    // tag regardless of stack position" logic without a real repo.
+    public bool DirtyWorkingTree { get; set; }
+    public bool FailStashApply { get; set; }
+    private readonly HashSet<string> _stashTags = [];
+
+    public Task<GitResponse> StashPushAsync(string workspacePath, string tag, CancellationToken ct = default)
+    {
+        Commands.Add($"stash-push:{tag}");
+        if (!DirtyWorkingTree) return Task.FromResult(new GitResponse(true, "No local changes to stash"));
+        _stashTags.Add(tag);
+        DirtyWorkingTree = false;
+        return Task.FromResult(new GitResponse(true, $"Stashed as '{tag}'"));
+    }
+
+    public Task<GitResponse> StashListAsync(string workspacePath, CancellationToken ct = default)
+    {
+        Commands.Add("stash-list");
+        return Task.FromResult(new GitResponse(true, "OK", StashEntries: [.. _stashTags.Select(t => $"stash@{{0}}: On x: {t}")]));
+    }
+
+    public Task<GitResponse> StashApplyAsync(string workspacePath, string tag, CancellationToken ct = default)
+    {
+        Commands.Add($"stash-apply:{tag}");
+        if (!_stashTags.Contains(tag)) return Task.FromResult(new GitResponse(false, $"No stash found tagged '{tag}'"));
+        if (FailStashApply) return Task.FromResult(new GitResponse(false, "git stash apply failed: conflict"));
+        DirtyWorkingTree = true;
+        return Task.FromResult(new GitResponse(true, $"Applied stash '{tag}'"));
+    }
+
+    public Task<GitResponse> StashDropAsync(string workspacePath, string tag, CancellationToken ct = default)
+    {
+        Commands.Add($"stash-drop:{tag}");
+        _stashTags.Remove(tag);
+        return Task.FromResult(new GitResponse(true, $"Dropped stash '{tag}'"));
     }
 }
 

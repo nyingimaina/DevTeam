@@ -556,6 +556,18 @@ public static class ApiEndpoints
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
+        app.MapPost("/api/features/{featureId:guid}/switch-to", async (Guid featureId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.SwitchFeatureAsync(featureId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Feature {featureId} not found."); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         // ─── release endpoints ────────────────────────────────────────────
         app.MapPost("/api/releases", async (CreateReleaseRequest request, HttpContext ctx) =>
         {

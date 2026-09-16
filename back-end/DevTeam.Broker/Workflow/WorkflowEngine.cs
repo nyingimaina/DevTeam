@@ -18,6 +18,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     private readonly IEventBroadcaster _broadcaster;
     private readonly IGitService _gitService;
     private readonly IGitCredentialStore _credentialStore;
+    private readonly ActiveTurnTracker _turnTracker;
     private readonly WorkflowDefinitionLoader _loader;
     private readonly ILogger<WorkflowEngine> _logger;
     private readonly ModelCatalogService _modelCatalog;
@@ -87,7 +88,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         WorkflowDefinitionLoader loader,
         ILogger<WorkflowEngine> logger,
         ModelCatalogService modelCatalog,
-        IGitCredentialStore credentialStore)
+        IGitCredentialStore credentialStore,
+        ActiveTurnTracker turnTracker)
     {
         _dbFactory = dbFactory;
         _gateRunner = gateRunner;
@@ -98,6 +100,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         _logger = logger;
         _modelCatalog = modelCatalog;
         _credentialStore = credentialStore;
+        _turnTracker = turnTracker;
     }
 
     public async Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct)
@@ -143,6 +146,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
         db.Releases.Add(release);
         await db.SaveChangesAsync(ct);
 
+        // The workspace may already have another release's feature checked out (releases have
+        // no disk representation of their own — WorkspacePath just tells you where a release's
+        // features live, and nothing stops two releases from sharing one). Step it down before
+        // taking over the checkout, same as CreateFeatureAsync does within a single release.
+        await MarkPreviouslyActiveFeatureOnHoldAsync(db, workspacePath, ct);
+        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: feature.Id, hotfixId: null, ct);
         release.CurrentFeatureId = feature.Id;
 
         var position = new ReleaseFlowPosition
@@ -186,10 +195,6 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var workflow = LoadWorkflow(release.WorkspacePath);
 
-        if (release.CurrentFeatureId is not null)
-            throw new InvalidOperationException(
-                "This release already has a feature in progress. Complete it before starting another.");
-
         var featureBranch = $"feature/{featureKey}";
         var feature = new ReleaseFeature
         {
@@ -225,9 +230,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
             CurrentStageName = workflow.Pipeline[0].Name,
         };
         db.ReleaseFlowPositions.Add(position);
-        release.CurrentFeatureId = feature.Id;
         release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        // Creating a feature immediately checks it out (today's UX, unchanged), displacing
+        // whatever was previously active in this workspace — InProgress means "the one
+        // currently checked out," so whatever's displaced steps down to OnHold rather than
+        // two features both reading InProgress at once.
+        await MarkPreviouslyActiveFeatureOnHoldAsync(db, release.WorkspacePath, ct);
+        await SetActiveCheckoutAsync(db, release.WorkspacePath, releaseFeatureId: feature.Id, hotfixId: null, ct);
 
         feature.FlowPosition = position;
 
@@ -244,6 +255,79 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         return feature;
     }
+
+    /// <summary>
+    /// Switches this workspace's checkout to a different, already-existing feature — parking
+    /// whatever was active (stashing its WIP if the tree is dirty) and restoring the target's
+    /// own parked WIP, if any. Two releases can share a WorkspacePath, so this only ever looks
+    /// at WorkspaceActiveCheckout (a workspace-level fact), never a release's own state.
+    /// </summary>
+    public async Task<DevTeamRelease> SwitchFeatureAsync(Guid featureId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var feature = await db.ReleaseFeatures
+            .Include(f => f.Release)
+            .SingleOrDefaultAsync(f => f.Id == featureId, ct)
+            ?? throw new KeyNotFoundException($"Feature {featureId} not found.");
+
+        var workspacePath = feature.Release.WorkspacePath;
+
+        // Don't check out from under an in-flight agent turn in this same workspace. A turn
+        // running in an unrelated workspace shouldn't block this switch — the global
+        // single-turn lock (BrokerCoordinator) already rules out any real file-write race;
+        // this is specifically about not yanking the branch out from under a turn actively
+        // using it right now.
+        var activeTurn = _turnTracker.Current;
+        if (activeTurn is not null)
+        {
+            var activeSession = await db.Sessions.FindAsync([activeTurn.SessionId], ct);
+            if (activeSession is not null && activeSession.WorkspacePath == workspacePath)
+                throw new InvalidOperationException(
+                    "A stage is currently running in this workspace. Wait for it to finish, or cancel it, before switching.");
+        }
+
+        var checkout = await db.WorkspaceActiveCheckouts.FindAsync([workspacePath], ct);
+        if (checkout?.ActiveReleaseFeatureId is { } outgoingFeatureId && outgoingFeatureId != featureId)
+        {
+            var status = await _gitService.StatusAsync(workspacePath, ct);
+            if (!status.IsClean)
+            {
+                var stashResult = await _gitService.StashPushAsync(workspacePath, StashTagForFeature(outgoingFeatureId), ct);
+                if (!stashResult.Success)
+                    throw new InvalidOperationException($"Could not stash the outgoing feature's changes: {stashResult.Message}");
+            }
+        }
+        await MarkPreviouslyActiveFeatureOnHoldAsync(db, workspacePath, ct);
+
+        var checkoutResult = await _gitService.CheckoutAsync(workspacePath, feature.BranchName, ct);
+        if (!checkoutResult.Success)
+            throw new InvalidOperationException($"Could not check out '{feature.BranchName}': {checkoutResult.Message}");
+
+        var targetTag = StashTagForFeature(featureId);
+        var stashList = await _gitService.StashListAsync(workspacePath, ct);
+        if (stashList.StashEntries?.Any(e => e.Contains(targetTag, StringComparison.Ordinal)) == true)
+        {
+            var applyResult = await _gitService.StashApplyAsync(workspacePath, targetTag, ct);
+            if (!applyResult.Success)
+            {
+                // Conflict resolution is a separate follow-on (LLM-assisted merge/stash-apply
+                // resolution) — for now, leave the stash in place (never dropped on failure)
+                // and surface a clear error instead of silently losing or discarding it.
+                throw new InvalidOperationException(
+                    $"Restoring '{feature.Key}'s parked changes failed: {applyResult.Message}. " +
+                    "The stash was not dropped — resolve the conflict manually, then retry.");
+            }
+            await _gitService.StashDropAsync(workspacePath, targetTag, ct);
+        }
+
+        feature.Status = ReleaseFeatureStatus.InProgress;
+        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: featureId, hotfixId: null, ct);
+
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+    }
+
+    private static string StashTagForFeature(Guid featureId) => $"devteam-feature-{featureId:N}";
 
     // ─── interactive stage lifecycle ───────────────────────────────────────
 
@@ -1418,10 +1502,13 @@ public sealed class WorkflowEngine : IWorkflowEngine
             _logger.LogWarning("Deleting feature branch '{Branch}' failed: {Message}", feature.BranchName, deleteResult.Message);
 
         feature.Status = ReleaseFeatureStatus.Complete;
-        release.CurrentFeatureId = null;
+        // The workspace is left checked out on the release branch (not any feature) at this
+        // point — nothing is "active" until another feature/hotfix is created or switched to.
+        await ClearActiveCheckoutAsync(db, release.WorkspacePath, ct);
         release.Status = ReleaseStatus.Ready;
         release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+        await ClearActiveCheckoutAsync(db, release.WorkspacePath, ct);
     }
 
     private async Task<string?> TryGetCredentialForWorkspaceAsync(DevTeamDbContext db, string workspacePath, CancellationToken ct)
@@ -2174,7 +2261,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ?? throw new KeyNotFoundException($"Feature {featureId} not found.");
 
     private static async Task<DevTeamRelease> LoadReleaseAsync(DevTeamDbContext db, Guid releaseId, CancellationToken ct)
-        => await db.Releases
+    {
+        var release = await db.Releases
             .Include(r => r.Features).ThenInclude(f => f.StageRuns).ThenInclude(sr => sr.GateChecks)
             .Include(r => r.Features).ThenInclude(f => f.StageRuns).ThenInclude(sr => sr.Findings)
             .Include(r => r.Features).ThenInclude(f => f.StageRuns).ThenInclude(sr => sr.GuidanceNotes)
@@ -2183,4 +2271,60 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .Include(r => r.Features).ThenInclude(f => f.FlowPosition)
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
             ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
+
+        await PopulateCurrentFeatureIdAsync(db, release, ct);
+        return release;
+    }
+
+    // DevTeamRelease.CurrentFeatureId is [NotMapped] — the real source of truth is
+    // WorkspaceActiveCheckout, keyed by workspace (not release), since two releases can share
+    // a WorkspacePath and each must only ever claim a feature that's actually its own.
+    private static async Task PopulateCurrentFeatureIdAsync(DevTeamDbContext db, DevTeamRelease release, CancellationToken ct)
+    {
+        var checkout = await db.WorkspaceActiveCheckouts.FindAsync([release.WorkspacePath], ct);
+        var activeFeatureId = checkout?.ActiveReleaseFeatureId;
+        release.CurrentFeatureId = activeFeatureId is not null && release.Features.Any(f => f.Id == activeFeatureId)
+            ? activeFeatureId
+            : null;
+    }
+
+    // Whatever feature is about to be displaced from this workspace's checkout (by creating
+    // or switching to a different one) steps down from InProgress to OnHold — InProgress means
+    // "the one currently checked out," so at most one feature per workspace should ever read
+    // InProgress at a time. A no-op if nothing was active, or the active slot held a hotfix.
+    private static async Task MarkPreviouslyActiveFeatureOnHoldAsync(DevTeamDbContext db, string workspacePath, CancellationToken ct)
+    {
+        var checkout = await db.WorkspaceActiveCheckouts.FindAsync([workspacePath], ct);
+        if (checkout?.ActiveReleaseFeatureId is not { } previousFeatureId)
+            return;
+
+        var previousFeature = await db.ReleaseFeatures.FindAsync([previousFeatureId], ct);
+        if (previousFeature is { Status: ReleaseFeatureStatus.InProgress })
+        {
+            previousFeature.Status = ReleaseFeatureStatus.OnHold;
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    // Upserts the single "what's checked out in this workspace" fact — exactly one of
+    // releaseFeatureId/hotfixId should be non-null (the other explicitly clears the opposite
+    // slot, so switching from a feature to a hotfix, or vice versa, doesn't leave a stale
+    // pointer behind).
+    private static async Task SetActiveCheckoutAsync(
+        DevTeamDbContext db, string workspacePath, Guid? releaseFeatureId, Guid? hotfixId, CancellationToken ct)
+    {
+        var checkout = await db.WorkspaceActiveCheckouts.FindAsync([workspacePath], ct);
+        if (checkout is null)
+        {
+            checkout = new WorkspaceActiveCheckout { WorkspacePath = workspacePath };
+            db.WorkspaceActiveCheckouts.Add(checkout);
+        }
+
+        checkout.ActiveReleaseFeatureId = releaseFeatureId;
+        checkout.ActiveHotfixId = hotfixId;
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static Task ClearActiveCheckoutAsync(DevTeamDbContext db, string workspacePath, CancellationToken ct)
+        => SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: null, hotfixId: null, ct);
 }

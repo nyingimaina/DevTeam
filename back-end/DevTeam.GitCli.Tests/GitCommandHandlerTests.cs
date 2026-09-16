@@ -165,6 +165,92 @@ public class GitCommandHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task StashPush_WithDirtyWorkingTree_StashesChangesAndCleansTheTree()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "wip.txt"), "wip");
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "untracked.txt"), "new file");
+
+        var result = await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-abc"));
+
+        Assert.True(result.Success);
+        var status = await _handler.HandleAsync(new GitRequest("status", _tempDir));
+        Assert.True(status.IsClean);
+        // -u means untracked files are stashed too, not just tracked ones.
+        Assert.False(File.Exists(Path.Combine(_tempDir, "wip.txt")));
+        Assert.False(File.Exists(Path.Combine(_tempDir, "untracked.txt")));
+    }
+
+    [Fact]
+    public async Task StashPush_WithNothingToStash_StillReportsSuccess()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+
+        var result = await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-abc"));
+
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public async Task StashList_ReturnsEntriesTaggedByMessage()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "a.txt"), "a");
+        await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-one"));
+
+        var result = await _handler.HandleAsync(new GitRequest("stash-list", _tempDir));
+
+        Assert.True(result.Success);
+        Assert.NotNull(result.StashEntries);
+        Assert.Single(result.StashEntries!);
+        Assert.Contains("devteam-feature-one", result.StashEntries![0]);
+    }
+
+    [Fact]
+    public async Task StashApply_FindsTheRightEntryByTagRegardlessOfStackPosition()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        // Push two stashes so the target one is NOT at the top of the stack.
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "older.txt"), "older");
+        await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-older"));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "newer.txt"), "newer");
+        await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-newer"));
+
+        var result = await _handler.HandleAsync(new GitRequest("stash-apply", _tempDir, Message: "devteam-feature-older"));
+
+        Assert.True(result.Success);
+        Assert.True(File.Exists(Path.Combine(_tempDir, "older.txt")));
+        Assert.False(File.Exists(Path.Combine(_tempDir, "newer.txt")));
+    }
+
+    [Fact]
+    public async Task StashApply_WithNoMatchingTag_ReturnsFailureInsteadOfApplyingTheWrongOne()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "a.txt"), "a");
+        await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-one"));
+
+        var result = await _handler.HandleAsync(new GitRequest("stash-apply", _tempDir, Message: "devteam-feature-does-not-exist"));
+
+        Assert.False(result.Success);
+        Assert.False(File.Exists(Path.Combine(_tempDir, "a.txt")));
+    }
+
+    [Fact]
+    public async Task StashDrop_RemovesTheEntry()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "a.txt"), "a");
+        await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "devteam-feature-one"));
+
+        var dropResult = await _handler.HandleAsync(new GitRequest("stash-drop", _tempDir, Message: "devteam-feature-one"));
+        Assert.True(dropResult.Success);
+
+        var listResult = await _handler.HandleAsync(new GitRequest("stash-list", _tempDir));
+        Assert.Empty(listResult.StashEntries ?? []);
+    }
+
+    [Fact]
     public async Task HasRemote_NoRemoteConfigured_ReturnsFalse()
     {
         await _handler.HandleAsync(new GitRequest("init", _tempDir));

@@ -66,6 +66,10 @@ public record GitRequest(
     [property: JsonPropertyName("remoteUrl")] string? RemoteUrl = null,
     [property: JsonPropertyName("authToken")] string? AuthToken = null);
 
+// Message doubles as the stash tag for stash-push/stash-apply/stash-drop — the caller-supplied
+// text (e.g. "devteam-feature-<id>") that identifies a specific stash entry regardless of its
+// position in the stack, since a workspace can accumulate stashes for several parked features.
+
 public record GitResponse(
     [property: JsonPropertyName("success")] bool Success,
     [property: JsonPropertyName("message")] string? Message = null,
@@ -79,7 +83,8 @@ public record GitResponse(
     [property: JsonPropertyName("commits")] GitCommit[]? Commits = null,
     [property: JsonPropertyName("hasRemote")] bool HasRemote = false,
     [property: JsonPropertyName("remoteUrl")] string? RemoteUrl = null,
-    [property: JsonPropertyName("changedFiles")] string[]? ChangedFiles = null);
+    [property: JsonPropertyName("changedFiles")] string[]? ChangedFiles = null,
+    [property: JsonPropertyName("stashEntries")] string[]? StashEntries = null);
 
 public record GitCommit(
     [property: JsonPropertyName("hash")] string Hash,

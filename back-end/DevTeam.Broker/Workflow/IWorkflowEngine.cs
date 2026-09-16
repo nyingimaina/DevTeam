@@ -7,6 +7,7 @@ public interface IWorkflowEngine
 {
     Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct);
     Task<ReleaseFeature> CreateFeatureAsync(Guid releaseId, string featureKey, CancellationToken ct);
+    Task<DevTeamRelease> SwitchFeatureAsync(Guid featureId, CancellationToken ct);
     Task<DevTeamRelease> AdvanceAsync(Guid featureId, CancellationToken ct);
     Task<ReleaseStageRun> StartStageAsync(Guid featureId, CancellationToken ct);
     Task<StagePromptResult> SendMessageAsync(Guid featureId, string text, CancellationToken ct);

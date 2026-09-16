@@ -154,7 +154,7 @@ public class MultiQuestionEnforcementTests : IDisposable
     private WorkflowEngine CreateEngine() => new(
         CreateFactory(), _gateRunner, _coordinator, _broadcaster,
         new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
-        new ModelCatalogService(_coordinator), new FakeGitCredentialStore());
+        new ModelCatalogService(_coordinator), new FakeGitCredentialStore(), new ActiveTurnTracker());
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()
         => new SqliteDbContextFactory(_connection);
