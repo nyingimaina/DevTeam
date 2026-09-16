@@ -1719,6 +1719,44 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_CustomAutonomousRole_SendsItsSeedPromptWithPlaceholdersResolved()
+    {
+        // Regression test for a real bug: role.SeedPrompt was only ever read in
+        // StartStageAsync (the interactive path) — RunStageAsync's autonomous PromptRoleAsync
+        // silently ignored it, so a hand-authored seedPrompt on any non-interactive custom
+        // stage had zero effect. Every custom stage that isn't a chat-style BA clone uses this
+        // path, so this made the "no-op stage" problem worse than just "not exposed in the UI".
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              code-map:
+                seedPrompt: "Scan the codebase and emit <F>'s module graph to <docs-root>/code-map.json."
+                agent: { mode: code-map }
+            """);
+
+        try
+        {
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var prompt = Assert.Single(_coordinator.Prompts);
+            Assert.Contains("Scan the codebase and emit feat-001's module graph", prompt);
+            Assert.Contains(Path.Combine(workspace, "docs"), prompt);
+            Assert.DoesNotContain("<F>", prompt);
+            Assert.DoesNotContain("<docs-root>", prompt);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunStage_DeveloperFirstPrompt_ContainsContextMdContentVerbatim()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));

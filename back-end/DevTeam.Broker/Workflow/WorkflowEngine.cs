@@ -667,10 +667,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
             var guidanceContext = BuildGuidanceContext(feature);
             var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
             var specialists = await db.SpecialistRoles.ToListAsync(ct);
+            // Bug fix: role.SeedPrompt used to only be honored in StartStageAsync (the
+            // interactive path) — every custom autonomous stage (anything that isn't a
+            // chat-style BA clone) silently never saw its own seed instructions at all.
+            var seedInstruction = role.SeedPrompt is null
+                ? string.Empty
+                : " " + ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
             var prompt = resolvedPrompt.OverridesBuiltIn
                 ? resolvedPrompt.Text
                 : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
                   "Work autonomously and do not ask the user for input. Produce the required artifacts." +
+                  seedInstruction +
                   HandoffAutomationClause +
                   AutonomousTersenessClause +
                   BuildDelegationClause(specialists, featureKey) +
