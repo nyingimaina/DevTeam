@@ -194,12 +194,20 @@ function GateStepListEditor({
   testIdPrefix: string;
 }) {
   const [draftText, setDraftText] = useState("");
+  const [draftSpecialist, setDraftSpecialist] = useState("");
 
   const addGate = () => {
     const text = draftText.trim();
     if (!text) return;
     onChange([...gates, { kind: "gatePrompt", gatePromptText: text, responsibleRole: null }]);
     setDraftText("");
+  };
+
+  const addSpecialistGate = () => {
+    const name = draftSpecialist.trim();
+    if (!name) return;
+    onChange([...gates, { kind: "requiresSpecialist", requiredSpecialist: name, responsibleRole: null }]);
+    setDraftSpecialist("");
   };
 
   const removeGate = (index: number) => onChange(gates.filter((_, i) => i !== index));
@@ -220,7 +228,11 @@ function GateStepListEditor({
             // eslint-disable-next-line react/no-array-index-key -- rows are add/remove only, never reordered
             <li key={index} className={styles.gateRow}>
               <span className={styles.gateText}>
-                {gate.kind === "gatePrompt" ? gate.gatePromptText : `builtin: ${gate.builtin}`}
+                {gate.kind === "gatePrompt"
+                  ? gate.gatePromptText
+                  : gate.kind === "requiresSpecialist"
+                    ? `specialist: ${gate.requiredSpecialist}`
+                    : `builtin: ${gate.builtin}`}
               </span>
               <ZestTextbox
                 data-testid={`${testIdPrefix}-${index}-responsible-role`}
@@ -252,6 +264,23 @@ function GateStepListEditor({
           onClick={addGate}
           disabled={!draftText.trim()}
           data-testid={`${testIdPrefix}-add-btn`}
+          zest={{ semanticType: "add" }}
+        >
+          Add
+        </ZestButton>
+      </div>
+      <div className={styles.gateAddRow}>
+        <ZestTextbox
+          data-testid={`${testIdPrefix}-specialist-name`}
+          value={draftSpecialist}
+          onChange={(e) => setDraftSpecialist(e.target.value)}
+          placeholder="Required specialist name…"
+        />
+        <ZestButton
+          type="button"
+          onClick={addSpecialistGate}
+          disabled={!draftSpecialist.trim()}
+          data-testid={`${testIdPrefix}-specialist-add-btn`}
           zest={{ semanticType: "add" }}
         >
           Add

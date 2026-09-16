@@ -140,6 +140,29 @@ describe("PipelineView", () => {
     ));
   });
 
+  it("adds a requires-specialist entry gate and includes it in the saved payload", async () => {
+    const role = makeRole({ name: "developer" });
+    mockApi.getWorkspacePipelineAsync.mockResolvedValue(makePipeline([role]));
+    mockApi.saveWorkspacePipelineAsync.mockResolvedValue(makePipeline([role]));
+    const user = userEvent.setup();
+    render(<PipelineView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);
+    await screen.findByTestId("pipeline-role-developer");
+
+    await user.type(screen.getByTestId("pipeline-role-developer-entry-specialist-name"), "database-admin");
+    await user.click(screen.getByTestId("pipeline-role-developer-entry-specialist-add-btn"));
+
+    expect(screen.getByTestId("pipeline-role-developer-entry")).toHaveTextContent("specialist: database-admin");
+
+    await user.click(screen.getByTestId("pipeline-save-btn"));
+
+    await waitFor(() => expect(mockApi.saveWorkspacePipelineAsync).toHaveBeenCalledWith(
+      "C:/work/proj",
+      [expect.objectContaining({
+        entryGates: [{ kind: "requiresSpecialist", requiredSpecialist: "database-admin", responsibleRole: null }],
+      })],
+    ));
+  });
+
   it("shows an error message if loading the pipeline fails", async () => {
     mockApi.getWorkspacePipelineAsync.mockRejectedValue(new Error("workspace not found"));
     render(<PipelineView api={mockApi as unknown as BrokerApi} workspacePath="C:/work/proj" />);

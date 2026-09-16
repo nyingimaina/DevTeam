@@ -358,10 +358,11 @@ export interface SpecialistRoleDto {
 // ─── pipeline authoring (Part 2C) ────────────────────────────────────────────
 
 export interface GateStepEditorDto {
-  kind: "builtin" | "gatePrompt";
+  kind: "builtin" | "gatePrompt" | "requiresSpecialist";
   builtin?: string | null;
   gatePromptText?: string | null;
   responsibleRole?: string | null;
+  requiredSpecialist?: string | null;
 }
 
 export interface PipelineEditorRoleDto {

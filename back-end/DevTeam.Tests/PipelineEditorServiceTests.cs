@@ -152,6 +152,39 @@ public class PipelineEditorServiceTests
     }
 
     [Fact]
+    public void Save_RoundTripsRequiresSpecialistAsEntryOrExitGates()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            var service = CreateService();
+            var original = service.Load(workspace);
+            var developer = original.Roles.Single(r => r.Name == "developer") with
+            {
+                EntryGates = [new GateStepEditorDto("requiresSpecialist", null, null, null) { RequiredSpecialist = "business-analyst-reviewer" }],
+                ExitGatePrompts = [new GateStepEditorDto("requiresSpecialist", null, null, "developer") { RequiredSpecialist = "database-admin" }],
+            };
+            service.Save(workspace, [original.Roles.Single(r => r.Name == "business-analyst"), developer, original.Roles.Single(r => r.Name == "qa")]);
+
+            var updated = service.Load(workspace).Roles.Single(r => r.Name == "developer");
+
+            var entryGate = Assert.Single(updated.EntryGates);
+            Assert.Equal("requiresSpecialist", entryGate.Kind);
+            Assert.Equal("business-analyst-reviewer", entryGate.RequiredSpecialist);
+
+            var exitGate = Assert.Single(updated.ExitGatePrompts);
+            Assert.Equal("requiresSpecialist", exitGate.Kind);
+            Assert.Equal("database-admin", exitGate.RequiredSpecialist);
+            Assert.Equal("developer", exitGate.ResponsibleRole);
+            Assert.Contains("requires_specialist:database-admin", updated.StepSummary);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Save_WithADuplicateRoleName_ThrowsInsteadOfSilentlyOverwriting()
     {
         var workspace = CreateWorkspace();

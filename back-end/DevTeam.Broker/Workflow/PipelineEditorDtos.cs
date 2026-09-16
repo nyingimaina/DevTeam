@@ -9,10 +9,11 @@ namespace DevTeam.Broker.Workflow;
 // does without offering to change it.
 
 public sealed record GateStepEditorDto(
-    string Kind, // "builtin" | "gatePrompt"
+    string Kind, // "builtin" | "gatePrompt" | "requiresSpecialist"
     string? Builtin,
     string? GatePromptText,
-    string? ResponsibleRole);
+    string? ResponsibleRole,
+    string? RequiredSpecialist = null);
 
 public sealed record PipelineEditorRoleDto(
     string Name,

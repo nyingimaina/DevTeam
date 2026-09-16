@@ -44,10 +44,10 @@ public sealed class PipelineEditorService
             role.UserInputRequired = roleDto.UserInputRequired;
             role.EntryGates = roleDto.EntryGates.Select(ToStepYaml).ToList();
 
-            // Preserve every existing step untouched except the top-level GatePrompt-kind
-            // ones, which the editor owns completely — everything else (Builtin/Loop/Agent
-            // wiring) is hand-authored and stays exactly as it was.
-            var preservedSteps = role.Steps.Where(s => s.GatePrompt is null).ToList();
+            // Preserve every existing step untouched except the top-level GatePrompt/
+            // RequiresSpecialist-kind ones, which the editor owns completely — everything
+            // else (Builtin/Loop/Agent wiring) is hand-authored and stays exactly as it was.
+            var preservedSteps = role.Steps.Where(s => s.GatePrompt is null && s.RequiresSpecialist is null).ToList();
             preservedSteps.AddRange(roleDto.ExitGatePrompts.Select(ToStepYaml));
             role.Steps = preservedSteps;
 
@@ -88,16 +88,22 @@ public sealed class PipelineEditorService
         role.Signoff,
         role.UserInputRequired,
         FlattenStepNames(role.Steps),
-        role.EntryGates.Where(s => s.Builtin is not null || s.GatePrompt is not null).Select(ToGateDto).ToList(),
-        role.Steps.Where(s => s.GatePrompt is not null).Select(ToGateDto).ToList());
+        role.EntryGates.Where(s => s.Builtin is not null || s.GatePrompt is not null || s.RequiresSpecialist is not null).Select(ToGateDto).ToList(),
+        role.Steps.Where(s => s.GatePrompt is not null || s.RequiresSpecialist is not null).Select(ToGateDto).ToList());
 
-    private static GateStepEditorDto ToGateDto(StepYaml step) => step.GatePrompt is not null
-        ? new GateStepEditorDto("gatePrompt", null, step.GatePrompt, step.ResponsibleRole)
-        : new GateStepEditorDto("builtin", step.Builtin, null, step.ResponsibleRole);
+    private static GateStepEditorDto ToGateDto(StepYaml step) => step switch
+    {
+        { GatePrompt: not null } => new GateStepEditorDto("gatePrompt", null, step.GatePrompt, step.ResponsibleRole),
+        { RequiresSpecialist: not null } => new GateStepEditorDto("requiresSpecialist", null, null, step.ResponsibleRole, step.RequiresSpecialist),
+        _ => new GateStepEditorDto("builtin", step.Builtin, null, step.ResponsibleRole),
+    };
 
-    private static StepYaml ToStepYaml(GateStepEditorDto dto) => dto.Kind == "gatePrompt"
-        ? new StepYaml { GatePrompt = dto.GatePromptText, ResponsibleRole = dto.ResponsibleRole }
-        : new StepYaml { Builtin = dto.Builtin, ResponsibleRole = dto.ResponsibleRole };
+    private static StepYaml ToStepYaml(GateStepEditorDto dto) => dto.Kind switch
+    {
+        "gatePrompt" => new StepYaml { GatePrompt = dto.GatePromptText, ResponsibleRole = dto.ResponsibleRole },
+        "requiresSpecialist" => new StepYaml { RequiresSpecialist = dto.RequiredSpecialist, ResponsibleRole = dto.ResponsibleRole },
+        _ => new StepYaml { Builtin = dto.Builtin, ResponsibleRole = dto.ResponsibleRole },
+    };
 
     // Mirrors WorkflowEngine.FlattenStepNames but operates on the raw StepYaml model, since
     // the editor works with the pre-validation YAML object graph, not the resolved
@@ -111,6 +117,7 @@ public sealed class PipelineEditorService
             if (step.Builtin is not null) names.Add(step.Builtin);
             else if (step.Agent is not null) names.Add($"agent:{step.Agent.Mode}");
             else if (step.GatePrompt is not null) names.Add("gate_prompt");
+            else if (step.RequiresSpecialist is not null) names.Add($"requires_specialist:{step.RequiresSpecialist}");
             else if (step.Loop is not null) names.AddRange(FlattenStepNames(step.Loop.Steps));
         }
         return names;
