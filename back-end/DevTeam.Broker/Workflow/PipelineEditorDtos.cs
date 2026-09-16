@@ -9,11 +9,17 @@ namespace DevTeam.Broker.Workflow;
 // does without offering to change it.
 
 public sealed record GateStepEditorDto(
-    string Kind, // "builtin" | "gatePrompt" | "requiresSpecialist"
+    string Kind, // "builtin" | "gatePrompt" | "requiresSpecialist" | "requiresArtifact"
     string? Builtin,
     string? GatePromptText,
     string? ResponsibleRole,
-    string? RequiredSpecialist = null);
+    string? RequiredSpecialist = null,
+    string? RequiredArtifactStage = null);
+
+// The single artifact a role declares it produces — see WorkflowArtifact. Root is one of
+// ArtifactRoots.All ("docs-root" | "feature-docs-root" | "feature-code-root-back" |
+// "feature-code-root-front" | "workspace-root"); Kind is "text" | "json".
+public sealed record ArtifactEditorDto(string Root, string FileName, string Kind);
 
 public sealed record PipelineEditorRoleDto(
     string Name,
@@ -22,7 +28,8 @@ public sealed record PipelineEditorRoleDto(
     bool UserInputRequired,
     IReadOnlyList<string> StepSummary,
     IReadOnlyList<GateStepEditorDto> EntryGates,
-    IReadOnlyList<GateStepEditorDto> ExitGatePrompts);
+    IReadOnlyList<GateStepEditorDto> ExitGatePrompts,
+    ArtifactEditorDto? Artifact = null);
 
 public sealed record PipelineEditorDto(IReadOnlyList<PipelineEditorRoleDto> Roles);
 

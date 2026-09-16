@@ -185,6 +185,42 @@ public class PipelineEditorServiceTests
     }
 
     [Fact]
+    public void Save_RoundTripsADeclaredArtifactAndARequiresArtifactExitGate()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            var service = CreateService();
+            var original = service.Load(workspace);
+            var codeMap = new PipelineEditorRoleDto(
+                "code-map", WritesCode: false, Signoff: null, UserInputRequired: false,
+                StepSummary: [], EntryGates: [], ExitGatePrompts: [],
+                Artifact: new ArtifactEditorDto("docs-root", "codemap.json", "json"));
+            var businessAnalyst = original.Roles.Single(r => r.Name == "business-analyst") with
+            {
+                EntryGates = [new GateStepEditorDto("requiresArtifact", null, null, null, RequiredArtifactStage: "code-map")],
+            };
+            service.Save(workspace, [codeMap, businessAnalyst, original.Roles.Single(r => r.Name == "developer"), original.Roles.Single(r => r.Name == "qa")]);
+
+            var updated = service.Load(workspace);
+            var updatedCodeMap = updated.Roles.Single(r => r.Name == "code-map");
+            Assert.NotNull(updatedCodeMap.Artifact);
+            Assert.Equal("docs-root", updatedCodeMap.Artifact!.Root);
+            Assert.Equal("codemap.json", updatedCodeMap.Artifact.FileName);
+            Assert.Equal("json", updatedCodeMap.Artifact.Kind);
+
+            var updatedBa = updated.Roles.Single(r => r.Name == "business-analyst");
+            var entryGate = Assert.Single(updatedBa.EntryGates);
+            Assert.Equal("requiresArtifact", entryGate.Kind);
+            Assert.Equal("code-map", entryGate.RequiredArtifactStage);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Save_WithADuplicateRoleName_ThrowsInsteadOfSilentlyOverwriting()
     {
         var workspace = CreateWorkspace();
