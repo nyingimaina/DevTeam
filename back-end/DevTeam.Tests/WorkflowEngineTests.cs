@@ -198,6 +198,33 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task StartStage_OverrideModeResolvesPlaceholdersInTheProfileText()
+    {
+        await using (var seedDb = CreateFactory().CreateDbContext())
+        {
+            var profile = new Profile { Name = "OverrideWithPlaceholder", IsDefault = true };
+            profile.Prompts.Add(new ProfilePrompt
+            {
+                StageName = "business-analyst",
+                PromptText = "Work on feature <F>.",
+                OverridesBuiltInPrompt = true,
+            });
+            seedDb.Profiles.Add(profile);
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = Assert.Single(fake.Prompts);
+        Assert.Equal("Work on feature feat-001.", openingPrompt);
+    }
+
+    [Fact]
     public async Task StartStage_AugmentModeStillAppendsAfterTheBuiltInPromptWhenOverrideIsOff()
     {
         // Sibling of the override test above: default (OverridesBuiltInPrompt = false)

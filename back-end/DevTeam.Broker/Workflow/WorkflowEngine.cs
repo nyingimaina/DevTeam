@@ -300,6 +300,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var guidanceContext = BuildGuidanceContext(feature);
         var artifactContext = BuildArtifactContext(workspacePath, featureKey, currentStageIndex == 0);
         var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
+        var profilePromptText = ResolvePlaceholders(resolvedPrompt.Text, workflow, workspacePath, featureKey);
         var specialists = await db.SpecialistRoles.ToListAsync(ct);
 
         // A role-declared seed (e.g. the default business-analyst role's BRS-authoring
@@ -311,7 +312,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             : ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
 
         var finalPrompt = resolvedPrompt.OverridesBuiltIn
-            ? resolvedPrompt.Text
+            ? profilePromptText
             : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
               MultiQuestionDetector.SingleQuestionInstruction +
               " Follow each answer to its logical conclusion before asking the next. " +
@@ -319,7 +320,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
               requirementsAuthoring +
               HandoffAutomationClause +
               BuildDelegationClause(specialists, featureKey) +
-              AsAugmentingClause(resolvedPrompt.Text) +
+              AsAugmentingClause(profilePromptText) +
               guidanceContext +
               artifactContext;
 
@@ -666,6 +667,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             // by the very next retry instead of only by some future, unrelated stage.
             var guidanceContext = BuildGuidanceContext(feature);
             var resolvedPrompt = await ResolveActiveProfilePromptAsync(db, workspacePath, role.Name, ct);
+            var profilePromptText = ResolvePlaceholders(resolvedPrompt.Text, workflow, workspacePath, featureKey);
             var specialists = await db.SpecialistRoles.ToListAsync(ct);
             // Bug fix: role.SeedPrompt used to only be honored in StartStageAsync (the
             // interactive path) — every custom autonomous stage (anything that isn't a
@@ -674,14 +676,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 ? string.Empty
                 : " " + ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
             var prompt = resolvedPrompt.OverridesBuiltIn
-                ? resolvedPrompt.Text
+                ? profilePromptText
                 : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
                   "Work autonomously and do not ask the user for input. Produce the required artifacts." +
                   seedInstruction +
                   HandoffAutomationClause +
                   AutonomousTersenessClause +
                   BuildDelegationClause(specialists, featureKey) +
-                  AsAugmentingClause(resolvedPrompt.Text) +
+                  AsAugmentingClause(profilePromptText) +
                   guidanceContext +
                   artifactContext +
                   "When you are done, say DONE and provide a summary of what you changed.";
