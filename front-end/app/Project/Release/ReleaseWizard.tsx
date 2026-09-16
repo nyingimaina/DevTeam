@@ -819,6 +819,23 @@ function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
           </ul>
         )}
       </section>
+
+      <section>
+        <h4>Specialist consultations</h4>
+        {run.specialistConsultations.length === 0 ? (
+          <p>No specialists consulted yet.</p>
+        ) : (
+          <ul className={styles.diagnosticsList}>
+            {run.specialistConsultations.map((consultation) => (
+              <li key={consultation.id}>
+                <div className={styles.diagnosticsNoteAttribution}>Consulted: {stageLabel(consultation.specialistName)}</div>
+                <div>{consultation.question}</div>
+                <pre className={styles.diagnosticsEvidence}>{consultation.responseText}</pre>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

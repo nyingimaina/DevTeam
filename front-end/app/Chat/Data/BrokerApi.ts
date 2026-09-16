@@ -14,6 +14,7 @@ import {
   PipelineEditorRoleDto,
   PipelineStageDto,
   ProfileDto,
+  SpecialistRoleDto,
   ReleaseDto,
   ReleaseFeatureDto,
   SessionDetail,
@@ -242,6 +243,30 @@ export default class BrokerApi {
 
   getWorkspaceProfileAsync(workspacePath: string): Promise<WorkspaceProfileDto> {
     return this.requestAsync<WorkspaceProfileDto>(`/api/workspace/profile?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  // ─── specialists ────────────────────────────────────────────────────────
+
+  getSpecialistsAsync(): Promise<SpecialistRoleDto[]> {
+    return this.requestAsync<SpecialistRoleDto[]>("/api/specialists");
+  }
+
+  createSpecialistAsync(name: string, description: string, primingPrompt: string, writesCode: boolean): Promise<SpecialistRoleDto> {
+    return this.requestAsync<SpecialistRoleDto>("/api/specialists", {
+      method: "POST",
+      body: JSON.stringify({ name, description, primingPrompt, writesCode }),
+    });
+  }
+
+  updateSpecialistAsync(id: string, name: string, description: string, primingPrompt: string, writesCode: boolean): Promise<SpecialistRoleDto> {
+    return this.requestAsync<SpecialistRoleDto>(`/api/specialists/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ name, description, primingPrompt, writesCode }),
+    });
+  }
+
+  deleteSpecialistAsync(id: string): Promise<{ ok: boolean }> {
+    return this.requestAsync<{ ok: boolean }>(`/api/specialists/${id}`, { method: "DELETE" });
   }
 
   // ─── pipeline authoring ─────────────────────────────────────────────────

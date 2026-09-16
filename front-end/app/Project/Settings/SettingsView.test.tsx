@@ -18,6 +18,11 @@ jest.mock("./PipelineView", () => ({
   ),
 }));
 
+jest.mock("./SpecialistsView", () => ({
+  __esModule: true,
+  default: () => <div data-testid="specialists-view-mock">Specialists Mock</div>,
+}));
+
 describe("SettingsView", () => {
   it("shows the Profiles tab by default", () => {
     render(<SettingsView api={{} as BrokerApi} workspacePath="C:/work/proj" />);
@@ -41,5 +46,13 @@ describe("SettingsView", () => {
     fireEvent.click(screen.getByText("Pipeline"));
     expect(screen.getByTestId("pipeline-view-mock")).toBeInTheDocument();
     expect(screen.getByText(/Pipeline Mock/)).toHaveTextContent("C:/work/proj");
+  });
+
+  it("switches to the Specialists tab", () => {
+    render(<SettingsView api={{} as BrokerApi} workspacePath="C:/work/proj" />);
+
+    expect(screen.getByText("Specialists")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Specialists"));
+    expect(screen.getByTestId("specialists-view-mock")).toBeInTheDocument();
   });
 });

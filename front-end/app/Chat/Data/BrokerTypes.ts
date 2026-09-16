@@ -186,9 +186,19 @@ export interface ReleaseStageRunDto {
   gateChecks: ReleaseGateCheckDto[];
   findings: ReviewFindingDto[];
   guidanceNotes: ReleaseGuidanceNoteDto[];
+  specialistConsultations: SpecialistConsultationRecordDto[];
   lastErrorKind: string;
   lastErrorMessage?: string | null;
   lastErrorAt?: string | null;
+}
+
+export interface SpecialistConsultationRecordDto {
+  id: string;
+  stageRunId: string;
+  specialistName: string;
+  question: string;
+  responseText: string;
+  createdAt: string;
 }
 
 export interface ReleaseGuidanceNoteDto {
@@ -333,6 +343,16 @@ export interface ProfileDto {
 
 export interface WorkspaceProfileDto {
   profileId: string | null;
+}
+
+// ─── specialists (Part 3) ─────────────────────────────────────────────────────
+
+export interface SpecialistRoleDto {
+  id: string;
+  name: string;
+  description: string;
+  primingPrompt: string;
+  writesCode: boolean;
 }
 
 // ─── pipeline authoring (Part 2C) ────────────────────────────────────────────

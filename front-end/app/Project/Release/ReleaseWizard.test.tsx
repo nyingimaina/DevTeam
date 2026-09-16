@@ -30,6 +30,7 @@ function makeRun(overrides: Partial<ReleaseStageRunDto> = {}): ReleaseStageRunDt
     gateChecks: [],
     findings: [],
     guidanceNotes: [],
+    specialistConsultations: [],
     lastErrorKind: "None",
     ...overrides,
   };
@@ -863,6 +864,37 @@ describe("ReleaseWizard", () => {
     expect(screen.getByText("Exit checks")).toBeInTheDocument();
     expect(screen.getByText(/owned by Business Analyst/)).toBeInTheDocument();
     expect(screen.getByText(/owned by Developer/)).toBeInTheDocument();
+  });
+
+  it("shows specialist consultations in the diagnostics pane", async () => {
+    const run = makeRun({
+      id: "sr-dev",
+      stageName: "developer",
+      status: "Active",
+      specialistConsultations: [
+        {
+          id: "c1",
+          stageRunId: "sr-dev",
+          specialistName: "database-admin",
+          question: "How do I add a NOT NULL column safely?",
+          responseText: "Add it nullable, backfill, then add the constraint.",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+    await openDetail(release);
+
+    const user2 = userEvent.setup();
+    await user2.click(await screen.findByTestId("release-diagnostics-btn"));
+
+    expect(await screen.findByText("Specialist consultations")).toBeInTheDocument();
+    expect(screen.getByText(/Consulted: Database Admin/)).toBeInTheDocument();
+    expect(screen.getByText("How do I add a NOT NULL column safely?")).toBeInTheDocument();
+    expect(screen.getByText("Add it nullable, backfill, then add the constraint.")).toBeInTheDocument();
   });
 
   it("does not spin the checklist's current step once the stage is blocked (nothing is actually running)", async () => {
