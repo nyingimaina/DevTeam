@@ -2147,7 +2147,7 @@ public class WorkflowEngineTests : IDisposable
         Assert.Contains(_gitService.Commands, c => c.StartsWith("stash-drop"));
 
         await using var db = CreateFactory().CreateDbContext();
-        var attempt = await db.MergeConflictResolutions.SingleAsync(r => r.ReleaseFeatureId == second.Id);
+        var attempt = await db.MergeConflictResolutions.SingleAsync(r => r.SubjectId == second.Id);
         Assert.True(attempt.Succeeded);
     }
 
@@ -2225,6 +2225,102 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(ReleaseFeatureStatus.OnHold, refreshedBAfter.Features.Single(f => f.Id == featureB).Status);
     }
 
+    // ─── GitFlow: release finalization (Part 7E) ───────────────────────────
+
+    [Fact]
+    public async Task FinalizeRelease_WhenNotReady_Throws()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.FinalizeReleaseAsync(release.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FinalizeRelease_WithAnIncompleteFeatureStillOpen_Throws()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        // Completing the first of two features flips release.Status to Ready today (a known,
+        // pre-existing 7A gap not fixed here) even though the second feature is still open —
+        // this guard is what actually stops finalization from proceeding in that state.
+        var afterFirst = await CompleteFeatureThroughQaAsync(engine, firstFeatureId);
+        Assert.Equal(ReleaseStatus.Ready, afterFirst.Status);
+        Assert.NotEqual(ReleaseFeatureStatus.Complete, afterFirst.Features.Single(f => f.Id == second.Id).Status);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.FinalizeReleaseAsync(release.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FinalizeRelease_MergesIntoMainAndDevelop_PushesAndDeletesReleaseBranch()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await CompleteFeatureThroughQaAsync(engine, featureId);
+        _gitService.Commands.Clear();
+
+        var final = await engine.FinalizeReleaseAsync(release.Id, CancellationToken.None);
+
+        Assert.Equal(ReleaseStatus.Released, final.Status);
+        Assert.Contains("checkout:main", _gitService.Commands);
+        Assert.Contains("merge:release/feat-001->main", _gitService.Commands);
+        Assert.Contains("checkout:develop", _gitService.Commands);
+        Assert.Contains("merge:release/feat-001->develop", _gitService.Commands);
+        Assert.Contains("push:main", _gitService.Commands);
+        Assert.Contains("push:develop", _gitService.Commands);
+        Assert.Contains("delete-branch:release/feat-001", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task FinalizeRelease_MergeConflictResolvedByAgent_StillReachesReleased()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await CompleteFeatureThroughQaAsync(engine, featureId);
+
+        _gitService.FailMerge = true;
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
+        _coordinator.OnPrompt = (_, _) => _gitService.StageAllConflictedFiles = [];
+
+        var final = await engine.FinalizeReleaseAsync(release.Id, CancellationToken.None);
+
+        Assert.Equal(ReleaseStatus.Released, final.Status);
+        Assert.Contains(_gitService.Commands, c => c.StartsWith("commit:") && c.Contains("conflicts resolved"));
+
+        await using var db = CreateFactory().CreateDbContext();
+        var attempts = await db.MergeConflictResolutions.Where(r => r.SubjectId == release.Id).ToListAsync();
+        Assert.NotEmpty(attempts);
+        Assert.All(attempts, a => Assert.True(a.Succeeded));
+        // Unrestricted write scope for a release-level merge — it can touch any feature's files.
+        Assert.Contains(_coordinator.AllowedWritePrefixesCalls, p => p is null);
+    }
+
+    [Fact]
+    public async Task FinalizeRelease_MergeConflictNeverResolved_ThrowsAndLeavesReleaseReady()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await CompleteFeatureThroughQaAsync(engine, featureId);
+
+        _gitService.FailMerge = true;
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.FinalizeReleaseAsync(release.Id, CancellationToken.None));
+
+        var afterFailure = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        Assert.Equal(ReleaseStatus.Ready, afterFailure.Status);
+        Assert.DoesNotContain("delete-branch:release/feat-001", _gitService.Commands);
+    }
+
     [Fact]
     public async Task Signoff_OnLastStage_MergesFeatureIntoReleaseAndDeletesBranches()
     {
@@ -2267,7 +2363,7 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(3, _gitService.Commands.Count(c => c == "stage-all"));
 
         await using var db = CreateFactory().CreateDbContext();
-        var attempts = await db.MergeConflictResolutions.Where(r => r.ReleaseFeatureId == featureId).ToListAsync();
+        var attempts = await db.MergeConflictResolutions.Where(r => r.SubjectId == featureId).ToListAsync();
         Assert.Equal(3, attempts.Count);
         Assert.All(attempts, a => Assert.False(a.Succeeded));
     }
@@ -2291,7 +2387,7 @@ public class WorkflowEngineTests : IDisposable
         Assert.Contains(_gitService.Commands, c => c.StartsWith("commit:") && c.Contains("conflicts resolved"));
 
         await using var db = CreateFactory().CreateDbContext();
-        var attempt = await db.MergeConflictResolutions.SingleAsync(r => r.ReleaseFeatureId == featureId);
+        var attempt = await db.MergeConflictResolutions.SingleAsync(r => r.SubjectId == featureId);
         Assert.True(attempt.Succeeded);
         Assert.Equal(1, attempt.Attempt);
     }

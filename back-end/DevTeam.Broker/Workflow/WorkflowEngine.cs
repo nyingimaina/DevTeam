@@ -317,8 +317,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (!applyResult.Success)
             {
                 var conflictedFiles = applyResult.ConflictedFiles ?? [];
+                var prefixes = ResolveAllowedWritePrefixes(writesCode: true, "conflict-resolver", workspacePath, feature.Key, LoadWorkflow(workspacePath));
                 var resolved = conflictedFiles.Length > 0 &&
-                    await ResolveConflictAsync(featureId, workspacePath, feature.Key, conflictedFiles, LoadWorkflow(workspacePath), db, ct);
+                    await ResolveConflictAsync(featureId, workspacePath, prefixes, conflictedFiles, db, ct);
                 if (!resolved)
                 {
                     // The stash is left in place (never dropped on failure) so a human or a
@@ -1492,8 +1493,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (!mergeResult.Success)
         {
             var conflictedFiles = mergeResult.ConflictedFiles ?? [];
+            var prefixes = ResolveAllowedWritePrefixes(writesCode: true, "conflict-resolver", release.WorkspacePath, feature.Key, LoadWorkflow(release.WorkspacePath));
             var resolved = conflictedFiles.Length > 0 &&
-                await ResolveConflictAsync(feature.Id, release.WorkspacePath, feature.Key, conflictedFiles, LoadWorkflow(release.WorkspacePath), db, ct);
+                await ResolveConflictAsync(feature.Id, release.WorkspacePath, prefixes, conflictedFiles, db, ct);
             if (!resolved)
                 throw new InvalidOperationException(
                     $"Could not merge '{feature.BranchName}' into '{release.BranchName}': {mergeResult.Message}");
@@ -1537,6 +1539,93 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var settings = await db.WorkspaceGitSettings.FindAsync([workspacePath], ct);
         if (settings?.CredentialName is null) return null;
         return _credentialStore.TryGetToken(settings.CredentialName);
+    }
+
+    // ─── GitFlow: release finalization — main and develop finally get a real purpose ───
+
+    /// <summary>
+    /// An explicit user action (Part 7E — a "Ship this release" button), enabled only once a
+    /// release is Ready and every one of its features has actually completed: merges the
+    /// release branch into both main and develop (develop was created at git init and, until
+    /// now, never merged back into by anything), pushes both, deletes the release branch, and
+    /// finally sets ReleaseStatus.Released — the first place this enum value is ever set.
+    /// </summary>
+    public async Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var release = await db.Releases.Include(r => r.Features)
+            .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
+            ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
+
+        if (release.Status != ReleaseStatus.Ready)
+            throw new InvalidOperationException(
+                $"Release must be Ready to finalize (current status: {release.Status}).");
+
+        var incomplete = release.Features.Where(f => f.Status != ReleaseFeatureStatus.Complete).ToList();
+        if (incomplete.Count > 0)
+            throw new InvalidOperationException(
+                "All features must be Complete before finalizing the release. Still open: " +
+                string.Join(", ", incomplete.Select(f => f.Key)) + ".");
+
+        await MergeReleaseIntoAsync(db, release, "main", ct);
+        await MergeReleaseIntoAsync(db, release, "develop", ct);
+
+        var authToken = await TryGetCredentialForWorkspaceAsync(db, release.WorkspacePath, ct);
+
+        var remoteCheck = await _gitService.HasRemoteAsync(release.WorkspacePath, ct);
+        if (remoteCheck.HasRemote)
+        {
+            var pushMain = await _gitService.PushAsync(release.WorkspacePath, "main", authToken, ct);
+            if (!pushMain.Success)
+                _logger.LogWarning("Push of 'main' failed after finalizing release '{Release}': {Message}", release.Title, pushMain.Message);
+
+            var pushDevelop = await _gitService.PushAsync(release.WorkspacePath, "develop", authToken, ct);
+            if (!pushDevelop.Success)
+                _logger.LogWarning("Push of 'develop' failed after finalizing release '{Release}': {Message}", release.Title, pushDevelop.Message);
+        }
+        else
+        {
+            _logger.LogInformation("No remote configured for '{Workspace}'; skipping push after finalizing release.", release.WorkspacePath);
+        }
+
+        var deleteResult = await _gitService.DeleteBranchAsync(release.WorkspacePath, release.BranchName, authToken, ct);
+        if (!deleteResult.Success)
+            _logger.LogWarning("Deleting release branch '{Branch}' failed: {Message}", release.BranchName, deleteResult.Message);
+
+        release.Status = ReleaseStatus.Released;
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return await LoadReleaseAsync(db, releaseId, ct);
+    }
+
+    private async Task MergeReleaseIntoAsync(DevTeamDbContext db, DevTeamRelease release, string targetBranch, CancellationToken ct)
+    {
+        var workspacePath = release.WorkspacePath;
+
+        var checkoutResult = await _gitService.CheckoutAsync(workspacePath, targetBranch, ct);
+        if (!checkoutResult.Success)
+            throw new InvalidOperationException($"Could not check out '{targetBranch}': {checkoutResult.Message}");
+
+        var mergeResult = await _gitService.MergeAsync(workspacePath, release.BranchName, targetBranch, ct);
+        if (!mergeResult.Success)
+        {
+            var conflictedFiles = mergeResult.ConflictedFiles ?? [];
+            // Unrestricted write scope (null) — a release merge can touch any of its features'
+            // files, not just one feature's manifest-declared slice, unlike a single feature's
+            // own merge/switch conflicts (see FinalizeFeatureCompletionAsync/SwitchFeatureAsync).
+            var resolved = conflictedFiles.Length > 0 &&
+                await ResolveConflictAsync(release.Id, workspacePath, allowedWritePrefixes: null, conflictedFiles, db, ct);
+            if (!resolved)
+                throw new InvalidOperationException(
+                    $"Could not merge '{release.BranchName}' into '{targetBranch}': {mergeResult.Message}");
+
+            var commitResult = await _gitService.CommitAsync(
+                workspacePath, $"Merge '{release.BranchName}' into {targetBranch} (conflicts resolved)", ct);
+            if (!commitResult.Success)
+                throw new InvalidOperationException($"Could not finalize the merge commit after resolving conflicts: {commitResult.Message}");
+        }
     }
 
     // ─── pipeline discipline: write scoping, leading builtins, artifact handoff ─
@@ -1855,16 +1944,20 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// is left in place (never force-aborted) and the caller surfaces a clear failure instead
     /// of silently losing work. Every attempt is recorded in MergeConflictResolution for
     /// diagnostics, mirroring how SpecialistConsultation records a delegation round-trip.
+    /// allowedWritePrefixes is left to the caller: a feature-scoped conflict (a switch's
+    /// stash-apply, or a feature-to-release merge) passes the same manifest-derived scope
+    /// ResolveAllowedWritePrefixes already computes for that feature, while a release-scoped
+    /// conflict (7E's release-to-main/develop merge, which can touch any feature's files) needs
+    /// unrestricted access — null, same convention as every other unscoped session in this app.
     /// </summary>
     private async Task<bool> ResolveConflictAsync(
-        Guid releaseFeatureId, string workspacePath, string featureKey, IReadOnlyList<string> conflictedFiles,
-        WorkflowDefinition workflow, DevTeamDbContext db, CancellationToken ct)
+        Guid subjectId, string workspacePath, IReadOnlyList<string>? allowedWritePrefixes,
+        IReadOnlyList<string> conflictedFiles, DevTeamDbContext db, CancellationToken ct)
     {
         var remaining = conflictedFiles;
         for (var attempt = 1; attempt <= MaxConflictResolutionAttempts; attempt++)
         {
-            var allowedPrefixes = ResolveAllowedWritePrefixes(writesCode: true, "conflict-resolver", workspacePath, featureKey, workflow);
-            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedPrefixes, ct);
+            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
             await _coordinator.PromptWithSessionRecoveryAsync(
                 session.SessionId, BuildConflictResolutionPrompt(remaining), ct, isPriming: true);
             var answer = await GetLatestAssistantTextAsync(db, session.SessionId, ct) ?? "(no response)";
@@ -1875,7 +1968,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
             db.MergeConflictResolutions.Add(new MergeConflictResolution
             {
-                ReleaseFeatureId = releaseFeatureId,
+                SubjectId = subjectId,
                 ConflictedFiles = string.Join(", ", remaining),
                 Attempt = attempt,
                 Succeeded = succeeded,

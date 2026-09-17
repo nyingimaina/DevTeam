@@ -602,6 +602,18 @@ public static class ApiEndpoints
             }
         });
 
+        app.MapPost("/api/releases/{releaseId:guid}/finalize", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.FinalizeReleaseAsync(releaseId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         app.MapGet("/healthz", (HttpContext ctx) =>
         {
             var appInfo = ctx.RequestServices.GetRequiredService<IAppInfo>();
