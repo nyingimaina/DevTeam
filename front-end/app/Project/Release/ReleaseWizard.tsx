@@ -438,18 +438,101 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
         </>
       )}
 
-      {release.features.some((f) => f.status === "Complete") && (
-        <details className={styles.timeline}>
-          <summary>Completed features</summary>
-          {release.features.filter((f) => f.status === "Complete").map((f) => (
-            <div key={f.id} className={styles.stageCard} data-testid={`${testIdPrefix}-completed-feature-${f.key}`}>
-              <span className={styles.stageName}>{f.key}</span>
-              <span className={styles.questionBadge}>{f.branchName} — merged</span>
-            </div>
-          ))}
-        </details>
+      {release.features.length > 0 && (
+        <FeatureList
+          release={release}
+          activeFeatureId={featureId}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          onReleaseUpdated={onReleaseUpdated}
+        />
       )}
     </div>
+  );
+}
+
+// ─── feature list: every feature in the release, regardless of status, with a ──
+// switch action — a release can have many concurrently-open features (7A); only
+// one is ever the workspace's active checkout at a time (7B), so switching away
+// from it parks its WIP via a git stash and restores whichever stash (if any)
+// belongs to the feature being switched to.
+
+interface IFeatureListProps {
+  release: ReleaseDto;
+  activeFeatureId: string | null;
+  api: BrokerApi;
+  testIdPrefix: string;
+  onReleaseUpdated: (release: ReleaseDto) => void;
+}
+
+function FeatureList({ release, activeFeatureId, api, testIdPrefix, onReleaseUpdated }: IFeatureListProps) {
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [addingFeature, setAddingFeature] = useState(false);
+
+  const handleSwitch = useCallback(async (featureId: string) => {
+    setSwitchingId(featureId);
+    setSwitchError(null);
+    try {
+      const fresh = await api.switchFeatureAsync(featureId);
+      onReleaseUpdated(fresh);
+    } catch (e) {
+      setSwitchError(toErrorMessage(e));
+    } finally {
+      setSwitchingId(null);
+    }
+  }, [api, onReleaseUpdated]);
+
+  const handleFeatureAdded = useCallback((fresh: ReleaseDto) => {
+    onReleaseUpdated(fresh);
+    setAddingFeature(false);
+  }, [onReleaseUpdated]);
+
+  return (
+    <details className={styles.timeline} open data-testid={`${testIdPrefix}-feature-list`}>
+      <summary>Features ({release.features.length})</summary>
+      {switchError && <div className={styles.error}>{switchError}</div>}
+      {release.features.map((f) => {
+        const isActive = f.id === activeFeatureId;
+        const canSwitch = !isActive && f.status !== "Complete";
+        return (
+          <div key={f.id} className={styles.stageCard} data-testid={`${testIdPrefix}-feature-${f.key}`}>
+            <span className={styles.stageName}>{f.key}</span>
+            <span className={`${styles.releaseStatus} ${statusColor(f.status)}`}>{statusLabel(f.status)}</span>
+            <span className={styles.questionBadge}>{f.branchName}</span>
+            {isActive && <span className={styles.stepTick} data-testid={`${testIdPrefix}-feature-${f.key}-active`}>✓ active</span>}
+            {canSwitch && (
+              <ZestButton
+                type="button"
+                onClick={() => void handleSwitch(f.id)}
+                disabled={switchingId !== null}
+                data-testid={`${testIdPrefix}-switch-feature-${f.key}`}
+                zest={{ buttonStyle: "outline", visualOptions: { size: "sm" }, busyOptions: { preventRageClick: true } }}
+              >
+                {switchingId === f.id ? "Switching..." : "Switch to this feature"}
+              </ZestButton>
+            )}
+          </div>
+        );
+      })}
+      {addingFeature ? (
+        <CreateFeatureForm
+          release={release}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          onReleaseUpdated={handleFeatureAdded}
+        />
+      ) : (
+        <ZestButton
+          type="button"
+          onClick={() => setAddingFeature(true)}
+          data-testid={`${testIdPrefix}-add-feature-btn`}
+          zest={{ semanticType: "add", buttonStyle: "text", visualOptions: { size: "sm" } }}
+        >
+          Add another feature
+        </ZestButton>
+      )}
+    </details>
   );
 }
 

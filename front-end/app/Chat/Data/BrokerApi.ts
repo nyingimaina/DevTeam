@@ -148,6 +148,12 @@ export default class BrokerApi {
     });
   }
 
+  switchFeatureAsync(featureId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/switch-to`, {
+      method: "POST",
+    });
+  }
+
   // ─── git endpoints ────────────────────────────────────────────────────
 
   initGitAsync(workspacePath: string): Promise<GitStatusDto> {

@@ -1199,7 +1199,7 @@ describe("ReleaseWizard", () => {
       });
     });
 
-    it("lists completed features in a history section", async () => {
+    it("lists every feature, regardless of status, in an always-visible section", async () => {
       const release = makeRelease({
         currentFeatureId: null,
         features: [
@@ -1208,9 +1208,43 @@ describe("ReleaseWizard", () => {
       });
       await openDetailNoFeature(release);
 
-      expect(screen.getByText("Completed features")).toBeInTheDocument();
-      await userEvent.setup().click(screen.getByText("Completed features"));
-      expect(screen.getByTestId("release-completed-feature-login-form")).toBeInTheDocument();
+      expect(screen.getByText("Features (1)")).toBeInTheDocument();
+      expect(screen.getByTestId("release-feature-login-form")).toBeInTheDocument();
+      // Complete features are not switch targets — nothing left to resume.
+      expect(screen.queryByTestId("release-switch-feature-login-form")).not.toBeInTheDocument();
+    });
+
+    it("offers a switch action for a parked (OnHold) feature and calls switchFeatureAsync", async () => {
+      const release = makeRelease({
+        currentFeatureId: "f1",
+        features: [
+          { id: "f0", releaseId: "r1", key: "login-form", title: "login-form", branchName: "feature/login-form", status: "OnHold", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: "f1", releaseId: "r1", key: "password-reset", title: "password-reset", branchName: "feature/password-reset", status: "InProgress", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+        ],
+      });
+      const switched = { ...release, currentFeatureId: "f0" };
+      mockApi.switchFeatureAsync.mockResolvedValue(switched);
+      const user = await openDetail(release);
+
+      expect(screen.getByTestId("release-feature-password-reset-active")).toBeInTheDocument();
+      await user.click(screen.getByTestId("release-switch-feature-login-form"));
+
+      await waitFor(() => {
+        expect(mockApi.switchFeatureAsync).toHaveBeenCalledWith("f0");
+      });
+    });
+
+    it("lets the user add another feature from the feature list even while one is active", async () => {
+      const release = makeRelease({
+        currentFeatureId: "f1",
+        features: [
+          { id: "f1", releaseId: "r1", key: "password-reset", title: "password-reset", branchName: "feature/password-reset", status: "InProgress", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+        ],
+      });
+      const user = await openDetail(release);
+
+      await user.click(screen.getByTestId("release-add-feature-btn"));
+      expect(screen.getByTestId("release-new-feature-key")).toBeInTheDocument();
     });
   });
 });

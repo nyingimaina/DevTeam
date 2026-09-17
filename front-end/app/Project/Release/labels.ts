@@ -30,6 +30,9 @@ const STATUS_LABELS: Record<string, string> = {
   // Distinct from BlockedGate: this stage's own gates never ran — an EntryGate checking
   // something the *previous* stage produced failed first.
   BlockedEntry: "Blocked before starting — check entry requirements",
+  // ReleaseFeatureStatus values (feature-list card, not the release/stage header).
+  Proposed: "Not started",
+  OnHold: "Parked — switch to resume",
 };
 
 // Distinct copy per failure kind so "needs retry" doesn't read as one generic error —
