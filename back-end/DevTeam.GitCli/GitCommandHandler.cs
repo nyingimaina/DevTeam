@@ -12,6 +12,7 @@ public class GitCommandHandler
             "commit" => await CommitAsync(request),
             "merge" => await MergeAsync(request),
             "merge-abort" => await MergeAbortAsync(request),
+            "stage-all" => await StageAllAsync(request),
             "log" => await LogAsync(request),
             "ensure-branch" => await EnsureBranchAsync(request),
             "push" => await PushAsync(request),
@@ -164,6 +165,22 @@ public class GitCommandHandler
 
         var status = await GetStatusAsync(request.WorkspacePath);
         return new GitResponse(true, "Merge aborted", Branch: status.branch, IsClean: status.isClean);
+    }
+
+    // Stages whatever is currently on disk (git add -A) so git considers any previously
+    // "unmerged" path resolved — the deterministic step a conflict-resolution turn needs after
+    // an agent has edited a conflicted file's content, since git only clears the unmerged
+    // (stage 1/2/3) index state once a path is re-added, regardless of how it got fixed.
+    private static async Task<GitResponse> StageAllAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+
+        var (exit, _, err) = await RunGitAsync(request.WorkspacePath, "add", "-A");
+        if (exit != 0) return new GitResponse(false, $"git add failed: {err}");
+
+        var conflicted = await GetConflictedFilesAsync(request.WorkspacePath);
+        return new GitResponse(true, "Staged", ConflictedFiles: conflicted);
     }
 
     // Never populated for a clean success — only meaningful right after a merge/stash-apply

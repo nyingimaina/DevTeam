@@ -27,6 +27,7 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<ReleaseUsageLedger> ReleaseUsageLedgers => Set<ReleaseUsageLedger>();
     public DbSet<ReleaseFlowPosition> ReleaseFlowPositions => Set<ReleaseFlowPosition>();
     public DbSet<WorkspaceActiveCheckout> WorkspaceActiveCheckouts => Set<WorkspaceActiveCheckout>();
+    public DbSet<MergeConflictResolution> MergeConflictResolutions => Set<MergeConflictResolution>();
     public DbSet<WorkspaceGitSettings> WorkspaceGitSettings => Set<WorkspaceGitSettings>();
     public DbSet<Profile> Profiles => Set<Profile>();
     public DbSet<ProfilePrompt> ProfilePrompts => Set<ProfilePrompt>();
@@ -96,6 +97,13 @@ public sealed class DevTeamDbContext : DbContext
         modelBuilder.Entity<WorkspaceActiveCheckout>(checkout =>
         {
             checkout.HasKey(e => e.WorkspacePath);
+        });
+
+        modelBuilder.Entity<MergeConflictResolution>(resolution =>
+        {
+            resolution.HasKey(e => e.Id);
+            resolution.Property(e => e.ConflictedFiles).HasColumnType("TEXT");
+            resolution.Property(e => e.ResponseText).HasColumnType("TEXT");
         });
 
         modelBuilder.Entity<Profile>(profile =>

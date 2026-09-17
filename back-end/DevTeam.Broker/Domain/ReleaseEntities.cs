@@ -142,6 +142,26 @@ public sealed class WorkspaceActiveCheckout
     public Guid? ActiveHotfixId { get; set; }
 }
 
+/// <summary>
+/// A record of one LLM-assisted conflict-resolution attempt (Part 7D) — mirrors
+/// SpecialistConsultation's shape (which files, what happened, succeeded y/n) so a resolution
+/// is visible for diagnostics instead of disappearing into a session transcript nobody sees
+/// afterward. Not tied to a StageRun — a conflict happens outside any specific pipeline stage
+/// (a feature-to-release merge, or a stash-apply during a feature switch) — so it's scoped by
+/// a bare ReleaseFeatureId with no navigation property; this is a diagnostics log, not
+/// something the rest of the domain model needs to traverse.
+/// </summary>
+public sealed class MergeConflictResolution
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ReleaseFeatureId { get; set; }
+    public string ConflictedFiles { get; set; } = string.Empty;
+    public int Attempt { get; set; }
+    public bool Succeeded { get; set; }
+    public string ResponseText { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class ReleaseFeature
 {
     public Guid Id { get; set; } = Guid.NewGuid();

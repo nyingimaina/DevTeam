@@ -65,6 +65,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // WorkflowStep.LoopAttempts, just for a different kind of retry.
     private const int MaxDelegationRoundTrips = 3;
 
+    // Same shape as MaxDelegationRoundTrips — caps how many times ResolveConflictAsync (7D)
+    // opens a fresh session to try resolving a merge/stash-apply conflict before giving up and
+    // surfacing a clear "needs manual resolution" failure instead of retrying forever.
+    private const int MaxConflictResolutionAttempts = 3;
+
     private static CancellationTokenSource AgentPromptCts()
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
@@ -311,12 +316,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
             var applyResult = await _gitService.StashApplyAsync(workspacePath, targetTag, ct);
             if (!applyResult.Success)
             {
-                // Conflict resolution is a separate follow-on (LLM-assisted merge/stash-apply
-                // resolution) — for now, leave the stash in place (never dropped on failure)
-                // and surface a clear error instead of silently losing or discarding it.
-                throw new InvalidOperationException(
-                    $"Restoring '{feature.Key}'s parked changes failed: {applyResult.Message}. " +
-                    "The stash was not dropped — resolve the conflict manually, then retry.");
+                var conflictedFiles = applyResult.ConflictedFiles ?? [];
+                var resolved = conflictedFiles.Length > 0 &&
+                    await ResolveConflictAsync(featureId, workspacePath, feature.Key, conflictedFiles, LoadWorkflow(workspacePath), db, ct);
+                if (!resolved)
+                {
+                    // The stash is left in place (never dropped on failure) so a human or a
+                    // later retry can still resolve it — never silently lost or discarded.
+                    throw new InvalidOperationException(
+                        $"Restoring '{feature.Key}'s parked changes failed: {applyResult.Message}. " +
+                        "The stash was not dropped — resolve the conflict manually, then retry.");
+                }
             }
             await _gitService.StashDropAsync(workspacePath, targetTag, ct);
         }
@@ -1480,8 +1490,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var mergeResult = await _gitService.MergeAsync(release.WorkspacePath, feature.BranchName, release.BranchName, ct);
         if (!mergeResult.Success)
-            throw new InvalidOperationException(
-                $"Could not merge '{feature.BranchName}' into '{release.BranchName}': {mergeResult.Message}");
+        {
+            var conflictedFiles = mergeResult.ConflictedFiles ?? [];
+            var resolved = conflictedFiles.Length > 0 &&
+                await ResolveConflictAsync(feature.Id, release.WorkspacePath, feature.Key, conflictedFiles, LoadWorkflow(release.WorkspacePath), db, ct);
+            if (!resolved)
+                throw new InvalidOperationException(
+                    $"Could not merge '{feature.BranchName}' into '{release.BranchName}': {mergeResult.Message}");
+
+            var commitResult = await _gitService.CommitAsync(
+                release.WorkspacePath, $"Merge '{feature.BranchName}' into {release.BranchName} (conflicts resolved)", ct);
+            if (!commitResult.Success)
+                throw new InvalidOperationException($"Could not finalize the merge commit after resolving conflicts: {commitResult.Message}");
+        }
 
         var authToken = await TryGetCredentialForWorkspaceAsync(db, release.WorkspacePath, ct);
 
@@ -1820,6 +1841,61 @@ public sealed class WorkflowEngine : IWorkflowEngine
             _logger.LogWarning(ex, "Consulting specialist {Specialist} failed", specialist.Name);
             return $"Consulting {specialist.Name} failed ({ex.Message}). Continue your work without it.";
         }
+    }
+
+    /// <summary>
+    /// LLM-assisted resolution for a merge/stash-apply conflict (Part 7D), modeled directly on
+    /// the specialist-delegation pattern above: opens a new, separately-scoped session for the
+    /// resolution sub-task rather than reusing the calling session. The conflicted files
+    /// already contain git's native &lt;&lt;&lt;&lt;&lt;&lt;&lt;/=======/&gt;&gt;&gt;&gt;&gt;&gt;&gt; markers on disk, so no
+    /// bespoke diff-injection prompt is needed — same as every other agent turn in this app:
+    /// point at the workspace, give an instruction, let it use file tools. StageAllAsync (git
+    /// add -A) after each attempt is the deterministic signal for whether git still considers
+    /// anything unmerged — capped at MaxConflictResolutionAttempts; past the cap the conflict
+    /// is left in place (never force-aborted) and the caller surfaces a clear failure instead
+    /// of silently losing work. Every attempt is recorded in MergeConflictResolution for
+    /// diagnostics, mirroring how SpecialistConsultation records a delegation round-trip.
+    /// </summary>
+    private async Task<bool> ResolveConflictAsync(
+        Guid releaseFeatureId, string workspacePath, string featureKey, IReadOnlyList<string> conflictedFiles,
+        WorkflowDefinition workflow, DevTeamDbContext db, CancellationToken ct)
+    {
+        var remaining = conflictedFiles;
+        for (var attempt = 1; attempt <= MaxConflictResolutionAttempts; attempt++)
+        {
+            var allowedPrefixes = ResolveAllowedWritePrefixes(writesCode: true, "conflict-resolver", workspacePath, featureKey, workflow);
+            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedPrefixes, ct);
+            await _coordinator.PromptWithSessionRecoveryAsync(
+                session.SessionId, BuildConflictResolutionPrompt(remaining), ct, isPriming: true);
+            var answer = await GetLatestAssistantTextAsync(db, session.SessionId, ct) ?? "(no response)";
+
+            var stageResult = await _gitService.StageAllAsync(workspacePath, ct);
+            var stillConflicted = stageResult.ConflictedFiles ?? [];
+            var succeeded = stillConflicted.Length == 0;
+
+            db.MergeConflictResolutions.Add(new MergeConflictResolution
+            {
+                ReleaseFeatureId = releaseFeatureId,
+                ConflictedFiles = string.Join(", ", remaining),
+                Attempt = attempt,
+                Succeeded = succeeded,
+                ResponseText = answer,
+            });
+            await db.SaveChangesAsync(ct);
+
+            if (succeeded) return true;
+            remaining = stillConflicted;
+        }
+        return false;
+    }
+
+    private static string BuildConflictResolutionPrompt(IReadOnlyList<string> conflictedFiles)
+    {
+        var files = string.Join(", ", conflictedFiles);
+        return $"A git merge left unresolved conflicts in these files: {files}. Each file contains git's " +
+               "standard conflict markers (<<<<<<<, =======, >>>>>>>). Open each one, decide the correct " +
+               "final content given both sides, and edit the file to contain only that content with every " +
+               "marker removed. Do this for every listed file, then end your turn.";
     }
 
     /// <summary>

@@ -13,6 +13,10 @@ public interface IGitService
     // Deliberate, explicit escape hatch for a conflicted merge — MergeAsync no longer
     // auto-aborts on conflict, so a caller that gives up on resolving one calls this instead.
     Task<GitResponse> MergeAbortAsync(string workspacePath, CancellationToken ct = default);
+    // Stages whatever's on disk (git add -A) — the deterministic step after a conflict
+    // resolution turn that tells git a previously-unmerged path is now resolved. Returns the
+    // (hopefully now empty) ConflictedFiles list so the caller knows whether it worked.
+    Task<GitResponse> StageAllAsync(string workspacePath, CancellationToken ct = default);
     Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default);
@@ -66,6 +70,9 @@ public sealed class GitService : IGitService, IDisposable
 
     public async Task<GitResponse> MergeAbortAsync(string workspacePath, CancellationToken ct = default)
         => await SendAsync(new GitRequest("merge-abort", workspacePath), ct);
+
+    public async Task<GitResponse> StageAllAsync(string workspacePath, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("stage-all", workspacePath), ct);
 
     public async Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
         => await SendAsync(new GitRequest("branch", workspacePath, branchName), ct);

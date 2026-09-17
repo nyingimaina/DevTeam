@@ -223,6 +223,42 @@ public class GitCommandHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task StageAll_AfterResolvingConflictMarkersByHand_ClearsTheConflictedFilesList()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var filePath = Path.Combine(_tempDir, "shared.txt");
+        await File.WriteAllTextAsync(filePath, "base\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "base"));
+
+        await _handler.HandleAsync(new GitRequest("branch", _tempDir, BranchName: "feature/conflict"));
+        await _handler.HandleAsync(new GitRequest("checkout", _tempDir, BranchName: "feature/conflict"));
+        await File.WriteAllTextAsync(filePath, "feature change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "feature edit"));
+
+        await _handler.HandleAsync(new GitRequest("checkout", _tempDir, BranchName: "develop"));
+        await File.WriteAllTextAsync(filePath, "develop change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "develop edit"));
+
+        var mergeResult = await _handler.HandleAsync(new GitRequest("merge", _tempDir, SourceBranch: "feature/conflict", TargetBranch: "develop"));
+        Assert.False(mergeResult.Success);
+        Assert.Contains("shared.txt", mergeResult.ConflictedFiles!);
+
+        // Simulates an agent resolving the conflict by editing the file's content directly —
+        // stage-all (git add -A) is the deterministic step that tells git the conflict is
+        // resolved, mirroring what ResolveConflictAsync does after an LLM turn.
+        await File.WriteAllTextAsync(filePath, "resolved content\n");
+        var stageResult = await _handler.HandleAsync(new GitRequest("stage-all", _tempDir));
+
+        Assert.True(stageResult.Success);
+        Assert.NotNull(stageResult.ConflictedFiles);
+        Assert.Empty(stageResult.ConflictedFiles!);
+
+        // The merge is now completable with a normal commit.
+        var commitResult = await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "merge resolved"));
+        Assert.True(commitResult.Success);
+    }
+
+    [Fact]
     public async Task EnsureBranch_CreatesIfNotExists()
     {
         await _handler.HandleAsync(new GitRequest("init", _tempDir));

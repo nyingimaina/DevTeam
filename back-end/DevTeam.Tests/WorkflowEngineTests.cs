@@ -2115,10 +2115,40 @@ public class WorkflowEngineTests : IDisposable
 
         _gitService.DirtyWorkingTree = false;
         _gitService.FailStashApply = true;
+        // Never clears — simulates an agent that can't actually resolve it, so
+        // ResolveConflictAsync exhausts its retry cap and the caller still throws.
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => engine.SwitchFeatureAsync(second.Id, CancellationToken.None));
 
         Assert.DoesNotContain(_gitService.Commands, c => c.StartsWith("stash-drop"));
+        Assert.Equal(3, _gitService.Commands.Count(c => c == "stage-all"));
+    }
+
+    [Fact]
+    public async Task SwitchFeature_WhenStashApplyConflictIsResolvedByAgent_DropsTheStashAndSwitches()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var firstFeatureId = release.CurrentFeatureId!.Value;
+        var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
+
+        _gitService.DirtyWorkingTree = true;
+        await engine.SwitchFeatureAsync(firstFeatureId, CancellationToken.None);
+
+        _gitService.DirtyWorkingTree = false;
+        _gitService.FailStashApply = true;
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
+        _coordinator.OnPrompt = (_, _) => _gitService.StageAllConflictedFiles = [];
+
+        var switched = await engine.SwitchFeatureAsync(second.Id, CancellationToken.None);
+
+        Assert.Equal(second.Id, switched.CurrentFeatureId);
+        Assert.Contains(_gitService.Commands, c => c.StartsWith("stash-drop"));
+
+        await using var db = CreateFactory().CreateDbContext();
+        var attempt = await db.MergeConflictResolutions.SingleAsync(r => r.ReleaseFeatureId == second.Id);
+        Assert.True(attempt.Succeeded);
     }
 
     [Fact]
@@ -2222,6 +2252,9 @@ public class WorkflowEngineTests : IDisposable
         var featureId = release.CurrentFeatureId!.Value;
 
         _gitService.FailMerge = true;
+        // Never clears — simulates an agent that can't actually resolve it, so
+        // ResolveConflictAsync exhausts its retry cap and the caller still throws.
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => CompleteFeatureThroughQaAsync(engine, featureId));
@@ -2230,6 +2263,37 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(featureId, afterFailure.CurrentFeatureId);
         Assert.Equal(ReleaseFeatureStatus.InProgress, afterFailure.Features.Single().Status);
         Assert.DoesNotContain("delete-branch:feature/feat-001", _gitService.Commands);
+        // Resolution was attempted up to the cap — never a silent, un-retried failure.
+        Assert.Equal(3, _gitService.Commands.Count(c => c == "stage-all"));
+
+        await using var db = CreateFactory().CreateDbContext();
+        var attempts = await db.MergeConflictResolutions.Where(r => r.ReleaseFeatureId == featureId).ToListAsync();
+        Assert.Equal(3, attempts.Count);
+        Assert.All(attempts, a => Assert.False(a.Succeeded));
+    }
+
+    [Fact]
+    public async Task Signoff_OnLastStage_MergeConflict_ResolvedByAgent_CompletesTheMerge()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        _gitService.FailMerge = true;
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
+        // Simulates the resolver's turn actually fixing the file: once the agent has
+        // responded, git add -A would find nothing left unmerged.
+        _coordinator.OnPrompt = (_, _) => _gitService.StageAllConflictedFiles = [];
+
+        var final = await CompleteFeatureThroughQaAsync(engine, featureId);
+
+        Assert.Equal(ReleaseFeatureStatus.Complete, final.Features.Single().Status);
+        Assert.Contains(_gitService.Commands, c => c.StartsWith("commit:") && c.Contains("conflicts resolved"));
+
+        await using var db = CreateFactory().CreateDbContext();
+        var attempt = await db.MergeConflictResolutions.SingleAsync(r => r.ReleaseFeatureId == featureId);
+        Assert.True(attempt.Succeeded);
+        Assert.Equal(1, attempt.Attempt);
     }
 
     [Fact]
@@ -2379,6 +2443,17 @@ internal sealed class FakeGitService : IGitService
         Commands.Add("merge-abort");
         FailMerge = false;
         return Task.FromResult(new GitResponse(true, "Merge aborted"));
+    }
+
+    // Simulates "git add -A" telling us whether a conflict is actually resolved yet — a test
+    // sets this to the still-conflicted list (or clears it, e.g. from an OnPrompt hook, to
+    // simulate an agent turn having fixed the files) to drive ResolveConflictAsync's retry loop.
+    public string[] StageAllConflictedFiles { get; set; } = [];
+
+    public Task<GitResponse> StageAllAsync(string workspacePath, CancellationToken ct = default)
+    {
+        Commands.Add("stage-all");
+        return Task.FromResult(new GitResponse(true, "Staged", ConflictedFiles: StageAllConflictedFiles));
     }
 
     public Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
