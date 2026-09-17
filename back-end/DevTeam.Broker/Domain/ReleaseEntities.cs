@@ -95,6 +95,14 @@ public sealed class DevTeamRelease
     /// <summary>Git branch this release ships from, e.g. "release/login-form". Set once, at creation.</summary>
     public string BranchName { get; set; } = string.Empty;
     /// <summary>
+    /// True for the lightweight release-shell a hotfix (Part 7F) is built on top of — reuses
+    /// the exact same ReleaseFeature/pipeline/signoff/gate machinery as a real release (no new
+    /// pipeline logic needed), but BranchName is "main" (not "release/&lt;key&gt;") since a
+    /// hotfix's single feature merges straight into main on signoff, and it's excluded from
+    /// ListReleasesAsync so it never clutters the normal release picker.
+    /// </summary>
+    public bool IsHotfix { get; set; }
+    /// <summary>
     /// The feature currently checked out in this release's workspace, if any — never a real
     /// column. A release has no disk representation of its own; "what's checked out" is a
     /// fact about the *workspace* (see WorkspaceActiveCheckout), since two releases can
@@ -132,8 +140,11 @@ public sealed class DevTeamRelease
 /// <summary>
 /// The single source of truth for "which branch is physically checked out in this workspace
 /// right now" — a fact about the workspace folder, not about any one release, since two
-/// releases can share a WorkspacePath. Exactly one of ActiveReleaseFeatureId/ActiveHotfixId is
-/// ever set (or neither, for a workspace with nothing currently active).
+/// releases can share a WorkspacePath. ActiveReleaseFeatureId is the checked-out
+/// ReleaseFeature's id regardless of whether it's a normal feature or a hotfix (Part 7F reuses
+/// ReleaseFeature for hotfixes too — see DevTeamRelease.IsHotfix); ActiveHotfixId mirrors that
+/// same id only when it's a hotfix (null otherwise) — a same-value tag, not a separate id
+/// space — purely so a caller can tell which kind is active without an extra join.
 /// </summary>
 public sealed class WorkspaceActiveCheckout
 {

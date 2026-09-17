@@ -23,6 +23,9 @@ public interface IWorkflowEngine
     Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct);
+    Task<ReleaseFeature> StartHotfixAsync(string key, string workspacePath, CancellationToken ct);
+    Task<DevTeamRelease> FinalizeHotfixAsync(Guid hotfixId, CancellationToken ct);
+    Task<IReadOnlyList<DevTeamRelease>> ListHotfixesAsync(string? workspacePath, CancellationToken ct);
     Task<IReadOnlyList<ModelOption>> GetAvailableModelsAsync(Guid releaseId, CancellationToken ct);
 }
 

@@ -2321,6 +2321,126 @@ public class WorkflowEngineTests : IDisposable
         Assert.DoesNotContain("delete-branch:release/feat-001", _gitService.Commands);
     }
 
+    // ─── GitFlow: hotfixes (Part 7F) ────────────────────────────────────────
+
+    [Fact]
+    public async Task StartHotfix_ChecksOutMainAndCreatesTheHotfixBranch()
+    {
+        var engine = CreateEngine();
+
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+
+        Assert.Equal("hotfix/critical-bug", hotfix.BranchName);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, hotfix.Status);
+        Assert.True(hotfix.Release.IsHotfix);
+        Assert.Equal("main", hotfix.Release.BranchName);
+        Assert.Contains("checkout:main", _gitService.Commands);
+        Assert.Contains("ensure-branch:hotfix/critical-bug", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task StartHotfix_DisplacesAnActiveFeature_MarksItOnHold()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+
+        var afterHotfix = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        Assert.Equal(ReleaseFeatureStatus.OnHold, afterHotfix.Features.Single(f => f.Id == featureId).Status);
+    }
+
+    [Fact]
+    public async Task Hotfix_CompletingThroughSignoff_MergesIntoMainAndDeletesTheHotfixBranch()
+    {
+        var engine = CreateEngine();
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+
+        var final = await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+
+        Assert.Equal(ReleaseFeatureStatus.Complete, final.Features.Single().Status);
+        Assert.Equal(ReleaseStatus.Ready, final.Status);
+        Assert.Contains("checkout:main", _gitService.Commands);
+        Assert.Contains("merge:hotfix/critical-bug->main", _gitService.Commands);
+        Assert.Contains("push:main", _gitService.Commands);
+        Assert.Contains("delete-branch:hotfix/critical-bug", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task FinalizeHotfix_WhenNotYetComplete_Throws()
+    {
+        var engine = CreateEngine();
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.FinalizeHotfixAsync(hotfix.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FinalizeHotfix_MergesMainIntoDevelopPushesAndSetsReleased()
+    {
+        var engine = CreateEngine();
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+        await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+        _gitService.Commands.Clear();
+
+        var final = await engine.FinalizeHotfixAsync(hotfix.Id, CancellationToken.None);
+
+        Assert.Equal(ReleaseStatus.Released, final.Status);
+        Assert.Contains("checkout:develop", _gitService.Commands);
+        Assert.Contains("merge:main->develop", _gitService.Commands);
+        Assert.Contains("push:develop", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task FinalizeHotfix_AlreadyFinalized_Throws()
+    {
+        var engine = CreateEngine();
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+        await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+        await engine.FinalizeHotfixAsync(hotfix.Id, CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.FinalizeHotfixAsync(hotfix.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ListReleases_ExcludesHotfixes_ButListHotfixesReturnsOnlyThem()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+
+        var releases = await engine.ListReleasesAsync(null, CancellationToken.None);
+        Assert.Single(releases);
+        Assert.Equal(release.Id, releases[0].Id);
+
+        var hotfixes = await engine.ListHotfixesAsync(null, CancellationToken.None);
+        Assert.Single(hotfixes);
+        Assert.True(hotfixes[0].IsHotfix);
+    }
+
+    [Fact]
+    public async Task SwitchFeature_AwayFromAnActiveHotfix_StashesItAndMarksItOnHold()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+
+        _gitService.DirtyWorkingTree = true;
+        var switched = await engine.SwitchFeatureAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(featureId, switched.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, switched.Features.Single(f => f.Id == featureId).Status);
+        Assert.Contains(_gitService.Commands, c => c.StartsWith($"stash-push:devteam-feature-{hotfix.Id:N}"));
+
+        await using var db = CreateFactory().CreateDbContext();
+        var hotfixAfter = await db.ReleaseFeatures.SingleAsync(f => f.Id == hotfix.Id);
+        Assert.Equal(ReleaseFeatureStatus.OnHold, hotfixAfter.Status);
+    }
+
     [Fact]
     public async Task Signoff_OnLastStage_MergesFeatureIntoReleaseAndDeletesBranches()
     {

@@ -156,7 +156,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // features live, and nothing stops two releases from sharing one). Step it down before
         // taking over the checkout, same as CreateFeatureAsync does within a single release.
         await MarkPreviouslyActiveFeatureOnHoldAsync(db, workspacePath, ct);
-        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: feature.Id, hotfixId: null, ct);
+        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: feature.Id, isHotfix: false, ct);
         release.CurrentFeatureId = feature.Id;
 
         var position = new ReleaseFlowPosition
@@ -185,6 +185,153 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         _logger.LogInformation("Started release {ReleaseId} for feature {FeatureKey}", release.Id, featureKey);
         return release;
+    }
+
+    // ─── hotfixes (Part 7F) ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// A hotfix branches from main directly and isn't tied to any in-progress release — but
+    /// reuses ReleaseFeature/the pipeline/signoff/gate machinery wholesale (see
+    /// DevTeamRelease.IsHotfix) instead of a parallel set of tables, so it runs through the
+    /// exact same RunStageAsync/StartStageAsync/SignoffAsync flow as a normal feature with no
+    /// new pipeline logic: on last-stage signoff, FinalizeFeatureCompletionAsync already merges
+    /// the hotfix branch into release.BranchName ("main" here) and pushes/deletes it — the only
+    /// genuinely new step is FinalizeHotfixAsync's follow-up merge into develop.
+    /// </summary>
+    public async Task<ReleaseFeature> StartHotfixAsync(string key, string workspacePath, CancellationToken ct)
+    {
+        var workflow = LoadWorkflow(workspacePath);
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var hotfixBranch = $"hotfix/{key}";
+
+        var release = new DevTeamRelease
+        {
+            WorkspacePath = workspacePath,
+            Title = $"Hotfix {key}",
+            Status = ReleaseStatus.InProgress,
+            BranchName = "main",
+            IsHotfix = true,
+        };
+
+        var hotfix = new ReleaseFeature
+        {
+            Release = release,
+            Key = key,
+            Title = key,
+            BranchName = hotfixBranch,
+            Status = ReleaseFeatureStatus.InProgress,
+        };
+        release.Features.Add(hotfix);
+
+        foreach (var role in workflow.Pipeline)
+        {
+            if (role.Signoff is not null)
+            {
+                hotfix.Signoffs.Add(new ReleaseSignoff
+                {
+                    Feature = hotfix,
+                    StageName = role.Name,
+                    Required = true,
+                    Approved = false,
+                });
+            }
+        }
+
+        db.Releases.Add(release);
+        await db.SaveChangesAsync(ct);
+
+        await MarkPreviouslyActiveFeatureOnHoldAsync(db, workspacePath, ct);
+        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: hotfix.Id, isHotfix: true, ct);
+
+        var position = new ReleaseFlowPosition
+        {
+            Feature = hotfix,
+            CurrentStageIndex = 0,
+            CurrentStageName = workflow.Pipeline[0].Name,
+        };
+        db.ReleaseFlowPositions.Add(position);
+        await db.SaveChangesAsync(ct);
+
+        hotfix.FlowPosition = position;
+
+        try
+        {
+            var checkoutMain = await _gitService.CheckoutAsync(workspacePath, "main", ct);
+            if (!checkoutMain.Success)
+                _logger.LogWarning("Failed to check out 'main' for hotfix {HotfixId}: {Message}", hotfix.Id, checkoutMain.Message);
+            await _gitService.EnsureBranchAsync(workspacePath, hotfixBranch, ct);
+            _logger.LogInformation("Created git branch {Branch} for hotfix {HotfixId}", hotfixBranch, hotfix.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to create git branch for hotfix {HotfixId}", hotfix.Id);
+        }
+
+        return hotfix;
+    }
+
+    /// <summary>
+    /// The hotfix's own pipeline completion (SignoffAsync -> FinalizeFeatureCompletionAsync)
+    /// already merged it into main, pushed, and deleted its branch — this is the explicit
+    /// follow-up that additionally merges main into develop, so the fix isn't lost when the
+    /// next release cuts from develop, then marks the hotfix's release-shell Released. Reuses
+    /// MergeReleaseIntoAsync verbatim: release.BranchName is "main" for a hotfix, so merging
+    /// "release.BranchName -> develop" is exactly "main -> develop".
+    /// </summary>
+    public async Task<DevTeamRelease> FinalizeHotfixAsync(Guid hotfixId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var hotfix = await db.ReleaseFeatures.Include(f => f.Release)
+            .SingleOrDefaultAsync(f => f.Id == hotfixId, ct)
+            ?? throw new KeyNotFoundException($"Hotfix {hotfixId} not found.");
+
+        var release = hotfix.Release;
+        if (!release.IsHotfix)
+            throw new InvalidOperationException($"{hotfixId} is not a hotfix.");
+        if (hotfix.Status != ReleaseFeatureStatus.Complete)
+            throw new InvalidOperationException(
+                $"The hotfix must complete its pipeline (signed off into main) before finalizing (current status: {hotfix.Status}).");
+        if (release.Status == ReleaseStatus.Released)
+            throw new InvalidOperationException("This hotfix has already been finalized.");
+
+        await MergeReleaseIntoAsync(db, release, "develop", ct);
+
+        var authToken = await TryGetCredentialForWorkspaceAsync(db, release.WorkspacePath, ct);
+        var remoteCheck = await _gitService.HasRemoteAsync(release.WorkspacePath, ct);
+        if (remoteCheck.HasRemote)
+        {
+            var pushDevelop = await _gitService.PushAsync(release.WorkspacePath, "develop", authToken, ct);
+            if (!pushDevelop.Success)
+                _logger.LogWarning("Push of 'develop' failed after finalizing hotfix '{Hotfix}': {Message}", hotfix.Key, pushDevelop.Message);
+        }
+        else
+        {
+            _logger.LogInformation("No remote configured for '{Workspace}'; skipping push after finalizing hotfix.", release.WorkspacePath);
+        }
+
+        release.Status = ReleaseStatus.Released;
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return await LoadReleaseAsync(db, release.Id, ct);
+    }
+
+    public async Task<IReadOnlyList<DevTeamRelease>> ListHotfixesAsync(string? workspacePath, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var hotfixes = await db.Releases
+            .Where(r => r.IsHotfix)
+            .Include(r => r.Features).ThenInclude(f => f.StageRuns)
+            .Include(r => r.Features).ThenInclude(f => f.Signoffs)
+            .Include(r => r.Features).ThenInclude(f => f.FlowPosition)
+            .ToListAsync(ct);
+
+        if (!string.IsNullOrWhiteSpace(workspacePath))
+            hotfixes = hotfixes.Where(r => IsSameWorkspace(r.WorkspacePath, workspacePath)).ToList();
+
+        return hotfixes.OrderByDescending(r => r.CreatedAt).ToList();
     }
 
     // ─── feature lifecycle (GitFlow) ────────────────────────────────────────
@@ -243,7 +390,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // currently checked out," so whatever's displaced steps down to OnHold rather than
         // two features both reading InProgress at once.
         await MarkPreviouslyActiveFeatureOnHoldAsync(db, release.WorkspacePath, ct);
-        await SetActiveCheckoutAsync(db, release.WorkspacePath, releaseFeatureId: feature.Id, hotfixId: null, ct);
+        await SetActiveCheckoutAsync(db, release.WorkspacePath, releaseFeatureId: feature.Id, isHotfix: false, ct);
 
         feature.FlowPosition = position;
 
@@ -333,7 +480,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
 
         feature.Status = ReleaseFeatureStatus.InProgress;
-        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: featureId, hotfixId: null, ct);
+        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: featureId, isHotfix: feature.Release.IsHotfix, ct);
 
         return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
@@ -1444,6 +1591,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
         var releases = await db.Releases
+            .Where(r => !r.IsHotfix)
             .Include(r => r.Features).ThenInclude(f => f.StageRuns)
             .Include(r => r.Features).ThenInclude(f => f.Signoffs)
             .Include(r => r.Features).ThenInclude(f => f.FlowPosition)
@@ -2460,7 +2608,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // Whatever feature is about to be displaced from this workspace's checkout (by creating
     // or switching to a different one) steps down from InProgress to OnHold — InProgress means
     // "the one currently checked out," so at most one feature per workspace should ever read
-    // InProgress at a time. A no-op if nothing was active, or the active slot held a hotfix.
+    // InProgress at a time. Applies equally to a displaced hotfix (its ReleaseFeature row is
+    // read via the same ActiveReleaseFeatureId slot — see SetActiveCheckoutAsync). A no-op if
+    // nothing was active.
     private static async Task MarkPreviouslyActiveFeatureOnHoldAsync(DevTeamDbContext db, string workspacePath, CancellationToken ct)
     {
         var checkout = await db.WorkspaceActiveCheckouts.FindAsync([workspacePath], ct);
@@ -2475,12 +2625,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
     }
 
-    // Upserts the single "what's checked out in this workspace" fact — exactly one of
-    // releaseFeatureId/hotfixId should be non-null (the other explicitly clears the opposite
-    // slot, so switching from a feature to a hotfix, or vice versa, doesn't leave a stale
-    // pointer behind).
+    // Upserts the single "what's checked out in this workspace" fact. isHotfix just tags
+    // whether releaseFeatureId's row is a hotfix (mirroring it into ActiveHotfixId too) — it's
+    // the same ReleaseFeature id space either way, so SwitchFeatureAsync's outgoing-checkout
+    // check (which only reads ActiveReleaseFeatureId) works unmodified for hotfixes too.
     private static async Task SetActiveCheckoutAsync(
-        DevTeamDbContext db, string workspacePath, Guid? releaseFeatureId, Guid? hotfixId, CancellationToken ct)
+        DevTeamDbContext db, string workspacePath, Guid? releaseFeatureId, bool isHotfix, CancellationToken ct)
     {
         var checkout = await db.WorkspaceActiveCheckouts.FindAsync([workspacePath], ct);
         if (checkout is null)
@@ -2490,10 +2640,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
 
         checkout.ActiveReleaseFeatureId = releaseFeatureId;
-        checkout.ActiveHotfixId = hotfixId;
+        checkout.ActiveHotfixId = isHotfix ? releaseFeatureId : null;
         await db.SaveChangesAsync(ct);
     }
 
     private static Task ClearActiveCheckoutAsync(DevTeamDbContext db, string workspacePath, CancellationToken ct)
-        => SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: null, hotfixId: null, ct);
+        => SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: null, isHotfix: false, ct);
 }

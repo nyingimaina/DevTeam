@@ -101,6 +101,8 @@ public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePat
 
 public sealed record CreateFeatureRequest(string FeatureKey);
 
+public sealed record CreateHotfixRequest(string Key, string WorkspacePath);
+
 public sealed record SignoffRequest(string StageName, string Role, string? Comment);
 
 // ─── stage endpoints ───────────────────────────────────────────────────────

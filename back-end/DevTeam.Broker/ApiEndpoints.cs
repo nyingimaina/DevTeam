@@ -614,6 +614,38 @@ public static class ApiEndpoints
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
+        // ─── hotfix endpoints (Part 7F) ─────────────────────────────────────
+        app.MapPost("/api/hotfixes", async (CreateHotfixRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Key))
+                return Results.BadRequest("Key is required.");
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            var hotfix = await engine.StartHotfixAsync(request.Key, request.WorkspacePath, ctx.RequestAborted);
+            return Results.Created($"/api/features/{hotfix.Id}", hotfix);
+        });
+
+        app.MapGet("/api/hotfixes", async (string? workspacePath, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            var hotfixes = await engine.ListHotfixesAsync(workspacePath, ctx.RequestAborted);
+            return Results.Ok(hotfixes);
+        });
+
+        app.MapPost("/api/hotfixes/{hotfixId:guid}/finalize", async (Guid hotfixId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.FinalizeHotfixAsync(hotfixId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Hotfix {hotfixId} not found."); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         app.MapGet("/healthz", (HttpContext ctx) =>
         {
             var appInfo = ctx.RequestServices.GetRequiredService<IAppInfo>();
