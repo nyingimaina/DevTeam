@@ -1706,6 +1706,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .SingleOrDefaultAsync(r => r.Id == releaseId, ct)
             ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
 
+        // A hotfix's release-shell has BranchName "main" — merging "main" into "main" is a
+        // harmless no-op, but the branch-delete step below would then try to delete main
+        // itself. Use FinalizeHotfixAsync for a hotfix instead.
+        if (release.IsHotfix)
+            throw new InvalidOperationException($"{releaseId} is a hotfix — use FinalizeHotfixAsync instead.");
+
         if (release.Status != ReleaseStatus.Ready)
             throw new InvalidOperationException(
                 $"Release must be Ready to finalize (current status: {release.Status}).");

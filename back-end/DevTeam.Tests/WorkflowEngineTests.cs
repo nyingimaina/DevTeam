@@ -2238,6 +2238,19 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task FinalizeRelease_OnAHotfix_ThrowsInsteadOfDeletingMain()
+    {
+        var engine = CreateEngine();
+        var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+        await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.FinalizeReleaseAsync(hotfix.ReleaseId, CancellationToken.None));
+
+        Assert.DoesNotContain("delete-branch:main", _gitService.Commands);
+    }
+
+    [Fact]
     public async Task FinalizeRelease_WithAnIncompleteFeatureStillOpen_Throws()
     {
         var engine = CreateEngine();
