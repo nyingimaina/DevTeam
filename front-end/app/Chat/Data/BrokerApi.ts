@@ -160,6 +160,23 @@ export default class BrokerApi {
     });
   }
 
+  startHotfixAsync(key: string, workspacePath: string): Promise<ReleaseFeatureDto> {
+    return this.requestAsync<ReleaseFeatureDto>("/api/hotfixes", {
+      method: "POST",
+      body: JSON.stringify({ key, workspacePath }),
+    });
+  }
+
+  listHotfixesAsync(workspacePath: string): Promise<ReleaseDto[]> {
+    return this.requestAsync<ReleaseDto[]>(`/api/hotfixes?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  finalizeHotfixAsync(hotfixId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/hotfixes/${hotfixId}/finalize`, {
+      method: "POST",
+    });
+  }
+
   // ─── git endpoints ────────────────────────────────────────────────────
 
   initGitAsync(workspacePath: string): Promise<GitStatusDto> {

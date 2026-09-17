@@ -144,6 +144,10 @@ export interface ReleaseDto {
   status: string;
   branchName: string;
   currentFeatureId?: string | null;
+  // True for a hotfix's release-shell (Part 7F) — reuses the exact same wire shape as a
+  // normal release, branched from main instead of develop and excluded from the normal
+  // release list.
+  isHotfix?: boolean;
   createdAt: string;
   updatedAt: string;
   features: ReleaseFeatureDto[];

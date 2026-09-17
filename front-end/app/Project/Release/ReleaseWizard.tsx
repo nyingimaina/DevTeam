@@ -75,18 +75,25 @@ function draftPushBackInstructions(stageRun: ReleaseStageRunDto): string {
 export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "release" }: IReleaseWizardProps) {
   const [view, setView] = useState<WizardView>("list");
   const [releases, setReleases] = useState<ReleaseDto[]>([]);
+  const [hotfixes, setHotfixes] = useState<ReleaseDto[]>([]);
   const [selectedRelease, setSelectedRelease] = useState<ReleaseDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [featureKey, setFeatureKey] = useState("");
+  const [hotfixKey, setHotfixKey] = useState("");
+  const [startingHotfix, setStartingHotfix] = useState(false);
 
   const loadReleases = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const list = await api.listReleasesAsync(workspacePath);
-      setReleases(list);
+      const [releaseList, hotfixList] = await Promise.all([
+        api.listReleasesAsync(workspacePath),
+        api.listHotfixesAsync(workspacePath),
+      ]);
+      setReleases(releaseList ?? []);
+      setHotfixes(hotfixList ?? []);
     } catch (e) {
       setError(toErrorMessage(e));
     } finally {
@@ -113,6 +120,23 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
       setLoading(false);
     }
   }, [api, featureKey, workspacePath]);
+
+  const handleCreateHotfix = useCallback(async () => {
+    if (!hotfixKey.trim()) return;
+    setStartingHotfix(true);
+    setError(null);
+    try {
+      const hotfix = await api.startHotfixAsync(hotfixKey.trim(), workspacePath);
+      const release = await api.getReleaseAsync(hotfix.releaseId);
+      setSelectedRelease(release);
+      setView("detail");
+      setHotfixKey("");
+    } catch (e) {
+      setError(toErrorMessage(e));
+    } finally {
+      setStartingHotfix(false);
+    }
+  }, [api, hotfixKey, workspacePath]);
 
   const handleSelectRelease = useCallback(async (releaseId: string) => {
     setLoading(true);
@@ -176,6 +200,49 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
               </div>
             ))}
             {releases.length === 0 && !loading && <div className={styles.empty}>No releases yet.</div>}
+          </div>
+
+          <div className={styles.header}>
+            <h2>Hotfixes</h2>
+          </div>
+          <div className={styles.form}>
+            <p className={styles.whatsNext}>
+              A hotfix branches straight from <code>main</code> and, once signed off, merges
+              back into both <code>main</code> and <code>develop</code> — for a fix that can&apos;t
+              wait for an in-progress release.
+            </p>
+            <label>
+              Hotfix Key
+              <input
+                value={hotfixKey}
+                onChange={(e) => setHotfixKey(e.target.value)}
+                placeholder="e.g. critical-bug"
+                data-testid={`${testIdPrefix}-hotfix-key`}
+              />
+            </label>
+            <ZestButton
+              type="button"
+              onClick={() => void handleCreateHotfix()}
+              disabled={!hotfixKey.trim() || startingHotfix}
+              data-testid={`${testIdPrefix}-start-hotfix-btn`}
+              zest={{ semanticType: "add", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
+            >
+              {startingHotfix ? "Starting..." : "Start Hotfix"}
+            </ZestButton>
+          </div>
+          <div className={styles.releaseList}>
+            {hotfixes.map((h) => (
+              <div
+                key={h.id}
+                className={styles.releaseItem}
+                onClick={() => handleSelectRelease(h.id)}
+                data-testid={`${testIdPrefix}-hotfix-item-${h.id}`}
+              >
+                <span className={styles.releaseTitle}>{h.title ?? h.features[0]?.key ?? h.id.slice(0, 8)}</span>
+                <span className={`${styles.releaseStatus} ${statusColor(h.status)}`}>{statusLabel(h.status)}</span>
+              </div>
+            ))}
+            {hotfixes.length === 0 && !loading && <div className={styles.empty}>No hotfixes yet.</div>}
           </div>
         </div>
       )}
@@ -557,20 +624,29 @@ function ShipReleaseButton({ release, api, testIdPrefix, onReleaseUpdated }: ISh
     setShipping(true);
     setError(null);
     try {
-      const fresh = await api.finalizeReleaseAsync(release.id);
+      // A hotfix's release-shell already merged into main on signoff (see
+      // FinalizeFeatureCompletionAsync) — finalizing it only still needs to reach develop,
+      // via the hotfix-specific endpoint. Calling finalizeReleaseAsync on it instead is
+      // rejected server-side (it would try to delete the main branch).
+      const fresh = release.isHotfix
+        ? await api.finalizeHotfixAsync(release.features[0]?.id ?? release.id)
+        : await api.finalizeReleaseAsync(release.id);
       onReleaseUpdated(fresh);
     } catch (e) {
       setError(toErrorMessage(e));
     } finally {
       setShipping(false);
     }
-  }, [api, release.id, onReleaseUpdated]);
+  }, [api, release.id, release.isHotfix, release.features, onReleaseUpdated]);
 
   return (
     <div className={styles.stageHandoff}>
       <p className={styles.whatsNext}>
-        Every feature is complete. Shipping merges this release into <code>main</code> and{" "}
-        <code>develop</code>, then deletes its release branch.
+        {release.isHotfix
+          ? <>This hotfix is already merged into <code>main</code>. Finalizing merges it into{" "}
+              <code>develop</code> too, so the fix isn&apos;t lost by the next release.</>
+          : <>Every feature is complete. Shipping merges this release into <code>main</code> and{" "}
+              <code>develop</code>, then deletes its release branch.</>}
       </p>
       {error && <div className={styles.error}>{error}</div>}
       <ZestButton
@@ -580,7 +656,7 @@ function ShipReleaseButton({ release, api, testIdPrefix, onReleaseUpdated }: ISh
         data-testid={`${testIdPrefix}-ship-release-btn`}
         zest={{ semanticType: "submit", busyOptions: { preventRageClick: true } }}
       >
-        {shipping ? "Shipping..." : "Ship this release"}
+        {shipping ? "Finalizing..." : release.isHotfix ? "Finalize this hotfix" : "Ship this release"}
       </ZestButton>
     </div>
   );

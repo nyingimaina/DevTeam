@@ -87,6 +87,7 @@ describe("ReleaseWizard", () => {
     mockApi.getAvailableModelsAsync.mockResolvedValue([]);
     mockApi.getCurrentTurnAsync.mockResolvedValue(undefined);
     mockApi.getWorkspaceChangesAsync.mockResolvedValue([]);
+    mockApi.listHotfixesAsync.mockResolvedValue([]);
   });
 
   it("loads and displays releases on mount", async () => {
@@ -1279,6 +1280,65 @@ describe("ReleaseWizard", () => {
       await openDetailNoFeature(release);
 
       expect(screen.queryByTestId("release-ship-release-btn")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Hotfixes", () => {
+    async function openDetailNoFeature(release: ReleaseDto) {
+      const user = userEvent.setup();
+      mockApi.listReleasesAsync.mockResolvedValue([]);
+      mockApi.listHotfixesAsync.mockResolvedValue([release]);
+      mockApi.getReleaseAsync.mockResolvedValue(release);
+      render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
+      await waitFor(() => expect(screen.getByTestId(`release-hotfix-item-${release.id}`)).toBeInTheDocument());
+      await user.click(screen.getByTestId(`release-hotfix-item-${release.id}`));
+      await waitFor(() => expect(screen.getByTestId("release-ship-release-btn")).toBeInTheDocument());
+      return user;
+    }
+
+    it("lists existing hotfixes and starts a new one", async () => {
+      const user = userEvent.setup();
+      mockApi.listReleasesAsync.mockResolvedValue([]);
+      const existingHotfix = makeRelease({ id: "hf1", title: "Hotfix urgent-fix", isHotfix: true, status: "InProgress" });
+      mockApi.listHotfixesAsync.mockResolvedValue([existingHotfix]);
+      const startedFeature = { id: "hff1", releaseId: "hf2", key: "critical-bug", title: "critical-bug", branchName: "hotfix/critical-bug", status: "InProgress", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
+      mockApi.startHotfixAsync.mockResolvedValue(startedFeature);
+      const newHotfixRelease = makeRelease({ id: "hf2", title: "Hotfix critical-bug", isHotfix: true, currentFeatureId: "hff1", features: [startedFeature] });
+      mockApi.getReleaseAsync.mockResolvedValue(newHotfixRelease);
+      mockApi.getPipelineAsync.mockResolvedValue(PIPELINE);
+
+      render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
+
+      await waitFor(() => expect(screen.getByTestId("release-hotfix-item-hf1")).toBeInTheDocument());
+
+      await user.type(screen.getByTestId("release-hotfix-key"), "critical-bug");
+      await user.click(screen.getByTestId("release-start-hotfix-btn"));
+
+      await waitFor(() => {
+        expect(mockApi.startHotfixAsync).toHaveBeenCalledWith("critical-bug", "C:\\work\\proj");
+      });
+      await waitFor(() => expect(screen.getByTestId("pipeline-stepper")).toBeInTheDocument());
+    });
+
+    it("finalizes a hotfix via the hotfix-specific endpoint, not finalizeReleaseAsync", async () => {
+      const hotfixFeature = { id: "hff1", releaseId: "hf1", key: "critical-bug", title: "critical-bug", branchName: "hotfix/critical-bug", status: "Complete", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
+      const release = makeRelease({
+        id: "hf1",
+        isHotfix: true,
+        status: "Ready",
+        currentFeatureId: null,
+        features: [hotfixFeature],
+      });
+      const finalized = { ...release, status: "Released" };
+      mockApi.finalizeHotfixAsync.mockResolvedValue(finalized);
+      const user = await openDetailNoFeature(release);
+
+      await user.click(screen.getByTestId("release-ship-release-btn"));
+
+      await waitFor(() => {
+        expect(mockApi.finalizeHotfixAsync).toHaveBeenCalledWith("hff1");
+      });
+      expect(mockApi.finalizeReleaseAsync).not.toHaveBeenCalled();
     });
   });
 });
