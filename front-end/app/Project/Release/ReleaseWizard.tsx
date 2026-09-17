@@ -349,6 +349,10 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
         </ZestButton>
       </div>
 
+      {release.status === "Ready" && release.features.every((f) => f.status === "Complete") && (
+        <ShipReleaseButton release={release} api={api} testIdPrefix={testIdPrefix} onReleaseUpdated={onReleaseUpdated} />
+      )}
+
       <details className={styles.advancedDetails}>
         <summary>Advanced details</summary>
         <div className={styles.detailInfo}>
@@ -533,6 +537,52 @@ function FeatureList({ release, activeFeatureId, api, testIdPrefix, onReleaseUpd
         </ZestButton>
       )}
     </details>
+  );
+}
+
+// ─── ship release (Part 7E — merges into main and develop, sets Released) ──
+
+interface IShipReleaseButtonProps {
+  release: ReleaseDto;
+  api: BrokerApi;
+  testIdPrefix: string;
+  onReleaseUpdated: (release: ReleaseDto) => void;
+}
+
+function ShipReleaseButton({ release, api, testIdPrefix, onReleaseUpdated }: IShipReleaseButtonProps) {
+  const [shipping, setShipping] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleShip = useCallback(async () => {
+    setShipping(true);
+    setError(null);
+    try {
+      const fresh = await api.finalizeReleaseAsync(release.id);
+      onReleaseUpdated(fresh);
+    } catch (e) {
+      setError(toErrorMessage(e));
+    } finally {
+      setShipping(false);
+    }
+  }, [api, release.id, onReleaseUpdated]);
+
+  return (
+    <div className={styles.stageHandoff}>
+      <p className={styles.whatsNext}>
+        Every feature is complete. Shipping merges this release into <code>main</code> and{" "}
+        <code>develop</code>, then deletes its release branch.
+      </p>
+      {error && <div className={styles.error}>{error}</div>}
+      <ZestButton
+        type="button"
+        onClick={() => void handleShip()}
+        disabled={shipping}
+        data-testid={`${testIdPrefix}-ship-release-btn`}
+        zest={{ semanticType: "submit", busyOptions: { preventRageClick: true } }}
+      >
+        {shipping ? "Shipping..." : "Ship this release"}
+      </ZestButton>
+    </div>
   );
 }
 

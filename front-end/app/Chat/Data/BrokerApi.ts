@@ -154,6 +154,12 @@ export default class BrokerApi {
     });
   }
 
+  finalizeReleaseAsync(releaseId: string): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/finalize`, {
+      method: "POST",
+    });
+  }
+
   // ─── git endpoints ────────────────────────────────────────────────────
 
   initGitAsync(workspacePath: string): Promise<GitStatusDto> {

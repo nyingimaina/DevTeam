@@ -1246,5 +1246,39 @@ describe("ReleaseWizard", () => {
       await user.click(screen.getByTestId("release-add-feature-btn"));
       expect(screen.getByTestId("release-new-feature-key")).toBeInTheDocument();
     });
+
+    it("offers to ship the release once it is Ready and every feature is Complete", async () => {
+      const release = makeRelease({
+        status: "Ready",
+        currentFeatureId: null,
+        features: [
+          { id: "f0", releaseId: "r1", key: "login-form", title: "login-form", branchName: "feature/login-form", status: "Complete", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+        ],
+      });
+      const shipped = { ...release, status: "Released" };
+      mockApi.finalizeReleaseAsync.mockResolvedValue(shipped);
+      const user = await openDetailNoFeature(release);
+
+      const shipBtn = screen.getByTestId("release-ship-release-btn");
+      await user.click(shipBtn);
+
+      await waitFor(() => {
+        expect(mockApi.finalizeReleaseAsync).toHaveBeenCalledWith(release.id);
+      });
+    });
+
+    it("does not offer to ship the release while a feature is still open", async () => {
+      const release = makeRelease({
+        status: "Ready",
+        currentFeatureId: null,
+        features: [
+          { id: "f0", releaseId: "r1", key: "login-form", title: "login-form", branchName: "feature/login-form", status: "Complete", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: "f1", releaseId: "r1", key: "password-reset", title: "password-reset", branchName: "feature/password-reset", status: "InProgress", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+        ],
+      });
+      await openDetailNoFeature(release);
+
+      expect(screen.queryByTestId("release-ship-release-btn")).not.toBeInTheDocument();
+    });
   });
 });
