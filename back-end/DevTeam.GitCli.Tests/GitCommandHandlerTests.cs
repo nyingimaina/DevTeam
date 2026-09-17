@@ -144,6 +144,85 @@ public class GitCommandHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task Merge_WithConflict_LeavesWorkingTreeConflictedAndReportsConflictedFiles()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var filePath = Path.Combine(_tempDir, "shared.txt");
+        await File.WriteAllTextAsync(filePath, "base\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "base"));
+
+        await _handler.HandleAsync(new GitRequest("branch", _tempDir, BranchName: "feature/conflict"));
+        await _handler.HandleAsync(new GitRequest("checkout", _tempDir, BranchName: "feature/conflict"));
+        await File.WriteAllTextAsync(filePath, "feature change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "feature edit"));
+
+        await _handler.HandleAsync(new GitRequest("checkout", _tempDir, BranchName: "develop"));
+        await File.WriteAllTextAsync(filePath, "develop change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "develop edit"));
+
+        var result = await _handler.HandleAsync(new GitRequest("merge", _tempDir, SourceBranch: "feature/conflict", TargetBranch: "develop"));
+
+        Assert.False(result.Success);
+        Assert.NotNull(result.ConflictedFiles);
+        Assert.Contains("shared.txt", result.ConflictedFiles!);
+        // Left in its natural conflicted state — not auto-aborted — so a resolution step
+        // (human or LLM) can actually see and fix what conflicted.
+        Assert.True(File.Exists(Path.Combine(_tempDir, ".git", "MERGE_HEAD")));
+        var content = await File.ReadAllTextAsync(filePath);
+        Assert.Contains("<<<<<<<", content);
+    }
+
+    [Fact]
+    public async Task MergeAbort_AfterConflict_RestoresACleanWorkingTree()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var filePath = Path.Combine(_tempDir, "shared.txt");
+        await File.WriteAllTextAsync(filePath, "base\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "base"));
+
+        await _handler.HandleAsync(new GitRequest("branch", _tempDir, BranchName: "feature/conflict"));
+        await _handler.HandleAsync(new GitRequest("checkout", _tempDir, BranchName: "feature/conflict"));
+        await File.WriteAllTextAsync(filePath, "feature change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "feature edit"));
+
+        await _handler.HandleAsync(new GitRequest("checkout", _tempDir, BranchName: "develop"));
+        await File.WriteAllTextAsync(filePath, "develop change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "develop edit"));
+
+        await _handler.HandleAsync(new GitRequest("merge", _tempDir, SourceBranch: "feature/conflict", TargetBranch: "develop"));
+
+        var result = await _handler.HandleAsync(new GitRequest("merge-abort", _tempDir));
+
+        Assert.True(result.Success);
+        Assert.False(File.Exists(Path.Combine(_tempDir, ".git", "MERGE_HEAD")));
+        var status = await _handler.HandleAsync(new GitRequest("status", _tempDir));
+        Assert.True(status.IsClean);
+    }
+
+    [Fact]
+    public async Task StashApply_WithConflict_LeavesConflictMarkersAndReportsConflictedFiles()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+        var filePath = Path.Combine(_tempDir, "shared.txt");
+        await File.WriteAllTextAsync(filePath, "base\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "base"));
+
+        await File.WriteAllTextAsync(filePath, "stashed change\n");
+        await _handler.HandleAsync(new GitRequest("stash-push", _tempDir, Message: "tag-a"));
+
+        await File.WriteAllTextAsync(filePath, "committed change\n");
+        await _handler.HandleAsync(new GitRequest("commit", _tempDir, Message: "committed edit"));
+
+        var result = await _handler.HandleAsync(new GitRequest("stash-apply", _tempDir, Message: "tag-a"));
+
+        Assert.False(result.Success);
+        Assert.NotNull(result.ConflictedFiles);
+        Assert.Contains("shared.txt", result.ConflictedFiles!);
+        var content = await File.ReadAllTextAsync(filePath);
+        Assert.Contains("<<<<<<<", content);
+    }
+
+    [Fact]
     public async Task EnsureBranch_CreatesIfNotExists()
     {
         await _handler.HandleAsync(new GitRequest("init", _tempDir));

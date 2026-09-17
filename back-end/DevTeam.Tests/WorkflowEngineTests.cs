@@ -2370,8 +2370,15 @@ internal sealed class FakeGitService : IGitService
     public Task<GitResponse> MergeAsync(string workspacePath, string sourceBranch, string targetBranch, CancellationToken ct = default)
     {
         Commands.Add($"merge:{sourceBranch}->{targetBranch}");
-        if (FailMerge) return Task.FromResult(new GitResponse(false, "merge failed: conflict"));
+        if (FailMerge) return Task.FromResult(new GitResponse(false, "merge failed: conflict", ConflictedFiles: MergeConflictedFiles));
         return Task.FromResult(new GitResponse(true, $"Merged {sourceBranch} into {targetBranch}"));
+    }
+
+    public Task<GitResponse> MergeAbortAsync(string workspacePath, CancellationToken ct = default)
+    {
+        Commands.Add("merge-abort");
+        FailMerge = false;
+        return Task.FromResult(new GitResponse(true, "Merge aborted"));
     }
 
     public Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
@@ -2394,6 +2401,7 @@ internal sealed class FakeGitService : IGitService
 
     public bool RemoteConfigured { get; set; } = true;
     public bool FailMerge { get; set; }
+    public string[] MergeConflictedFiles { get; set; } = ["conflicted.txt"];
     public bool FailPush { get; set; }
 
     public Task<GitResponse> PushAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default)
@@ -2454,7 +2462,7 @@ internal sealed class FakeGitService : IGitService
     {
         Commands.Add($"stash-apply:{tag}");
         if (!_stashTags.Contains(tag)) return Task.FromResult(new GitResponse(false, $"No stash found tagged '{tag}'"));
-        if (FailStashApply) return Task.FromResult(new GitResponse(false, "git stash apply failed: conflict"));
+        if (FailStashApply) return Task.FromResult(new GitResponse(false, "git stash apply failed: conflict", ConflictedFiles: MergeConflictedFiles));
         DirtyWorkingTree = true;
         return Task.FromResult(new GitResponse(true, $"Applied stash '{tag}'"));
     }

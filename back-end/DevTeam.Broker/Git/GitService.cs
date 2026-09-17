@@ -10,6 +10,9 @@ public interface IGitService
     Task<GitResponse> EnsureBranchAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> CommitAsync(string workspacePath, string message, CancellationToken ct = default);
     Task<GitResponse> MergeAsync(string workspacePath, string sourceBranch, string targetBranch, CancellationToken ct = default);
+    // Deliberate, explicit escape hatch for a conflicted merge — MergeAsync no longer
+    // auto-aborts on conflict, so a caller that gives up on resolving one calls this instead.
+    Task<GitResponse> MergeAbortAsync(string workspacePath, CancellationToken ct = default);
     Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default);
@@ -60,6 +63,9 @@ public sealed class GitService : IGitService, IDisposable
 
     public async Task<GitResponse> MergeAsync(string workspacePath, string sourceBranch, string targetBranch, CancellationToken ct = default)
         => await SendAsync(new GitRequest("merge", workspacePath, SourceBranch: sourceBranch, TargetBranch: targetBranch), ct);
+
+    public async Task<GitResponse> MergeAbortAsync(string workspacePath, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("merge-abort", workspacePath), ct);
 
     public async Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default)
         => await SendAsync(new GitRequest("branch", workspacePath, branchName), ct);
@@ -218,7 +224,8 @@ public record GitResponse(
     bool HasRemote = false,
     string? RemoteUrl = null,
     string[]? ChangedFiles = null,
-    string[]? StashEntries = null);
+    string[]? StashEntries = null,
+    string[]? ConflictedFiles = null);
 
 public record GitCommit(
     string Hash,

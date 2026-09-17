@@ -11,6 +11,7 @@ public class GitCommandHandler
             "checkout" => await CheckoutAsync(request),
             "commit" => await CommitAsync(request),
             "merge" => await MergeAsync(request),
+            "merge-abort" => await MergeAbortAsync(request),
             "log" => await LogAsync(request),
             "ensure-branch" => await EnsureBranchAsync(request),
             "push" => await PushAsync(request),
@@ -140,13 +141,38 @@ public class GitCommandHandler
             "-m", $"Merge '{request.SourceBranch}' into {target}");
         if (exit3 != 0)
         {
-            await RunGitAsync(request.WorkspacePath, "merge", "--abort");
-            return new GitResponse(false, $"merge failed: {err3}");
+            // Leave the working tree in its natural conflicted state (conflict markers on
+            // disk, MERGE_HEAD present) instead of auto-aborting — a resolution step (human or
+            // LLM) needs to actually see what conflicted. merge-abort is the deliberate,
+            // explicit escape hatch for when resolution is abandoned.
+            var conflicted = await GetConflictedFilesAsync(request.WorkspacePath);
+            return new GitResponse(false, $"merge failed: {err3}", ConflictedFiles: conflicted);
         }
 
         var status = await GetStatusAsync(request.WorkspacePath);
         return new GitResponse(true, $"Merged '{request.SourceBranch}' into '{target}'",
             Branch: status.branch, IsClean: status.isClean);
+    }
+
+    private static async Task<GitResponse> MergeAbortAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+
+        var (exit, _, err) = await RunGitAsync(request.WorkspacePath, "merge", "--abort");
+        if (exit != 0) return new GitResponse(false, $"git merge --abort failed: {err}");
+
+        var status = await GetStatusAsync(request.WorkspacePath);
+        return new GitResponse(true, "Merge aborted", Branch: status.branch, IsClean: status.isClean);
+    }
+
+    // Never populated for a clean success — only meaningful right after a merge/stash-apply
+    // that failed, to tell a resolution step which files actually need attention.
+    private static async Task<string[]> GetConflictedFilesAsync(string workspacePath)
+    {
+        var (exit, out_, _) = await RunGitAsync(workspacePath, "diff", "--name-only", "--diff-filter=U");
+        if (exit != 0) return [];
+        return out_.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     private static async Task<GitResponse> LogAsync(GitRequest request)
@@ -347,7 +373,13 @@ public class GitCommandHandler
         // conflicts, which would lose the parked work. The caller drops it explicitly (via
         // stash-drop) only once it has confirmed the apply fully succeeded.
         var (exit, _, err) = await RunGitAsync(request.WorkspacePath, "stash", "apply", stashRef!);
-        if (exit != 0) return new GitResponse(false, $"git stash apply failed: {err}");
+        if (exit != 0)
+        {
+            // Same treatment as a merge conflict (see MergeAsync) — an apply can conflict
+            // exactly like a merge, so it gets the same "leave it inspectable" shape.
+            var conflicted = await GetConflictedFilesAsync(request.WorkspacePath);
+            return new GitResponse(false, $"git stash apply failed: {err}", ConflictedFiles: conflicted);
+        }
 
         var status = await GetStatusAsync(request.WorkspacePath);
         return new GitResponse(true, $"Applied stash '{request.Message}'", Branch: status.branch, IsClean: status.isClean);

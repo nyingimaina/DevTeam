@@ -84,7 +84,10 @@ public record GitResponse(
     [property: JsonPropertyName("hasRemote")] bool HasRemote = false,
     [property: JsonPropertyName("remoteUrl")] string? RemoteUrl = null,
     [property: JsonPropertyName("changedFiles")] string[]? ChangedFiles = null,
-    [property: JsonPropertyName("stashEntries")] string[]? StashEntries = null);
+    [property: JsonPropertyName("stashEntries")] string[]? StashEntries = null,
+    // Populated on a merge or stash-apply failure that left conflict markers in the working
+    // tree (git diff --name-only --diff-filter=U) — never populated on other kinds of failure.
+    [property: JsonPropertyName("conflictedFiles")] string[]? ConflictedFiles = null);
 
 public record GitCommit(
     [property: JsonPropertyName("hash")] string Hash,
