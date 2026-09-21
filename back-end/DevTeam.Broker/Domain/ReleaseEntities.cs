@@ -135,6 +135,13 @@ public sealed class DevTeamRelease
 
     [NotMapped]
     public ReleaseFlowPosition? FlowPosition => CurrentFeature?.FlowPosition;
+
+    /// <summary>
+    /// What to show and gate on. <see cref="Status"/> is stored and can go stale (a release
+    /// stays "Ready" after a new feature is added); this is derived from the features each time.
+    /// </summary>
+    [NotMapped]
+    public ReleaseStatus EffectiveStatus => Workflow.ReleaseStatusRules.Effective(Status, Features.Select(f => f.Status).ToList());
 }
 
 /// <summary>

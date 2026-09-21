@@ -814,6 +814,54 @@ describe("ReleaseWizard", () => {
     });
     expect(within(log).getByText(/broker is busy/i)).toBeInTheDocument();
   });
+  describe("a release whose stored status is Ready but which has a new feature in progress", () => {
+    // Regression: finishing "adding" leaves the release stored as Ready; adding "subtraction"
+    // never reset it, so the page said "Release complete" and never showed subtraction's workflow.
+    function readyReleaseWithNewFeature() {
+      return makeRelease({
+        status: "Ready",
+        features: [
+          { id: "f0", releaseId: "r1", key: "adding", title: "adding", branchName: "feature/adding", status: "Complete", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: "f1", releaseId: "r1", key: "subtraction", title: "subtraction", branchName: "feature/subtraction", status: "InProgress", createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z" },
+        ],
+        flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+        stageRuns: [makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing" })],
+      });
+    }
+
+    it("shows the new feature's workflow, not 'Release complete'", async () => {
+      await openDetail(readyReleaseWithNewFeature());
+
+      await waitFor(() => expect(screen.getByTestId("release-stage-log")).toBeInTheDocument());
+      expect(screen.queryByText(/Release complete/i)).not.toBeInTheDocument();
+    });
+
+    it("does not offer to ship a release that still has unfinished work", async () => {
+      await openDetail(readyReleaseWithNewFeature());
+
+      await waitFor(() => expect(screen.getByTestId("release-stage-log")).toBeInTheDocument());
+      expect(screen.queryByTestId("release-ship-release-btn")).not.toBeInTheDocument();
+    });
+
+    it("still says 'Release complete' when every feature really is done", async () => {
+      const done = readyReleaseWithNewFeature();
+      done.features[1].status = "Complete";
+      done.stageRuns = [];
+      await openDetail(done);
+
+      expect(await screen.findByText(/Release complete/i)).toBeInTheDocument();
+    });
+
+    it("prefers the broker's derived status for the release chip", async () => {
+      const r = readyReleaseWithNewFeature();
+      r.effectiveStatus = "InProgress";
+      await openDetail(r);
+
+      await waitFor(() => expect(screen.getByTestId("release-stage-log")).toBeInTheDocument());
+      expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+    });
+  });
+
 
   describe("when the AI provider refuses a stage's request", () => {
     const FREE_TIER = "Internal error: Error from provider (Console): OpenCode's free tier can only be used from within OpenCode";

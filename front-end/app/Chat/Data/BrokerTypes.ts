@@ -142,6 +142,9 @@ export interface ReleaseDto {
   title?: string | null;
   version: string;
   status: string;
+  // Derived by the broker from the features (a stored "Ready" goes stale when a feature is
+  // added). Prefer this for display and gating — see effectiveReleaseStatus.
+  effectiveStatus?: string;
   branchName: string;
   currentFeatureId?: string | null;
   // True for a hotfix's release-shell (Part 7F) — reuses the exact same wire shape as a

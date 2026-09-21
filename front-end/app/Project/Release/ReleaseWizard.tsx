@@ -19,6 +19,7 @@ import ZestButton from "jattac.libs.web.zest-button";
 import { ZestResponsiveLayout } from "jattac.libs.web.zest-responsive-layout";
 import { FaSpinner } from "react-icons/fa6";
 import SelectWrapper from "../../Forms/SelectWrapper/UI/SelectWrapper";
+import { effectiveReleaseStatus } from "../Navigation/releaseView";
 import { errorKindLabel, moveOnButtonLabel, phaseLabel, proceedButtonLabel, repairNotice, stageLabel, stageOutputLabel, statusLabel, whatsNext } from "./labels";
 import type { RepairNotice } from "./labels";
 import { formatElapsed } from "../../UI/formatElapsed";
@@ -195,7 +196,7 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
                 data-testid={`${testIdPrefix}-item-${r.id}`}
               >
                 <span className={styles.releaseTitle}>{r.title ?? r.features[0]?.key ?? r.id.slice(0, 8)}</span>
-                <span className={`${styles.releaseStatus} ${statusColor(r.status)}`}>{statusLabel(r.status)}</span>
+                <span className={`${styles.releaseStatus} ${statusColor(effectiveReleaseStatus(r))}`}>{statusLabel(effectiveReleaseStatus(r))}</span>
                 <span className={styles.releaseStages}>
                   {r.flowPosition?.currentStageName ? stageLabel(r.flowPosition.currentStageName) : "—"}
                 </span>
@@ -241,7 +242,7 @@ export default function ReleaseWizard({ api, workspacePath, testIdPrefix = "rele
                 data-testid={`${testIdPrefix}-hotfix-item-${h.id}`}
               >
                 <span className={styles.releaseTitle}>{h.title ?? h.features[0]?.key ?? h.id.slice(0, 8)}</span>
-                <span className={`${styles.releaseStatus} ${statusColor(h.status)}`}>{statusLabel(h.status)}</span>
+                <span className={`${styles.releaseStatus} ${statusColor(effectiveReleaseStatus(h))}`}>{statusLabel(effectiveReleaseStatus(h))}</span>
               </div>
             ))}
             {hotfixes.length === 0 && !loading && <div className={styles.empty}>No hotfixes yet.</div>}
@@ -348,7 +349,7 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
   const stageIndex = useMemo(() => {
     if (pipeline.length === 0) return release.flowPosition?.currentStageIndex ?? 0;
     const fp = release.flowPosition;
-    if (release.status === "Ready" || release.status === "Complete") return pipeline.length;
+    if (effectiveReleaseStatus(release) === "Ready" || effectiveReleaseStatus(release) === "Complete") return pipeline.length;
     if (fp && fp.currentStageIndex >= 0 && fp.currentStageIndex < pipeline.length) return fp.currentStageIndex;
     if (fp) return Math.min(fp.currentStageIndex, pipeline.length - 1);
     return 0;
@@ -411,14 +412,14 @@ function ReleaseDetail({ release, api, testIdPrefix, loading, onBack, onRefresh,
         <ZestButton type="button" onClick={onBack} disabled={loading}
           zest={{ buttonStyle: "text", visualOptions: { size: "sm" } }}>Back</ZestButton>
         <h2>{release.title ?? release.features[0]?.key}</h2>
-        <span className={`${styles.releaseStatus} ${statusColor(release.status)}`}>{statusLabel(release.status)}</span>
+        <span className={`${styles.releaseStatus} ${statusColor(effectiveReleaseStatus(release))}`}>{statusLabel(effectiveReleaseStatus(release))}</span>
         <ZestButton type="button" onClick={handleRefreshClick} disabled={loading}
           zest={{ semanticType: "refresh", busyOptions: { preventRageClick: true }, buttonStyle: "text", visualOptions: { size: "sm" } }}>
           Refresh
         </ZestButton>
       </div>
 
-      {release.status === "Ready" && release.features.every((f) => f.status === "Complete") && (
+      {effectiveReleaseStatus(release) === "Ready" && release.features.every((f) => f.status === "Complete") && (
         <ShipReleaseButton release={release} api={api} testIdPrefix={testIdPrefix} onReleaseUpdated={onReleaseUpdated} />
       )}
 
@@ -837,7 +838,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
     }
   }, [api, featureId, refreshRelease, role?.userInputRequired, handleRunStage]);
 
-  if (release.status === "Ready" || release.status === "Complete" || !role) {
+  if (effectiveReleaseStatus(release) === "Ready" || effectiveReleaseStatus(release) === "Complete" || !role) {
     return (
       <div className={styles.stagePanel}>
         <div className={styles.doneBanner}>

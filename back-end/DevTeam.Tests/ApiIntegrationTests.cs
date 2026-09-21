@@ -592,6 +592,21 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
+    public async Task GetRelease_IncludesEffectiveStatusAsAString()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-effective", workspacePath = @"C:\work\effective-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+
+        var json = await client.GetStringAsync($"/api/releases/{release!.Id}");
+
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        Assert.Equal("InProgress", doc.RootElement.GetProperty("effectiveStatus").GetString());
+    }
+
+    [Fact]
     public async Task SwitchModel_BlankModel_Returns400()
     {
         var client = _factory.CreateClient();
