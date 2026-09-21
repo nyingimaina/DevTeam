@@ -71,6 +71,11 @@ public partial class Program
         builder.Services.AddSingleton<WorkflowDefinitionLoader>();
         builder.Services.AddSingleton<PipelineEditorService>();
         builder.Services.AddScoped<IWorkflowEngine, WorkflowEngine>();
+        builder.Services.AddSingleton<IModelSwitchBackend, BrokerModelSwitchBackend>();
+        builder.Services.AddScoped<StageModelSwitcher>(sp => new StageModelSwitcher(
+            sp.GetRequiredService<IDbContextFactory<DevTeamDbContext>>(),
+            sp.GetRequiredService<IModelSwitchBackend>(),
+            sp.GetRequiredService<ILogger<StageModelSwitcher>>()));
         builder.Services.AddSingleton<IGitService, GitService>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>
             options.UseSqlite($"Data Source={identity.DatabasePath}"));
@@ -93,6 +98,7 @@ public partial class Program
 
         app.UseSerilogRequestLogging();
         app.UseRequestDiagnostics();
+        app.UseAgentErrorHandling();
         app.MapHub<BrokerHub>("/hub");
         app.MapApi();
 

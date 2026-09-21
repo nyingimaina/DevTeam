@@ -77,7 +77,7 @@ public class PipelineEditorServiceTests
 
             var updated = service.Load(workspace).Roles.Single(r => r.Name == "developer");
             Assert.Equal(
-                ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "slice_guard", "render_pr"],
+                ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "reuse_gate", "slice_scope", "render_pr"],
                 updated.StepSummary);
         }
         finally

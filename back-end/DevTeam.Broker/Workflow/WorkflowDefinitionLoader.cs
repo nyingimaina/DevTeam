@@ -94,7 +94,9 @@ public sealed class WorkflowDefinitionLoader
                 yaml.Slices.Shared,
                 yaml.Slices.Artifacts,
                 yaml.Slices.CodeBack,
-                yaml.Slices.CodeFront),
+                yaml.Slices.CodeFront,
+                yaml.Slices.CoreBack,
+                yaml.Slices.CoreFront),
             pipeline,
             challenges,
             string.IsNullOrWhiteSpace(yaml.DocsRoot) ? "docs" : yaml.DocsRoot);

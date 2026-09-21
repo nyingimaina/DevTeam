@@ -45,6 +45,13 @@ public sealed class WorkflowYaml
             Signoff = Signoffs.PrCreated,
             UserInputRequired = false,
             WritesCode = true,
+            SeedPrompt =
+                " Reuse before writing: the workspace ships one shared core app (backend `" + CorePaths.DefaultBack +
+                "`, frontend `" + CorePaths.DefaultFront + "`). Read the context bundle's \"Shared core\" section, " +
+                "search the core for an existing type/component/service that already does what a REQ needs, and extend it " +
+                "in place when the behavior is shared. Only add feature-local code under your slice paths when the logic is " +
+                "genuinely specific to this feature — never scaffold a second app or re-declare a core type under a new name. " +
+                "Add tests first. ",
             ExpectedArtifacts = ["devteam/features/<F>/code/"],
             Steps =
             [
@@ -62,7 +69,8 @@ public sealed class WorkflowYaml
                     },
                 },
                 new StepYaml { Builtin = BuiltinRegistry.CodeHygiene },
-                new StepYaml { Builtin = BuiltinRegistry.SliceGuard },
+                new StepYaml { Builtin = BuiltinRegistry.ReuseGate },
+                new StepYaml { Builtin = BuiltinRegistry.SliceScope },
                 new StepYaml { Builtin = BuiltinRegistry.RenderPr },
             ],
         },
@@ -100,6 +108,7 @@ public sealed class WorkflowYaml
         {
             Producer = "developer",
             Antagonist = new AgentYaml { Mode = "qa" },
+            Lint = BuiltinRegistry.ReuseGate,
             Attempts = 2,
         },
         new ChallengeYaml
@@ -135,6 +144,12 @@ public sealed class SlicesYaml
     public string CodeBack { get; set; } = "back-end/**/Features/<F>";
 
     public string CodeFront { get; set; } = "front-end/app/<F>";
+
+    // The shared-core app each feature builds additively on — see CorePaths. Empty uses the
+    // platform defaults (back-end/src/Core, front-end/app/core).
+    public string CoreBack { get; set; } = CorePaths.DefaultBack;
+
+    public string CoreFront { get; set; } = CorePaths.DefaultFront;
 }
 
 public sealed class RoleYaml

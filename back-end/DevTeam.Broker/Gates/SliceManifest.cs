@@ -16,7 +16,9 @@ public sealed class SliceManifest
         string codePathBack,
         string codePathFront,
         IReadOnlyList<string> shared,
-        string testCommand)
+        string testCommand,
+        string? corePathBack = null,
+        string? corePathFront = null)
     {
         Feature = feature;
         Title = title;
@@ -24,6 +26,8 @@ public sealed class SliceManifest
         CodePathFront = codePathFront;
         Shared = shared.ToList();
         TestCommand = testCommand;
+        CorePathBack = corePathBack ?? string.Empty;
+        CorePathFront = corePathFront ?? string.Empty;
     }
 
     public string Feature { get; set; } = string.Empty;
@@ -37,6 +41,13 @@ public sealed class SliceManifest
     public List<string> Shared { get; set; } = [];
 
     public string TestCommand { get; set; } = "dotnet test DevTeam.slnx";
+
+    // Paths to the shared core app this feature builds on top of; empty means the platform
+    // defaults (see CorePaths). Serialized into the manifest so every gate and prompt resolves
+    // the same core, and write access to it is granted to developer scopes.
+    public string CorePathBack { get; set; } = string.Empty;
+
+    public string CorePathFront { get; set; } = string.Empty;
 }
 
 public static class SliceManifestIO

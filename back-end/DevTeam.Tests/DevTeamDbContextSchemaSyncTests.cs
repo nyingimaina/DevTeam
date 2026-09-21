@@ -163,4 +163,56 @@ public class DevTeamDbContextSchemaSyncTests : IDisposable
         var added = await _db.ProfilePrompts.SingleAsync(p => p.StageName == "developer");
         Assert.True(added.OverridesBuiltInPrompt);
     }
+
+    // Reproduces the crash from a devteam.db that predates the IsHotfix column (Part 7F):
+    // 'Releases' already has rows, and SQLite refuses ALTER TABLE ADD COLUMN NOT NULL without
+    // a configured default on a non-empty table. Same shape as the OverridesBuiltInPrompt case
+    // above, for the DevTeamRelease.IsHotfix column specifically.
+    [Fact]
+    public async Task EnsureAllTablesCreated_BackfillsIsHotfixColumnWithoutCrashingOnExistingRows()
+    {
+        _db.Database.EnsureCreated();
+        var release = new DevTeamRelease
+        {
+            WorkspacePath = @"C:\work\proj",
+            Version = "1.0.0",
+            BranchName = "release/login-form",
+        };
+        _db.Releases.Add(release);
+        await _db.SaveChangesAsync();
+
+        _db.Database.ExecuteSqlRaw("DROP TABLE \"Releases\";");
+        _db.Database.ExecuteSqlRaw(
+            "CREATE TABLE \"Releases\" (" +
+            "\"Id\" TEXT NOT NULL CONSTRAINT \"PK_Releases\" PRIMARY KEY, " +
+            "\"WorkspacePath\" TEXT NOT NULL, " +
+            "\"Title\" TEXT NULL, " +
+            "\"Version\" TEXT NOT NULL, " +
+            "\"Status\" INTEGER NOT NULL, " +
+            "\"BranchName\" TEXT NULL, " +
+            "\"CreatedAt\" TEXT NOT NULL, " +
+            "\"UpdatedAt\" TEXT NOT NULL);");
+        _db.Database.ExecuteSqlRaw(
+            $"INSERT INTO \"Releases\" (\"Id\", \"WorkspacePath\", \"Title\", \"Version\", \"Status\", \"BranchName\", \"CreatedAt\", \"UpdatedAt\") " +
+            $"VALUES ('{release.Id}', '{release.WorkspacePath}', NULL, '{release.Version}', 0, '{release.BranchName}', " +
+            $"'{release.CreatedAt:O}', '{release.UpdatedAt:O}');");
+
+        var exception = Record.Exception(() => DevTeamDbContextSchemaSync.EnsureAllTablesCreated(_db));
+        Assert.Null(exception);
+
+        var reloaded = await _db.Releases.SingleAsync();
+        Assert.False(reloaded.IsHotfix);
+
+        _db.Releases.Add(new DevTeamRelease
+        {
+            WorkspacePath = @"C:\work\other",
+            Version = "1.0.1",
+            BranchName = "main",
+            IsHotfix = true,
+        });
+        await _db.SaveChangesAsync();
+
+        var hotfix = await _db.Releases.SingleAsync(r => r.IsHotfix);
+        Assert.Equal("main", hotfix.BranchName);
+    }
 }

@@ -579,6 +579,7 @@ public class WorkflowEngineTests : IDisposable
             new GateResult(true, "OK", "context bundle ok"),
             new GateResult(true, "OK", "verify ok"),
             new GateResult(true, "OK", "hygiene ok"),
+            new GateResult(true, "OK", "reuse ok"),
             new GateResult(true, "OK", "slice ok"),
             new GateResult(true, "OK", "pr ok"),
         ]);
@@ -596,10 +597,10 @@ public class WorkflowEngineTests : IDisposable
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
 
-        // 5 builtin steps run (context_bundle, verify_code, code_hygiene, slice_guard, render_pr);
-        // each one's result must already be visible via a fresh context by the time the next
-        // one's RunAsync fires — i.e. counts strictly increase, not [0,0,0,0,0].
-        Assert.Equal([0, 1, 2, 3, 4], savedCountsBeforeEachCall);
+        // 6 builtin steps run (context_bundle, verify_code, code_hygiene, reuse_gate, slice_scope,
+        // render_pr); each one's result must already be visible via a fresh context by the time
+        // the next one's RunAsync fires — i.e. counts strictly increase, not [0,0,0,0,0,0].
+        Assert.Equal([0, 1, 2, 3, 4, 5], savedCountsBeforeEachCall);
     }
 
     [Fact]
@@ -1515,7 +1516,7 @@ public class WorkflowEngineTests : IDisposable
             pipeline[0].Steps);
         // The loop's inner steps are flattened once, not repeated per retry attempt.
         Assert.Equal(
-            ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "slice_guard", "render_pr"],
+            ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "reuse_gate", "slice_scope", "render_pr"],
             pipeline[1].Steps);
         Assert.Equal(
             ["context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"],
@@ -1674,7 +1675,7 @@ public class WorkflowEngineTests : IDisposable
         // session may follow for the antagonist challenge review — that one is out of scope here.
         var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
         Assert.Equal(
-            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "Program.cs" },
+            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "back-end/src/Core", "front-end/app/core", "Program.cs" },
             prefixes);
     }
 
@@ -1705,7 +1706,7 @@ public class WorkflowEngineTests : IDisposable
         // for the challenge review — that one is out of scope here.
         var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
         Assert.Equal(
-            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "Program.cs" },
+            new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "back-end/src/Core", "front-end/app/core", "Program.cs" },
             prefixes);
     }
 
@@ -1736,7 +1737,7 @@ public class WorkflowEngineTests : IDisposable
 
             var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
             Assert.Equal(
-                new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "Program.cs" },
+                new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "back-end/src/Core", "front-end/app/core", "Program.cs" },
                 prefixes);
         }
         finally

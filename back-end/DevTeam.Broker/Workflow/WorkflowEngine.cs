@@ -521,6 +521,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             Phase = StagePhase.GuidedQA,
         };
         db.ReleaseStageRuns.Add(stageRun);
+        SetCheckpoint(stageRun, StageCheckpointSignal.Idle);
         await db.SaveChangesAsync(ct);
 
         // Entry gates run before a session is even opened — a role that never gets past its
@@ -569,9 +570,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // Use a separate cancellation for the agent prompt so HTTP timeouts don't kill it.
         // The agent may take time to process the initial prompt — that's expected.
         using var agentCts = InteractiveTurnCts();
+        // Eager on-disk checkpoint: "prompt in flight" before dispatch and "prompt done" after
+        // — a broker crash between the two is exactly the "session died mid-turn" case the
+        // startup reconciler escalates.
+        SetCheckpoint(stageRun, StageCheckpointSignal.PromptInProgress);
+        await db.SaveChangesAsync(ct);
         try
         {
             await PromptWithDelegationAsync(session.SessionId, finalPrompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
+            SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
             ClearPromptFailure(stageRun);
             await db.SaveChangesAsync(ct);
         }
@@ -612,11 +619,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // conversation isn't over until the agent says DONE again and gates re-pass.
         stageRun.ReadyToProceed = false;
 
+        // Eager checkpoint: the run is about to be mid-prompt — a crash from here on means the
+        // turn, and by extension the session, is lost until the reconciler surfaces it.
+        SetCheckpoint(stageRun, StageCheckpointSignal.PromptInProgress);
+        await db.SaveChangesAsync(ct);
+
         using var agentCts = InteractiveTurnCts();
         PromptResponse response;
         try
         {
             response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, agentCts.Token);
+            SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
             ClearPromptFailure(stageRun);
         }
         catch (Exception ex)
@@ -695,9 +708,40 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var featureKey = feature.Key;
         var currentIndex = position.CurrentStageIndex;
 
+        // Re-entrancy: gates may be re-run on the same run row when it crashed mid-gates (the
+        // startup reconciler heals GatesRunning back to Active) or landed in a retryable
+        // failure state (BlockedGate/Escalated/BlockedSignoff/BlockedEntry) — never by opening
+        // a phantom second attempt. A run actually still mid-gates is refused: a concurrent
+        // pass would execute every step twice against the same state.
+        var alreadyRunning = feature.StageRuns
+            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.GatesRunning);
+        if (alreadyRunning is not null)
+            throw new InvalidOperationException($"Gates for stage '{role.Name}' are already running.");
+
         var stageRun = feature.StageRuns
-            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active)
+            .Where(sr => sr.StageName == role.Name &&
+                sr.Status is ReleaseStageStatus.Active or ReleaseStageStatus.Escalated)
+            .OrderByDescending(sr => sr.Attempt)
+            .FirstOrDefault()
+            ?? feature.StageRuns
+                .Where(sr => sr.StageName == role.Name &&
+                    sr.Status is ReleaseStageStatus.BlockedGate or ReleaseStageStatus.BlockedSignoff or ReleaseStageStatus.BlockedEntry)
+                .OrderByDescending(sr => sr.Attempt)
+                .FirstOrDefault()
             ?? throw new InvalidOperationException($"No active stage run for '{role.Name}'.");
+
+        // A retried run restarts from a clean slate on the SAME row — no new attempt, no
+        // stale readiness/error/terminal markers carried over.
+        if (stageRun.Status is not ReleaseStageStatus.Active and not ReleaseStageStatus.Escalated)
+        {
+            stageRun.Status = ReleaseStageStatus.Active;
+            stageRun.ReadyToProceed = false;
+            stageRun.FinishedAt = null;
+            stageRun.Summary = null;
+            stageRun.LastErrorKind = StageErrorKind.None;
+            stageRun.LastErrorMessage = null;
+            stageRun.LastErrorAt = null;
+        }
 
         // Check user input requirement
         if (role.UserInputRequired && stageRun.QuestionCount == 0)
@@ -727,7 +771,22 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         stageRun.Phase = StagePhase.Gates;
         stageRun.Status = ReleaseStageStatus.GatesRunning;
+        SetCheckpoint(stageRun, StageCheckpointSignal.Gates);
         await db.SaveChangesAsync(ct);
+
+        // Re-entrancy: a retried run carries the exit-side gate-check rows from its prior
+        // attempt. Sweep them so re-running gates never accumulates duplicate rows; keep entry
+        // gates and the leading builtin checks (scaffold_specs/context_bundle) that already ran
+        // at start-stage and must not re-run (ScaffoldSpecsGate refuses to overwrite a scaffold).
+        var baselineCheckNames = CollectBaselineCheckNames(role);
+        var staleChecks = stageRun.GateChecks
+            .Where(gc => !gc.IsEntryGate && !baselineCheckNames.Contains(gc.Name))
+            .ToList();
+        foreach (var stale in staleChecks)
+        {
+            stageRun.GateChecks.Remove(stale);
+            db.ReleaseGateChecks.Remove(stale);
+        }
 
         // Leading builtins (e.g. scaffold_specs/context_bundle) already ran in StartStageAsync
         // before the chat started, and are already recorded on stageRun.GateChecks. Re-running
@@ -735,6 +794,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // so skip every step up to and including the first Agent/Loop step, and seed allPassed
         // from those already-recorded results instead of assuming success.
         var allPassed = stageRun.GateChecks.All(gc => gc.Passed);
+        var stepResults = new List<CheckpointStepResult>();
         var pastLeadingSteps = false;
         foreach (var step in role.Steps)
         {
@@ -753,6 +813,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Passed = result.Passed,
                 EvidenceText = result.Evidence,
             });
+            stepResults.Add(new CheckpointStepResult(result.StepName, result.Passed, result.Evidence));
+            // Flush the step ledger after EACH step so a crash mid-gates leaves an exact trail
+            // of what had already passed when the broker died.
+            SetCheckpoint(stageRun, StageCheckpointSignal.Gates, stepResults);
+            await db.SaveChangesAsync(ct);
             if (!result.Passed) allPassed = false;
         }
 
@@ -832,6 +897,37 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
+    // Lets the agent that just failed its exit gates be talked to again without opening a
+    // fresh attempt (which would lose its session/context): SendMessageAsync only targets an
+    // Active/Escalated run, so a BlockedGate run is flipped back to Active first. The gate
+    // ledger is left untouched — RunGatesAsync sweeps and re-records it on the next pass.
+    public async Task<DevTeamRelease> ReopenBlockedGateAsync(Guid featureId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
+
+        var role = workflow.Pipeline[position.CurrentStageIndex];
+        var stageRun = feature.StageRuns
+            .Where(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.BlockedGate)
+            .OrderByDescending(sr => sr.Attempt)
+            .FirstOrDefault()
+            ?? throw new InvalidOperationException($"Stage '{role.Name}' has no failed checks to reopen.");
+
+        stageRun.Status = ReleaseStageStatus.Active;
+        stageRun.Phase = StagePhase.GuidedQA;
+        stageRun.ReadyToProceed = false;
+        stageRun.FinishedAt = null;
+        stageRun.Summary = null;
+        feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+    }
+
     // ─── autonomous stage execution ─────────────────────────────────────────
 
     public async Task<DevTeamRelease> RunStageAsync(Guid featureId, CancellationToken ct)
@@ -871,6 +967,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Phase = StagePhase.GuidedQA,
             };
             db.ReleaseStageRuns.Add(stageRun);
+            SetCheckpoint(stageRun, StageCheckpointSignal.Idle);
             await db.SaveChangesAsync(ct);
 
             // Entry gates run before a session is even opened — a role that never gets past
@@ -931,7 +1028,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
                   "When you are done, say DONE and provide a summary of what you changed.";
             try
             {
+                SetCheckpoint(stageRun, StageCheckpointSignal.PromptInProgress);
+                await db.SaveChangesAsync(ct);
                 await PromptWithDelegationAsync(acpSessionId, prompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
+                SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
                 ClearPromptFailure(stageRun);
                 await db.SaveChangesAsync(ct);
             }
@@ -1322,6 +1422,35 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return names;
     }
 
+    // Eager, crash-safe checkpoint: persists the stage run's signal/phase to CheckpointJson so
+    // the startup reconciler (WorkflowCrashRecoverer) can tell exactly where a run died. Written
+    // both around the agent turn (Idle/PromptInProgress/PromptSucceeded) and after the gate-step
+    // ledger flushes (Gates), so recovery only ever re-issues the parts it can actually redo.
+    private static void SetCheckpoint(ReleaseStageRun stageRun, StageCheckpointSignal signal,
+        IReadOnlyList<CheckpointStepResult>? steps = null)
+    {
+        stageRun.CheckpointJson = new StageCheckpoint(
+            signal, stageRun.Phase, DateTimeOffset.UtcNow, steps).Serialize();
+    }
+
+    // The gate-check names the stage's LEADING builtins (e.g. scaffold_specs/context_bundle) have
+    // already recorded on stageRun.GateChecks — the same boundary RunLeadingBuiltinsAsync uses
+    // (leading steps up to and including the first Agent/Loop step). Re-entrancy keeps these rows
+    // and never sweeps or re-runs them, matching the engine's "these already ran at start-stage"
+    // invariant.
+    private static IReadOnlyList<string> CollectBaselineCheckNames(WorkflowRole role)
+    {
+        var names = new List<string>();
+        foreach (var step in role.Steps)
+        {
+            if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
+                break;
+            if (step.Kind == WorkflowStepKind.Builtin && step.Builtin is not null)
+                names.Add(step.Builtin);
+        }
+        return names;
+    }
+
     private const int StageArtifactMaxChars = 20 * 1024;
 
     public async Task<IReadOnlyList<StageArtifactDto>> GetStageArtifactsAsync(Guid featureId, Guid stageRunId, CancellationToken ct)
@@ -1565,6 +1694,106 @@ public sealed class WorkflowEngine : IWorkflowEngine
             StageName = stageName,
             Role = role,
             AllComplete = allSignoffsComplete,
+        }, ct);
+
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+    }
+
+    // Last-ditch escape hatch (Part: crash resilience): a user can force a fresh attempt from
+    // any stuck state (BlockedGate/BlockedSignoff/BlockedEntry/Escalated, a crashed mid-gates
+    // run the reconciler already healed, or even a run still wedged GatesRunning) instead of
+    // being permanently dead-ended. The old run row is superseded (marked Stale, never deleted
+    // — its gate ledger and findings stay visible for diagnostics) and a brand-new Active run is
+    // opened for the target stage, exactly like StartStageAsync would, but without touching the
+    // ACP session or dispatching a prompt: the human resumes the stage from a clean slate.
+    //
+    // targetStageName == null means "the current/live stage"; if the pipeline has already run to
+    // completion (position past the last stage) null means the LAST stage, so retrying re-opens
+    // the final role rather than throwing on an out-of-range position. An explicit name retries
+    // that stage and rewinds the flow position (and the stage's signoff, if already approved)
+    // to it — same rewind semantics as PushBackAsync, but allowed to target ANY stage.
+    public async Task<DevTeamRelease> RetryStageAsync(Guid featureId, string? targetStageName, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
+
+        var targetIndex = FindRoleIndex(workflow, targetStageName);
+        if (targetIndex < 0)
+        {
+            if (targetStageName is null)
+            {
+                // "Current" stage — a pipeline that ran to completion is at the last stage by
+                // definition, so retrying re-opens the final role.
+                targetIndex = position.CurrentStageIndex >= workflow.Pipeline.Count
+                    ? workflow.Pipeline.Count - 1
+                    : position.CurrentStageIndex;
+            }
+            else
+            {
+                throw new InvalidOperationException($"No stage named '{targetStageName}' exists in the pipeline.");
+            }
+        }
+
+        var targetRole = workflow.Pipeline[targetIndex];
+
+        // Supersede every prior run for the target stage — they keep their gate ledger and
+        // findings (never deleted) but are no longer the live attempt.
+        var superseded = feature.StageRuns.Where(sr => sr.StageName == targetRole.Name).ToList();
+        foreach (var prior in superseded)
+        {
+            prior.Status = ReleaseStageStatus.Stale;
+            prior.ReadyToProceed = false;
+            prior.FinishedAt = DateTimeOffset.UtcNow;
+            prior.Summary = "Superseded by a fresh attempt.";
+        }
+
+        var nextAttempt = superseded.Count > 0
+            ? superseded.Max(sr => sr.Attempt) + 1
+            : 1;
+
+        var freshRun = new ReleaseStageRun
+        {
+            Feature = feature,
+            StageName = targetRole.Name,
+            Status = ReleaseStageStatus.Active,
+            Phase = StagePhase.GuidedQA,
+            Attempt = nextAttempt,
+            ReadyToProceed = false,
+        };
+        // A DbSet-level Add must be used, not feature.StageRuns.Add — a freshly created
+        // run discovered through a navigation has a non-default Guid key, so the change
+        // tracker treats it as an already-persisted row (Modified) and tries to UPDATE it,
+        // which affects 0 rows and trips the concurrency guard.
+        db.ReleaseStageRuns.Add(freshRun);
+
+        // Rewind or pin the flow position onto the retried stage.
+        position.CurrentStageIndex = targetIndex;
+        position.CurrentStageName = targetRole.Name;
+        position.UpdatedAt = DateTimeOffset.UtcNow;
+
+        // Re-retrying a stage whose signoff was already approved must not keep that approval —
+        // the fresh pass earns it again.
+        var signoff = feature.Signoffs.FirstOrDefault(s => s.StageName == targetRole.Name);
+        if (signoff is not null && signoff.Approved)
+        {
+            signoff.Approved = false;
+            signoff.ApprovedBy = null;
+            signoff.ApprovedAt = null;
+            signoff.Comment = null;
+        }
+
+        feature.Release.Status = ReleaseStatus.InProgress;
+        feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await BroadcastEventAsync(feature.ReleaseId, "stageRetried", new
+        {
+            StageName = targetRole.Name,
+            Attempt = nextAttempt,
         }, ct);
 
         return await LoadReleaseAsync(db, feature.ReleaseId, ct);
@@ -1826,9 +2055,22 @@ public sealed class WorkflowEngine : IWorkflowEngine
             return [featureDir, docsRoot];
         }
 
+        var (coreBack, coreFront) = CorePaths.Resolve(workflow.Slices, manifest);
         var prefixes = new List<string> { featureDir, docsRoot, manifest.CodePathBack, manifest.CodePathFront };
+        AddUnique(coreBack);
+        AddUnique(coreFront);
         prefixes.AddRange(manifest.Shared);
         return prefixes;
+
+        // A feature may legitimately resolve its core to the same directory as its own slice
+        // (or have configured an empty core) — don't hand the permission policy duplicate
+        // prefixes, but never drop a distinct core path: it is exactly what lets a feature
+        // extend the shared core additively.
+        void AddUnique(string prefix)
+        {
+            if (!string.IsNullOrWhiteSpace(prefix) && !prefixes.Contains(prefix, StringComparer.OrdinalIgnoreCase))
+                prefixes.Add(prefix);
+        }
     }
 
     /// <summary>

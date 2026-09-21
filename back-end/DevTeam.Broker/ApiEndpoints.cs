@@ -428,6 +428,43 @@ public static class ApiEndpoints
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
+        // Like run-gates, but a failed check isn't a dead end: the agent is asked to fix it and the
+        // checks re-run before the problem is handed back. Returns an outcome envelope.
+        app.MapPost("/api/features/{featureId:guid}/run-gates-and-repair", async (Guid featureId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var result = await new GateSelfHealer(engine).RunAsync(featureId, ctx.RequestAborted);
+                return Results.Ok(new
+                {
+                    release = result.Release,
+                    outcome = result.Outcome,
+                    autoFixAttempts = result.AutoFixAttempts,
+                    problems = result.Problems,
+                });
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        // Recovery from a provider refusal: pick another model, prove it answers, and only then
+        // clear the stage's failure. A model that can't be used is a normal 200 { ok: false } so
+        // the UI can keep its pane open and say so; only bad input / unknown feature are errors.
+        app.MapPost("/api/features/{featureId:guid}/switch-model", async (Guid featureId, SetModelRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.ModelId))
+                return Results.BadRequest("ModelId is required.");
+
+            var switcher = ctx.RequestServices.GetRequiredService<StageModelSwitcher>();
+            try
+            {
+                return Results.Ok(await switcher.SwitchAndVerifyAsync(featureId, request.ModelId, ctx.RequestAborted));
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         app.MapPost("/api/features/{featureId:guid}/run-stage", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();

@@ -42,6 +42,8 @@ public sealed class BuiltinGateRegistry
         new VerifyCodeGate(runner),
         new CodeHygieneGate(runner),
         new SliceGuardGate(runner),
+        new SliceScopeGate(runner),
+        new ReuseGate(),
         new CoverageMatrixGate(),
         new RenderPrGate(runner),
         new RenderHandoffGate(),

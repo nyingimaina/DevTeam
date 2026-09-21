@@ -43,6 +43,23 @@ public sealed class ContextBundleGate : IGate
                 builder.AppendLine($"- `{shared}`");
         }
         builder.AppendLine();
+        builder.AppendLine("## Shared core (REUSE BEFORE WRITING)");
+        builder.AppendLine();
+        builder.AppendLine("The workspace ships one shared core app that every feature extends. " +
+                           "Check these locations before writing new code — implement in the core when the " +
+                           "logic is shared, and reuse the core's types/components rather than duplicating them.");
+        var corePaths = CoreReuseChecker.CoreSourcePaths(request.WorkspacePath, manifest);
+        if (corePaths.Count == 0)
+        {
+            builder.AppendLine($"- `{CorePaths.Back(manifest)}` (backend core — relative to workspace root)");
+            builder.AppendLine($"- `{CorePaths.Front(manifest)}` (frontend core — relative to workspace root)");
+        }
+        else
+        {
+            foreach (var corePath in corePaths)
+                builder.AppendLine($"- `{corePath}`");
+        }
+        builder.AppendLine();
         builder.AppendLine("## Working rules");
         builder.AppendLine("- Implement only what each REQ demands. Do not invent scope.");
         builder.AppendLine("- Add tests first; the verify/code gate runs them and reports failures.");

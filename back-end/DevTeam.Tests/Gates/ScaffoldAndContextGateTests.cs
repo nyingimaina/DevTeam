@@ -119,6 +119,24 @@ public class ScaffoldAndContextGateTests : IDisposable
     }
 
     [Fact]
+    public async Task Context_IncludesTheSharedCoreMap()
+    {
+        var scaffold = new ScaffoldSpecsGate();
+        await scaffold.RunAsync(Request(_workspace), CancellationToken.None);
+        var coreDir = Path.Combine(_workspace, "back-end", "src", "Core");
+        Directory.CreateDirectory(coreDir);
+
+        var gate = new ContextBundleGate();
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ContextBundle, _workspace, "feat-001", "developer"),
+            CancellationToken.None);
+
+        var context = System.IO.File.ReadAllText(ArtifactPaths.ContextPath(_workspace, "feat-001"));
+        Assert.Contains("Shared core (REUSE BEFORE WRITING)", context);
+        Assert.Contains(coreDir.Replace('\\', '/'), context);
+    }
+
+    [Fact]
     public void TryRead_MalformedYaml_ReturnsNullInsteadOfThrowing()
     {
         // manifest.yaml lives under the feature's own artifacts directory, so any role's agent

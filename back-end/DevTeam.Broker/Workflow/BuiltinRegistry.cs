@@ -8,6 +8,8 @@ public static class BuiltinRegistry
     public const string VerifyCode = "verify_code";
     public const string CodeHygiene = "code_hygiene";
     public const string SliceGuard = "slice_guard";
+    public const string SliceScope = "slice_scope";
+    public const string ReuseGate = "reuse_gate";
     public const string RenderPr = "render_pr";
     public const string RenderHandoff = "render_handoff";
     public const string CoverageMatrix = "coverage_matrix";
@@ -20,6 +22,8 @@ public static class BuiltinRegistry
         VerifyCode,
         CodeHygiene,
         SliceGuard,
+        SliceScope,
+        ReuseGate,
         RenderPr,
         RenderHandoff,
         CoverageMatrix,

@@ -13,6 +13,7 @@ public interface IWorkflowEngine
     Task<StagePromptResult> SendMessageAsync(Guid featureId, string text, CancellationToken ct);
     Task<StagePromptResult> SendMessageEnforcingSingleQuestionAsync(Guid featureId, string text, CancellationToken ct);
     Task<DevTeamRelease> RunGatesAsync(Guid featureId, CancellationToken ct);
+    Task<DevTeamRelease> ReopenBlockedGateAsync(Guid featureId, CancellationToken ct);
     Task<DevTeamRelease> RunStageAsync(Guid featureId, CancellationToken ct);
     Task<DevTeamRelease> PushBackAsync(Guid featureId, string targetStageName, string? instructions, CancellationToken ct);
     Task<IReadOnlyList<MessageDto>> GetStageMessagesAsync(Guid featureId, Guid stageRunId, CancellationToken ct);
@@ -20,6 +21,7 @@ public interface IWorkflowEngine
     Task<IReadOnlyList<StageArtifactDto>> GetStageArtifactsAsync(Guid featureId, Guid stageRunId, CancellationToken ct);
     Task<IReadOnlyList<string>> GetWorkspaceChangesAsync(Guid featureId, CancellationToken ct);
     Task<DevTeamRelease> SignoffAsync(Guid featureId, string stageName, string role, string? comment, CancellationToken ct);
+    Task<DevTeamRelease> RetryStageAsync(Guid featureId, string? targetStageName, CancellationToken ct);
     Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct);

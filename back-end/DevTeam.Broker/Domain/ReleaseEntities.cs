@@ -251,6 +251,13 @@ public sealed class ReleaseStageRun
     public string? LastErrorMessage { get; set; }
     public DateTimeOffset? LastErrorAt { get; set; }
 
+    /// <summary>
+    /// Eagerly-persisted progress marker (a serialized <see cref="StageCheckpoint"/>) written
+    /// before/after every agent turn and gate step. Lets the startup crash-recoverer tell a
+    /// turn that finished from one that was mid-flight when the broker died.
+    /// </summary>
+    public string? CheckpointJson { get; set; }
+
     public List<ReleaseGateCheck> GateChecks { get; set; } = [];
     public List<ReviewFinding> Findings { get; set; } = [];
     public List<ReleaseGuidanceNote> GuidanceNotes { get; set; } = [];
@@ -275,6 +282,11 @@ public sealed class ReleaseGateCheck
     // Who should act if this specific check fails — see WorkflowStep.ResponsibleRole. Null
     // means the stage that ran it owns the fix (today's implicit default).
     public string? ResponsibleRole { get; set; }
+
+    // Read-only display text for the UI (get-only, so EF doesn't map them): the internal check
+    // name and raw evidence stay as the source of truth; users read these instead.
+    public string DisplayTitle => Workflow.GateFriendlyText.Describe(Name, EvidenceText).Title;
+    public string PlainProblem => Workflow.GateFriendlyText.Describe(Name, EvidenceText).WhatWentWrong;
 }
 
 public sealed class ReviewFinding

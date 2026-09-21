@@ -157,6 +157,7 @@ public sealed class DevTeamDbContext : DbContext
             release.Property(e => e.Title).HasMaxLength(512);
             release.Property(e => e.Version).IsRequired().HasMaxLength(64);
             release.Property(e => e.BranchName).HasMaxLength(256);
+            release.Property(e => e.IsHotfix).HasDefaultValue(false);
             release.HasMany(e => e.Features)
                 .WithOne(f => f.Release)
                 .HasForeignKey(f => f.ReleaseId)

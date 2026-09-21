@@ -29,7 +29,9 @@ public sealed class ScaffoldSpecsGate : IGate
             GateInputs.Get(request.Inputs, "codePathBack", "back-end/**/Features/<F>"),
             GateInputs.Get(request.Inputs, "codePathFront", "front-end/app/<F>"),
             GateInputs.GetList(request.Inputs, "sharedFiles"),
-            GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"));
+            GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"),
+            GateInputs.Get(request.Inputs, "corePathBack", CorePaths.DefaultBack),
+            GateInputs.Get(request.Inputs, "corePathFront", CorePaths.DefaultFront));
 
         cancellationToken.ThrowIfCancellationRequested();
         SliceManifestIO.Write(manifestPath, manifest);

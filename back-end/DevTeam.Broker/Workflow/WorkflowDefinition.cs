@@ -1,3 +1,5 @@
+using DevTeam.Broker.Gates;
+
 namespace DevTeam.Broker.Workflow;
 
 public enum WorkflowStepKind
@@ -50,7 +52,11 @@ public sealed record WorkflowSlices(
     IReadOnlyList<string> Shared,
     string Artifacts,
     string CodeBack,
-    string CodeFront);
+    string CodeFront,
+    // The shared-core app each feature slice builds additively on top of — resolved to
+    // CorePaths defaults when empty. See CorePaths for the convention.
+    string CoreBack = CorePaths.DefaultBack,
+    string CoreFront = CorePaths.DefaultFront);
 
 public sealed record WorkflowRole(
     string Name,

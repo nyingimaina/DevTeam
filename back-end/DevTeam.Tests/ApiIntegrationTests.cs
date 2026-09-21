@@ -554,6 +554,74 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
+    public async Task RunGatesAndRepair_ReturnsOutcomeEnvelopeWithTheRelease()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-api-repair", workspacePath = @"C:\work\api-repair-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+        var featureId = release!.CurrentFeatureId;
+
+        (await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { })).EnsureSuccessStatusCode();
+        (await client.PostAsJsonAsync($"/api/features/{featureId}/send-message", new { text = "We need a login form" }))
+            .EnsureSuccessStatusCode();
+
+        var response = await client.PostAsJsonAsync($"/api/features/{featureId}/run-gates-and-repair", new { });
+        response.EnsureSuccessStatusCode();
+        using var body = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        // Real gates run against a fake workspace here, so either outcome is legitimate; what
+        // matters is the envelope contract the UI relies on.
+        var outcome = body.RootElement.GetProperty("outcome").GetString();
+        var attempts = body.RootElement.GetProperty("autoFixAttempts").GetInt32();
+        var problems = body.RootElement.GetProperty("problems");
+        Assert.Contains(outcome, new[] { "Passed", "NeedsYou" });
+        Assert.InRange(attempts, 0, 2);
+        Assert.Equal(release.Id, body.RootElement.GetProperty("release").GetProperty("id").GetGuid());
+        if (outcome == "Passed")
+        {
+            Assert.Equal(0, problems.GetArrayLength());
+        }
+        else
+        {
+            Assert.True(problems.GetArrayLength() > 0);
+            Assert.False(string.IsNullOrWhiteSpace(problems[0].GetProperty("title").GetString()));
+            Assert.False(string.IsNullOrWhiteSpace(problems[0].GetProperty("whatWentWrong").GetString()));
+        }
+    }
+
+    [Fact]
+    public async Task SwitchModel_BlankModel_Returns400()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync($"/api/features/{Guid.NewGuid()}/switch-model", new { modelId = " " });
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SwitchModel_UnknownFeature_Returns404()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync($"/api/features/{Guid.NewGuid()}/switch-model", new { modelId = "some/model" });
+
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RunGatesAndRepair_UnknownFeature_Returns404()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync($"/api/features/{Guid.NewGuid()}/run-gates-and-repair", new { });
+
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task GetRelease_SerializesEnumsAsStringsNotIntegers()
     {
         var client = _factory.CreateClient();

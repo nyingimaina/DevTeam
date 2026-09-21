@@ -9,6 +9,35 @@ public class WorkflowDefinitionLoaderTests
     private static WorkflowDefinition Load(string yaml) => new WorkflowDefinitionLoader().Load(yaml);
 
     [Fact]
+    public void LoadDefault_DefinesSharedCoreSlicesAndGatesTheDeveloperOnReuseAndScope()
+    {
+        var definition = LoadDefault();
+
+        Assert.Equal("back-end/src/Core", definition.Slices.CoreBack);
+        Assert.Equal("front-end/app/core", definition.Slices.CoreFront);
+
+        var developer = definition.Pipeline.Single(r => r.Name == "developer");
+        Assert.Contains(developer.Steps, s => s.Builtin == "reuse_gate");
+        Assert.Contains(developer.Steps, s => s.Builtin == "slice_scope");
+        Assert.DoesNotContain(developer.Steps, s => s.Builtin == "slice_guard");
+    }
+
+    [Fact]
+    public void Load_SlicesCorePathsDefaultAndCanBeOverridden()
+    {
+        Assert.Equal("back-end/src/Core", Load("release:\n  versioning: custom").Slices.CoreBack);
+
+        var definition = Load("""
+            slices:
+              coreBack: back-end/Core
+              coreFront: web/core
+            """);
+
+        Assert.Equal("back-end/Core", definition.Slices.CoreBack);
+        Assert.Equal("web/core", definition.Slices.CoreFront);
+    }
+
+    [Fact]
     public void LoadDefault_DefinesOpinionatedCorePipeline()
     {
         var definition = LoadDefault();
@@ -286,6 +315,7 @@ public class WorkflowDefinitionLoaderTests
 
         var dev = definition.Challenges.Single(c => c.Producer == "developer");
         Assert.Equal("qa", dev.AntagonistMode);
+        Assert.Equal("reuse_gate", dev.LintBuiltin);
 
         var qa = definition.Challenges.Single(c => c.Producer == "qa");
         Assert.Null(qa.AntagonistMode);
