@@ -10,6 +10,23 @@
 
 ---
 
+## Build status (update as you go)
+
+| Step (§10) | State |
+|---|---|
+| 0a Backend derived status (`ReleaseStatusRules`, `EffectiveStatus`) | ✅ done — commit `739c5a6` |
+| 0b Frontend uses effective status; regression tests | ✅ done — commit `739c5a6` |
+| 1 Pure helpers: `releaseView.ts`, `routes.ts`, `terms.ts` (+ tests) | ✅ done |
+| 2 `readOnly` plumbing through stage components | ⏳ next |
+| 3 Pure move: extract stage components from `ReleaseWizard.tsx` | ⏳ |
+| 4 `useHashRoute` + `Breadcrumb` | ⏳ |
+| 5 `FeatureView` | ⏳ |
+| 6 `ReleaseFolder` + `NewFeatureTile` | ⏳ |
+| 7 `ProjectHome` + mount in `App.tsx` | ⏳ |
+| 8 Attention badges UI, shipped section, polish, a11y | ⏳ |
+
+---
+
 ## 0. How to use this document
 
 1. Read §1–§4 (problem, goals, vocabulary, navigation model). 20 minutes. §1 contains the **root cause of a real bug** — understand it before touching anything.
@@ -631,7 +648,7 @@ Definition of "tests done": written first, failed for the right reason, then pas
 9. **`SelectWrapper` is react-select**, not a native `<select>`. Test it with `.react-select__control` mouseDown then click the option text (helper in `PipelineView.test.tsx`). Options must be objects, not strings.
 10. **`jest.mock("…/BrokerApi")` automocks the class.** A new API method must exist on the prototype or the mock lacks it. Add methods to `BrokerApi.ts` before writing tests that call them.
 11. **Hash routing + `hashchange`.** `location.hash = x` fires `hashchange` asynchronously; don't assume state has updated on the next line. In tests dispatch `new HashChangeEvent("hashchange")` after setting the hash, and reset `location.hash = ""` in `afterEach`.
-12. **IDs in URLs.** Ids are GUIDs; `encodeURIComponent` them anyway and validate on parse (`/^[0-9a-f-]{36}$/i`). An id in the address that doesn't exist must render the "not found" state, never throw.
+12. **IDs in URLs.** Ids are GUIDs; validate on parse with the safe-character pattern in `routes.ts` (`/^[A-Za-z0-9_-]{1,64}$/` — accepts GUIDs, rejects `..`, `%`, spaces, `<`). An id in the address that doesn't exist must render the "not found" state, never throw.
 13. **Stale selection.** The release you're viewing can vanish or change (another window ships it). Derive the view from the polled data every render; never keep a copy of the release in `useState` as the source of truth (the old code does: `selectedRelease`).
 14. **Date/time.** "Last activity" = max of feature `updatedAt` and its runs' `finishedAt/startedAt`, displayed relative ("2 hours ago"). Inject a clock in tests; don't let snapshots depend on the current time.
 15. **Sorting must be stable and deterministic** (tie-break by `createdAt`, then `key`) or cards jump on every poll.
