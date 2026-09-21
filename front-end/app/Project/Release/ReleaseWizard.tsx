@@ -772,9 +772,14 @@ interface IStageScreenProps {
   testIdPrefix: string;
   refreshRelease: () => Promise<void>;
   hidePrimaryPanel?: boolean;
+  /**
+   * Look, but don't touch: shows everything (conversation, log, checks, files) and offers no control
+   * that runs the agent or changes state. Off by default, so existing screens are unchanged.
+   */
+  readOnly?: boolean;
 }
 
-function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefix, refreshRelease, hidePrimaryPanel = false }: IStageScreenProps) {
+export function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefix, refreshRelease, hidePrimaryPanel = false, readOnly = false }: IStageScreenProps) {
   const [busy, setBusy] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
   // Sparse-by-default, full-detail-on-demand: the header/checklist only ever show compact
@@ -787,7 +792,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
   const [dismissedProblemKey, setDismissedProblemKey] = useState<string | null>(null);
   const problemKey = run ? `${run.id}|${run.lastErrorAt ?? ""}` : "";
   const modelProblemOpen =
-    run?.status === "Escalated" && run.lastErrorKind === "ProviderRejected" && dismissedProblemKey !== problemKey;
+    !readOnly && run?.status === "Escalated" && run.lastErrorKind === "ProviderRejected" && dismissedProblemKey !== problemKey;
 
   const handleStartStage = useCallback(async () => {
     setBusy(true);
@@ -897,7 +902,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
             <span className={styles.questionBadge}>attempt {run.attempt}</span>
           </>
         )}
-        {run?.acpSessionId && (
+        {run?.acpSessionId && !readOnly && (
           <ModelPicker releaseId={release.id} sessionId={run.acpSessionId} api={api} testIdPrefix={testIdPrefix} />
         )}
       </div>
@@ -915,7 +920,13 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
 
       {stageError && <div className={styles.error}>{stageError}</div>}
 
-      {!hidePrimaryPanel && needsFreshStart && (
+      {!hidePrimaryPanel && needsFreshStart && readOnly && (
+        <div className={styles.noRun}>
+          <div className={styles.noRunHint}>This stage hasn't started yet.</div>
+        </div>
+      )}
+
+      {!hidePrimaryPanel && needsFreshStart && !readOnly && (
         <div className={styles.noRun}>
           {interactive ? (
             <>
@@ -949,6 +960,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
           runStage={handleRunStage}
           refreshRelease={refreshRelease}
           nextStageName={nextStageName}
+          readOnly={readOnly}
         />
       )}
 
@@ -962,6 +974,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
           busy={busy}
           runStage={handleRunStage}
           refreshRelease={refreshRelease}
+          readOnly={readOnly}
         />
       )}
 
@@ -975,7 +988,7 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
         />
       )}
 
-      {run && (run.status === "BlockedGate" || run.status === "BlockedEntry") && pipeline.length > 0 && (
+      {!readOnly && run && (run.status === "BlockedGate" || run.status === "BlockedEntry") && pipeline.length > 0 && (
         <PushBackPanel
           featureId={featureId}
           api={api}
@@ -1440,9 +1453,10 @@ interface IChatStageProps {
   runStage: () => void;
   refreshRelease: () => Promise<void>;
   nextStageName: string | null;
+  readOnly?: boolean;
 }
 
-function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, refreshRelease, nextStageName }: IChatStageProps) {
+function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, refreshRelease, nextStageName, readOnly = false }: IChatStageProps) {
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [inspecting, setInspecting] = useState<MessageDto | null>(null);
   const [input, setInput] = useState("");
@@ -1486,13 +1500,15 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   }, [api, featureId, refreshRelease]);
 
   const autoRunGates = useCallback(async (msgs: MessageDto[]) => {
+    // A transcript that ends in DONE is history when read-only — it must never trigger the checks.
+    if (readOnly) return;
     const latest = [...msgs].reverse().find((m) => m.role === "assistant" && m.bodyText);
     if (!latest || !latest.bodyText) return;
     if (latest.id === lastAutoRunMsgId.current) return;
     if (!hasStandaloneDone(latest.bodyText)) return;
     lastAutoRunMsgId.current = latest.id;
     await runGatesNow();
-  }, [hasStandaloneDone, runGatesNow]);
+  }, [readOnly, hasStandaloneDone, runGatesNow]);
 
   const loadMessages = useCallback(async () => {
     try {
@@ -1611,7 +1627,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
         <div ref={messagesEndRef} />
       </div>
 
-      {!stageRun.readyToProceed && (
+      {!readOnly && !stageRun.readyToProceed && (
         <div className={styles.stageHandoff}>
           <ZestButton
             type="button"
@@ -1625,7 +1641,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
         </div>
       )}
 
-      <div className={styles.chatInput}>
+      {!readOnly && <div className={styles.chatInput}>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -1644,7 +1660,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
         >
           Send
         </ZestButton>
-      </div>
+      </div>}
     </ZestResponsiveLayout>
   );
 }
@@ -1722,9 +1738,10 @@ interface IStageLogProps {
   busy: boolean;
   runStage: () => void;
   refreshRelease: () => Promise<void>;
+  readOnly?: boolean;
 }
 
-function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease }: IStageLogProps) {
+function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease, readOnly = false }: IStageLogProps) {
   const logContainerRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   // Only auto-follow new log lines while the reader is already at (or near) the bottom —
@@ -1815,7 +1832,7 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
     }
   }, [lines]);
 
-  const showRunButton = shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated";
+  const showRunButton = !readOnly && (shouldPollStage(stageRun.status) || stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated");
   const showRefreshButton = shouldPollStage(stageRun.status);
 
   return (

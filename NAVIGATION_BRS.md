@@ -17,8 +17,8 @@
 | 0a Backend derived status (`ReleaseStatusRules`, `EffectiveStatus`) | ✅ done — commit `739c5a6` |
 | 0b Frontend uses effective status; regression tests | ✅ done — commit `739c5a6` |
 | 1 Pure helpers: `releaseView.ts`, `routes.ts`, `terms.ts` (+ tests) | ✅ done |
-| 2 `readOnly` plumbing through stage components | ⏳ next |
-| 3 Pure move: extract stage components from `ReleaseWizard.tsx` | ⏳ |
+| 2 `readOnly` plumbing through `StageScreen` / `ChatStage` / `StageLog` (default false) | ✅ done |
+| 3 Make stage components importable | ⏳ next — by adding `export` (not moving code); a physical extraction is optional and deferred |
 | 4 `useHashRoute` + `Breadcrumb` | ⏳ |
 | 5 `FeatureView` | ⏳ |
 | 6 `ReleaseFolder` + `NewFeatureTile` | ⏳ |
