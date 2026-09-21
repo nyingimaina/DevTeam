@@ -236,6 +236,31 @@ export interface ReleaseGateCheckDto {
   completedAt?: string | null;
   isEntryGate: boolean;
   responsibleRole?: string | null;
+  // Plain-language text computed by the broker; fall back to `name`/`evidenceText` if absent.
+  displayTitle?: string;
+  plainProblem?: string;
+}
+
+export interface GateProblemDto {
+  gateName: string;
+  title: string;
+  whatWentWrong: string;
+  technicalDetail: string;
+}
+
+// Result of trying another AI model on a stage the provider refused: `ok` only once the model
+// actually answered a connection check. `message` is plain language, safe to show as-is.
+export interface ModelSwitchResultDto {
+  ok: boolean;
+  message: string;
+  modelId?: string | null;
+}
+
+export interface RunGatesRepairResultDto {
+  release: ReleaseDto;
+  outcome: "Passed" | "NeedsYou";
+  autoFixAttempts: number;
+  problems: GateProblemDto[];
 }
 
 export interface ReleaseSignoffDto {

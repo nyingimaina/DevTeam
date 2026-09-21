@@ -14,22 +14,22 @@ const STAGE_OUTPUT_LABELS: Record<string, string> = {
 const PHASE_LABELS: Record<string, string> = {
   GuidedQA: "Chat with agent",
   Producing: "Producing artifacts",
-  Gates: "Running gates",
+  Gates: "Checking the work",
   Challenge: "Review in progress",
-  Signoff: "Awaiting signoff",
+  Signoff: "Waiting for your approval",
 };
 
 const STATUS_LABELS: Record<string, string> = {
   InProgress: "In progress",
-  BlockedGate: "Blocked — gates failing",
-  BlockedSignoff: "Awaiting your signoff",
+  BlockedGate: "Needs attention — some checks didn't pass",
+  BlockedSignoff: "Waiting for your approval",
   Blocked: "Blocked",
   Ready: "Ready",
   Complete: "Done",
   Escalated: "Agent error — needs retry",
   // Distinct from BlockedGate: this stage's own gates never ran — an EntryGate checking
   // something the *previous* stage produced failed first.
-  BlockedEntry: "Blocked before starting — check entry requirements",
+  BlockedEntry: "Blocked before starting — the previous step needs attention",
   // ReleaseFeatureStatus values (feature-list card, not the release/stage header).
   Proposed: "Not started",
   OnHold: "Parked — switch to resume",
@@ -91,4 +91,43 @@ export function moveOnButtonLabel(nextStageName: string | null): string {
 // so its label should say so instead of the generic, non-committal "Proceed".
 export function proceedButtonLabel(nextStageName: string | null): string {
   return nextStageName ? `Approve & move to ${stageLabel(nextStageName)}` : "Approve & finish release";
+}
+
+export interface GateProblemLike {
+  gateName: string;
+  title: string;
+  whatWentWrong: string;
+  technicalDetail?: string;
+}
+
+export interface RepairResultLike {
+  outcome: string;
+  autoFixAttempts: number;
+  problems: GateProblemLike[];
+}
+
+export interface RepairNotice {
+  tone: "info" | "error";
+  title: string;
+  items: string[];
+}
+
+// What to tell the user after a check-and-repair run: nothing when it just passed, a quiet
+// note when the agent fixed things itself, and a clear list when it's now their call.
+export function repairNotice(result: RepairResultLike | null | undefined): RepairNotice | null {
+  if (!result) return null;
+  if (result.outcome === "NeedsYou") {
+    const title = result.autoFixAttempts > 0
+      ? `The agent tried ${result.autoFixAttempts} time${result.autoFixAttempts === 1 ? "" : "s"} to fix this on its own, but it still needs you.`
+      : "This needs you.";
+    return {
+      tone: "error",
+      title,
+      items: result.problems.map((p) => `${p.title} — ${p.whatWentWrong}`),
+    };
+  }
+  if (result.autoFixAttempts > 0) {
+    return { tone: "info", title: "The agent found a problem in its work and fixed it automatically.", items: [] };
+  }
+  return null;
 }

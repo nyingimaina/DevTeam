@@ -1,4 +1,4 @@
-import { stageLabel, stageOutputLabel, phaseLabel, statusLabel, whatsNext, errorKindLabel } from "./labels";
+import { stageLabel, stageOutputLabel, phaseLabel, statusLabel, whatsNext, errorKindLabel, repairNotice } from "./labels";
 
 describe("stageLabel", () => {
   it("maps known pipeline stages to friendly names", () => {
@@ -28,9 +28,9 @@ describe("phaseLabel", () => {
   it("maps known phases to friendly names", () => {
     expect(phaseLabel("GuidedQA")).toBe("Chat with agent");
     expect(phaseLabel("Producing")).toBe("Producing artifacts");
-    expect(phaseLabel("Gates")).toBe("Running gates");
+    expect(phaseLabel("Gates")).toBe("Checking the work");
     expect(phaseLabel("Challenge")).toBe("Review in progress");
-    expect(phaseLabel("Signoff")).toBe("Awaiting signoff");
+    expect(phaseLabel("Signoff")).toBe("Waiting for your approval");
   });
 
   it("passes through unknown phases", () => {
@@ -41,8 +41,8 @@ describe("phaseLabel", () => {
 describe("statusLabel", () => {
   it("maps known release statuses to friendly names", () => {
     expect(statusLabel("InProgress")).toBe("In progress");
-    expect(statusLabel("BlockedGate")).toBe("Blocked — gates failing");
-    expect(statusLabel("BlockedSignoff")).toBe("Awaiting your signoff");
+    expect(statusLabel("BlockedGate")).toBe("Needs attention — some checks didn't pass");
+    expect(statusLabel("BlockedSignoff")).toBe("Waiting for your approval");
     expect(statusLabel("Blocked")).toBe("Blocked");
     expect(statusLabel("Ready")).toBe("Ready");
     expect(statusLabel("Complete")).toBe("Done");
@@ -88,5 +88,48 @@ describe("whatsNext", () => {
 
   it("returns empty string for unknown stages", () => {
     expect(whatsNext("mystery")).toBe("");
+  });
+});
+
+describe("plain-language wording", () => {
+  it("never shows internal jargon in status or phase labels", () => {
+    const all = [
+      ...["Gates", "Signoff", "Challenge"].map(phaseLabel),
+      ...["BlockedGate", "BlockedSignoff", "BlockedEntry", "Escalated"].map(statusLabel),
+    ].join(" ");
+    expect(all).not.toMatch(/gate|signoff|gherkin|entry/i);
+  });
+});
+
+describe("repairNotice", () => {
+  it("is silent when nothing needed fixing", () => {
+    expect(repairNotice({ outcome: "Passed", autoFixAttempts: 0, problems: [] })).toBeNull();
+  });
+
+  it("tells the user the agent fixed things itself", () => {
+    const n = repairNotice({ outcome: "Passed", autoFixAttempts: 1, problems: [] });
+    expect(n?.tone).toBe("info");
+    expect(n?.title).toMatch(/fixed/i);
+  });
+
+  it("lists each remaining problem in plain words when it needs the user", () => {
+    const n = repairNotice({
+      outcome: "NeedsYou",
+      autoFixAttempts: 2,
+      problems: [{
+        gateName: "gherkin_validator",
+        title: "Every requirement has a clear example",
+        whatWentWrong: "Requirement 4 doesn't describe the starting situation.",
+        technicalDetail: "fail: REQ-004",
+      }],
+    });
+    expect(n?.tone).toBe("error");
+    expect(n?.title).toMatch(/2/);
+    expect(n?.items).toEqual(["Every requirement has a clear example — Requirement 4 doesn't describe the starting situation."]);
+    expect(JSON.stringify(n)).not.toMatch(/gherkin|REQ-004/i);
+  });
+
+  it("handles a missing result", () => {
+    expect(repairNotice(undefined)).toBeNull();
   });
 });

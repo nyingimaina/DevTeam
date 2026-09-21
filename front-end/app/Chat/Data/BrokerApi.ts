@@ -9,6 +9,7 @@ import {
   GitStatusDto,
   HealthResponse,
   MessageDto,
+  ModelSwitchResultDto,
   ModelOption,
   PipelineEditorDto,
   PipelineEditorRoleDto,
@@ -16,6 +17,7 @@ import {
   ProfileDto,
   SpecialistRoleDto,
   ReleaseDto,
+  RunGatesRepairResultDto,
   ReleaseFeatureDto,
   SessionDetail,
   StageArtifactDto,
@@ -336,6 +338,23 @@ export default class BrokerApi {
   runStageGatesAsync(featureId: string): Promise<ReleaseDto> {
     return this.requestAsync<ReleaseDto>(`/api/features/${featureId}/run-gates`, {
       method: "POST",
+    });
+  }
+
+  // Same checks as runStageGatesAsync, but a failed check is sent back to the agent to fix
+  // (a couple of times) before it's handed to the user.
+  runStageGatesWithRepairAsync(featureId: string): Promise<RunGatesRepairResultDto> {
+    return this.requestAsync<RunGatesRepairResultDto>(`/api/features/${featureId}/run-gates-and-repair`, {
+      method: "POST",
+    });
+  }
+
+  // Selects the model on the stage's live session and verifies it answers before reporting ok.
+  // A model that can't be used comes back as { ok: false, message } — not an exception.
+  switchStageModelAsync(featureId: string, modelId: string): Promise<ModelSwitchResultDto> {
+    return this.requestAsync<ModelSwitchResultDto>(`/api/features/${featureId}/switch-model`, {
+      method: "POST",
+      body: JSON.stringify({ modelId }),
     });
   }
 

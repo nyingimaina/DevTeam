@@ -18,7 +18,9 @@ import RichText from "../../UI/RichText";
 import ZestButton from "jattac.libs.web.zest-button";
 import { ZestResponsiveLayout } from "jattac.libs.web.zest-responsive-layout";
 import { FaSpinner } from "react-icons/fa6";
-import { errorKindLabel, moveOnButtonLabel, phaseLabel, proceedButtonLabel, stageLabel, stageOutputLabel, statusLabel, whatsNext } from "./labels";
+import SelectWrapper from "../../Forms/SelectWrapper/UI/SelectWrapper";
+import { errorKindLabel, moveOnButtonLabel, phaseLabel, proceedButtonLabel, repairNotice, stageLabel, stageOutputLabel, statusLabel, whatsNext } from "./labels";
+import type { RepairNotice } from "./labels";
 import { formatElapsed } from "../../UI/formatElapsed";
 import styles from "../Styles/ReleaseWizard.module.css";
 
@@ -779,6 +781,12 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
   // guidance note, the specific escalation reason) lives here, reached by clicking the
   // status badge, instead of cluttering the primary view.
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  // The recovery pane opens by itself when the provider refuses a request; closing it is
+  // remembered per failure so it doesn't reopen on every poll, only when a new failure lands.
+  const [dismissedProblemKey, setDismissedProblemKey] = useState<string | null>(null);
+  const problemKey = run ? `${run.id}|${run.lastErrorAt ?? ""}` : "";
+  const modelProblemOpen =
+    run?.status === "Escalated" && run.lastErrorKind === "ProviderRejected" && dismissedProblemKey !== problemKey;
 
   const handleStartStage = useCallback(async () => {
     setBusy(true);
@@ -806,6 +814,29 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
     }
   }, [api, featureId, refreshRelease]);
 
+  // Runs after a replacement model has answered its connection check. Refreshes first so the
+  // pane closes, then resumes in the background — resuming can take minutes and the pane
+  // must not sit on "Checking connection…" for all of it.
+  const handleModelSwitched = useCallback(async () => {
+    await refreshRelease();
+    if (role?.userInputRequired) {
+      void (async () => {
+        setBusy(true);
+        setStageError(null);
+        try {
+          await api.sendStageMessageAsync(featureId, CONTINUE_MESSAGE);
+          await refreshRelease();
+        } catch (e) {
+          setStageError(toErrorMessage(e));
+        } finally {
+          setBusy(false);
+        }
+      })();
+    } else {
+      void handleRunStage();
+    }
+  }, [api, featureId, refreshRelease, role?.userInputRequired, handleRunStage]);
+
   if (release.status === "Ready" || release.status === "Complete" || !role) {
     return (
       <div className={styles.stagePanel}>
@@ -828,7 +859,21 @@ function StageScreen({ release, featureId, api, pipeline, role, run, testIdPrefi
   return (
     <ZestResponsiveLayout
       sidePaneWidth="480px"
-      sidePane={{
+      sidePane={modelProblemOpen && run ? {
+        visible: true,
+        title: "The AI model isn't working",
+        content: (
+          <ModelProblemPane
+            releaseId={release.id}
+            featureId={featureId}
+            run={run}
+            api={api}
+            testIdPrefix={testIdPrefix}
+            onSwitched={handleModelSwitched}
+          />
+        ),
+        onClose: () => setDismissedProblemKey(problemKey),
+      } : {
         visible: diagnosticsOpen,
         title: "Stage diagnostics",
         content: run ? <StageDiagnosticsContent run={run} /> : null,
@@ -980,15 +1025,15 @@ function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
         )}
         {run.status === "BlockedEntry" && (
           <p className={styles.diagnosticsError}>
-            An entry check failed before this stage&apos;s turn started — see Entry checks below.
+            A check failed before this step could start — see &quot;Checks before this step&quot; below.
           </p>
         )}
       </section>
 
       <section>
-        <h4>Entry checks</h4>
+        <h4>Checks before this step</h4>
         {entryChecks.length === 0 ? (
-          <p>No entry checks for this stage.</p>
+          <p>No checks before this step.</p>
         ) : (
           <ul className={styles.diagnosticsList}>
             {entryChecks.map((gc) => (
@@ -999,9 +1044,9 @@ function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
       </section>
 
       <section>
-        <h4>Exit checks</h4>
+        <h4>Checks after this step</h4>
         {exitChecks.length === 0 ? (
-          <p>No exit checks yet.</p>
+          <p>No checks after this step yet.</p>
         ) : (
           <ul className={styles.diagnosticsList}>
             {exitChecks.map((gc) => (
@@ -1020,7 +1065,7 @@ function StageDiagnosticsContent({ run }: { run: ReleaseStageRunDto }) {
             {run.guidanceNotes.map((note) => (
               <li key={note.id}>
                 <div className={styles.diagnosticsNoteAttribution}>
-                  {note.addedBy === "system:gate-failure" ? "Auto-generated from gate failure" : note.addedBy ?? "user"}
+                  {note.addedBy === "system:gate-failure" ? "Added automatically after a check failed" : note.addedBy ?? "user"}
                 </div>
                 <div>{note.text}</div>
               </li>
@@ -1208,6 +1253,112 @@ function StageContextPanels({ featureId, api, testIdPrefix, previousRoleName, pr
   );
 }
 
+// ─── recovery pane: the AI provider refused a stage's request ────────────
+//
+// The agent didn't crash and the work isn't lost — the provider just said no (a free model that
+// can't be used right now, a quota, …). The user picks another model; the broker selects it and
+// sends a small connection check, and only a real answer resumes the work. Anything else keeps
+// this pane open so they can try a different one.
+
+const CONTINUE_MESSAGE = "Please continue from where you left off.";
+
+interface IModelProblemPaneProps {
+  releaseId: string;
+  featureId: string;
+  run: ReleaseStageRunDto;
+  api: BrokerApi;
+  testIdPrefix: string;
+  /** Called once the new model has answered; must not wait for the resumed work to finish. */
+  onSwitched: () => Promise<void>;
+}
+
+function ModelProblemPane({ releaseId, featureId, run, api, testIdPrefix, onSwitched }: IModelProblemPaneProps) {
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [selected, setSelected] = useState<ModelOption | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const available = await api.getAvailableModelsAsync(releaseId);
+        if (!cancelled) setModels(available);
+      } catch (e) {
+        if (!cancelled) setFailure(`We couldn't load the list of models (${toErrorMessage(e)}).`);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [api, releaseId]);
+
+  const handleUse = useCallback(async () => {
+    if (!selected || checking) return;
+    setChecking(true);
+    setFailure(null);
+    try {
+      const result = await api.switchStageModelAsync(featureId, selected.value);
+      if (!result.ok) {
+        setFailure(result.message);
+        return;
+      }
+      await onSwitched();
+    } catch (e) {
+      setFailure(`We couldn't check that model (${toErrorMessage(e)}). Please try another.`);
+    } finally {
+      setChecking(false);
+    }
+  }, [api, featureId, selected, checking, onSwitched]);
+
+  return (
+    <div className={styles.modelProblem} data-testid={`${testIdPrefix}-model-problem`}>
+      <p><strong>The AI service refused the last request.</strong></p>
+      <p>
+        Work on {stageLabel(run.stageName)} is paused. Pick another AI model — we&apos;ll test that it
+        works, then carry on from where it stopped.
+      </p>
+      {run.lastErrorMessage && (
+        <>
+          <div className={styles.modelProblemLabel}>What the service said</div>
+          <blockquote className={styles.modelProblemDetail}>{run.lastErrorMessage}</blockquote>
+        </>
+      )}
+
+      <div className={styles.modelProblemLabel}>Choose another model</div>
+      <div data-testid={`${testIdPrefix}-model-problem-select`}>
+        <SelectWrapper<ModelOption>
+          data={models}
+          selectedResolver={(m) => m.value === selected?.value}
+          valueResolver={(m) => m.value}
+          labelResolver={(m) => m.name}
+          onChange={(items) => setSelected(items[0] ?? null)}
+          placeholder="Choose a model"
+        />
+      </div>
+
+      {failure && <div className={styles.error} role="alert">{failure}</div>}
+
+      <div className={styles.modelProblemActions}>
+        <ZestButton
+          type="button"
+          onClick={() => void handleUse()}
+          disabled={!selected || checking}
+          data-testid={`${testIdPrefix}-model-problem-use-btn`}
+          // The button's default post-click cool-down (~2s + a success tick) would leave "try
+          // another model" greyed out after a failed check; this pane shows its own progress.
+          zest={{
+            semanticType: "submit",
+            busyOptions: { preventRageClick: true, minBusyDurationMs: 0 },
+            successOptions: { showCheckmark: false, showFailIcon: false, autoResetAfterMs: 100 },
+            visualOptions: { size: "sm" },
+          }}
+        >
+          {checking ? "Checking connection…" : "Use this model and continue"}
+        </ZestButton>
+      </div>
+    </div>
+  );
+}
+
 // ─── model picker (let a non-technical user swap the AI engine) ───────────
 
 interface IModelPickerProps {
@@ -1297,6 +1448,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   const [sending, setSending] = useState(false);
   const [gatesRunning, setGatesRunning] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [repairInfo, setRepairInfo] = useState<RepairNotice | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const gatesInFlight = useRef(false);
@@ -1319,8 +1471,10 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
     if (gatesInFlight.current) return;
     gatesInFlight.current = true;
     setGatesRunning(true);
+    setRepairInfo(null);
     try {
-      await api.runStageGatesAsync(featureId);
+      const result = await api.runStageGatesWithRepairAsync(featureId);
+      setRepairInfo(repairNotice(result));
       await refreshRelease();
     } catch (e) {
       setMessagesError(toErrorMessage(e));
@@ -1412,6 +1566,22 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
       }}
     >
       {messagesError && <div className={styles.error}>{messagesError}</div>}
+      {repairInfo && (
+        <div
+          className={repairInfo.tone === "error" ? styles.error : styles.chatIntro}
+          role={repairInfo.tone === "error" ? "alert" : "status"}
+          data-testid={`${testIdPrefix}-repair-notice`}
+        >
+          <div>{repairInfo.title}</div>
+          {repairInfo.items.length > 0 && (
+            <ul>
+              {repairInfo.items.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <div
         className={styles.chatContainer}
         ref={chatContainerRef}
@@ -1421,7 +1591,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
         {messages.length === 0 && (
           <div className={styles.chatIntro}>
             Conversation with the {stageRun.stageName} agent will appear here.
-            {stageRun.status === "BlockedSignoff" && " Gates are done — awaiting signoff above."}
+            {stageRun.status === "BlockedSignoff" && " The checks passed — waiting for your approval above."}
           </div>
         )}
         {messages.map((message) => (
@@ -1434,7 +1604,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
         )}
         {gatesRunning && (
           <div className={styles.thinkingRow} role="status" data-testid={`${testIdPrefix}-gates`}>
-            <div className={styles.thinkingBubble}>running gates…</div>
+            <div className={styles.thinkingBubble}>checking the work…</div>
           </div>
         )}
         <div ref={messagesEndRef} />
@@ -1608,7 +1778,9 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
 
     for (const gc of stageRun.gateChecks) {
       out.push({
-        text: `${gc.passed ? "✓" : "✗"} gate ${gc.name}${gc.evidenceText ? ` — ${gc.evidenceText}` : ""}`,
+        text: `${gc.passed ? "✓" : "✗"} ${gc.displayTitle ?? gc.name}${
+          !gc.passed && gc.plainProblem ? ` — ${gc.plainProblem}` : gc.evidenceText ? ` — ${gc.evidenceText}` : ""
+        }`,
         tone: gc.passed ? "ok" : "err",
       });
     }
@@ -1621,11 +1793,11 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease 
       const reason = errorKindLabel(stageRun.lastErrorKind) || "The agent hit an error and needs a retry.";
       out.push({ text: `⚠ ${reason}`, tone: "err" });
     } else if (stageRun.status === "BlockedGate") {
-      out.push({ text: "stage blocked — gates failed. Review findings and push back for rework.", tone: "err" });
+      out.push({ text: "some checks didn't pass. See what went wrong above, then send it back for rework.", tone: "err" });
     } else if (stageRun.status === "BlockedEntry") {
-      out.push({ text: "stage blocked before it could start — an entry check failed (often something the previous stage needs to fix).", tone: "err" });
+      out.push({ text: "this step couldn't start — a check failed (often something the previous step needs to fix).", tone: "err" });
     } else if (stageRun.status === "BlockedSignoff") {
-      out.push({ text: "stage blocked — signoff required to continue.", tone: "warn" });
+      out.push({ text: "waiting for your approval to continue.", tone: "warn" });
     } else if (stageRun.status === "Complete") {
       out.push({ text: "stage complete.", tone: "ok" });
     } else {
@@ -1769,7 +1941,7 @@ function PushBackPanel({ featureId, api, stageIndex, pipeline, stageRun, testIdP
   return (
     <div className={styles.pushBack}>
       <div className={styles.pushBackBanner}>
-        This stage&apos;s gates failed — the fix needs to happen in an earlier stage. We&apos;ve
+        Some checks on this step didn&apos;t pass — the fix needs to happen in an earlier step. We&apos;ve
         drafted rework instructions below from the failure details; review them, then click{" "}
         <strong>Push Back</strong> to send it back for correction.
       </div>

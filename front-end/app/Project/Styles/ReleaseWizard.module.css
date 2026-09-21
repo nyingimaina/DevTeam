@@ -911,3 +911,31 @@
   min-height: 70px;
   resize: vertical;
 }
+
+/* recovery pane: the AI provider refused a stage request */
+.modelProblem {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.25rem;
+}
+
+.modelProblemLabel {
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.modelProblemDetail {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #d97706;
+  background: rgba(217, 119, 6, 0.08);
+  font-size: 0.85rem;
+  word-break: break-word;
+}
+
+.modelProblemActions {
+  display: flex;
+  justify-content: flex-end;
+}

@@ -12,7 +12,7 @@ const mockApi = jest.mocked(BrokerApi.prototype);
 
 const PIPELINE: PipelineStageDto[] = [
   { name: "business-analyst", userInputRequired: true, signoff: "requirements-approval", expectedArtifacts: ["devteam/features/<F>/specs.feature", "devteam/features/<F>/handoff.md"], steps: ["scaffold_specs", "context_bundle", "agent:business-analyst", "gherkin_validator", "render_handoff"] },
-  { name: "developer", userInputRequired: false, signoff: null, expectedArtifacts: ["devteam/features/<F>/code/"], steps: ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "slice_guard", "render_pr"] },
+  { name: "developer", userInputRequired: false, signoff: null, expectedArtifacts: ["devteam/features/<F>/code/"], steps: ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "reuse_gate", "slice_scope", "render_pr"] },
   { name: "qa", userInputRequired: false, signoff: "release-approval", expectedArtifacts: ["devteam/features/<F>/coverage.md"], steps: ["context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"] },
 ];
 
@@ -485,14 +485,14 @@ describe("ReleaseWizard", () => {
     await user.click(screen.getByTestId("release-send-btn"));
 
     await waitFor(() => {
-      expect(mockApi.runStageGatesAsync).toHaveBeenCalledWith(release.currentFeatureId);
+      expect(mockApi.runStageGatesWithRepairAsync).toHaveBeenCalledWith(release.currentFeatureId);
     });
   });
 
   it("always offers a manual 'move to next stage' control, not just after a DONE line", async () => {
     const release = makeRelease({ stageRuns: [makeRun({ id: "sr-live", readyToProceed: false })] });
     mockApi.getStageMessagesAsync.mockResolvedValue([]);
-    mockApi.runStageGatesAsync.mockResolvedValue(release);
+    mockApi.runStageGatesWithRepairAsync.mockResolvedValue({ release, outcome: "Passed", autoFixAttempts: 0, problems: [] });
     const user = await openDetail(release);
 
     const moveOnBtn = await screen.findByTestId("release-move-on-btn");
@@ -501,11 +501,47 @@ describe("ReleaseWizard", () => {
     await user.click(moveOnBtn);
 
     await waitFor(() => {
-      expect(mockApi.runStageGatesAsync).toHaveBeenCalledWith(release.currentFeatureId);
+      expect(mockApi.runStageGatesWithRepairAsync).toHaveBeenCalledWith(release.currentFeatureId);
     });
     // Regression: this control only re-checks gate readiness — it must never itself
     // approve a signoff or advance the pipeline (that's the Approve/Proceed button's job).
     expect(mockApi.signoffFeatureAsync).not.toHaveBeenCalled();
+  });
+
+  it("explains in plain words what still needs the user when automatic fixing gave up", async () => {
+    const release = makeRelease({ stageRuns: [makeRun({ id: "sr-live", readyToProceed: false })] });
+    mockApi.getStageMessagesAsync.mockResolvedValue([]);
+    mockApi.runStageGatesWithRepairAsync.mockResolvedValue({
+      release,
+      outcome: "NeedsYou",
+      autoFixAttempts: 2,
+      problems: [{
+        gateName: "gherkin_validator",
+        title: "Every requirement has a clear example",
+        whatWentWrong: "Requirement 4 doesn't describe the starting situation.",
+        technicalDetail: "fail: REQ-004",
+      }],
+    });
+    const user = await openDetail(release);
+
+    await user.click(await screen.findByTestId("release-move-on-btn"));
+
+    const notice = await screen.findByTestId("release-repair-notice");
+    expect(notice).toHaveTextContent("tried 2 times");
+    expect(notice).toHaveTextContent("Requirement 4 doesn't describe the starting situation.");
+    expect(notice).not.toHaveTextContent(/gherkin|REQ-004/i);
+  });
+
+  it("shows no notice when the checks simply pass", async () => {
+    const release = makeRelease({ stageRuns: [makeRun({ id: "sr-live", readyToProceed: false })] });
+    mockApi.getStageMessagesAsync.mockResolvedValue([]);
+    mockApi.runStageGatesWithRepairAsync.mockResolvedValue({ release, outcome: "Passed", autoFixAttempts: 0, problems: [] });
+    const user = await openDetail(release);
+
+    await user.click(await screen.findByTestId("release-move-on-btn"));
+
+    await waitFor(() => expect(mockApi.runStageGatesWithRepairAsync).toHaveBeenCalled());
+    expect(screen.queryByTestId("release-repair-notice")).not.toBeInTheDocument();
   });
 
   it("hides the manual move-on control once the stage is already ready to proceed", async () => {
@@ -709,7 +745,7 @@ describe("ReleaseWizard", () => {
 
     const log = screen.getByTestId("release-stage-log");
     await waitFor(() => {
-      expect(within(log).getByText(/gate verify_code/)).toBeInTheDocument();
+      expect(within(log).getByText(/✗ verify_code/)).toBeInTheDocument();
     });
     expect(within(log).getByText(/Missing validation/)).toBeInTheDocument();
     expect(within(log).getByText(/Add validation next time/)).toBeInTheDocument();
@@ -779,6 +815,158 @@ describe("ReleaseWizard", () => {
     expect(within(log).getByText(/broker is busy/i)).toBeInTheDocument();
   });
 
+  describe("when the AI provider refuses a stage's request", () => {
+    const FREE_TIER = "Internal error: Error from provider (Console): OpenCode's free tier can only be used from within OpenCode";
+    const MODELS = [
+      { value: "a/one", name: "Model One", description: null },
+      { value: "b/two", name: "Model Two", description: null },
+    ];
+
+    function refusedRelease(stageName = "developer", index = 1) {
+      const run = makeRun({
+        id: `sr-${stageName}`, stageName, status: "Escalated", phase: "Producing",
+        lastErrorKind: "ProviderRejected", lastErrorMessage: FREE_TIER, lastErrorAt: "2026-01-01T00:00:05Z",
+      });
+      return makeRelease({
+        flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: index, currentStageName: stageName },
+        stageRuns: [run],
+      });
+    }
+
+    function recoveredRelease(stageName = "developer", index = 1) {
+      return makeRelease({
+        flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: index, currentStageName: stageName },
+        stageRuns: [makeRun({ id: `sr-${stageName}`, stageName, status: "Active", phase: "Producing" })],
+      });
+    }
+
+    function pickModel(pane: HTMLElement, name: string) {
+      const control = within(pane).getByTestId("release-model-problem-select").querySelector(".react-select__control");
+      fireEvent.mouseDown(control!);
+      fireEvent.click(within(pane).getByText(name));
+    }
+
+    beforeEach(() => {
+      mockApi.getAvailableModelsAsync.mockResolvedValue(MODELS);
+      mockApi.runStageAsync.mockResolvedValue(makeRelease());
+      mockApi.sendStageMessageAsync.mockResolvedValue({ response: "ok", inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+      mockApi.getStageMessagesAsync.mockResolvedValue([]);
+    });
+
+    it("opens a side pane that explains the problem in plain words and offers a model list", async () => {
+      await openDetail(refusedRelease());
+
+      const pane = await screen.findByTestId("release-model-problem");
+      expect(within(pane).getByText(/refused/i)).toBeInTheDocument();
+      expect(within(pane).getByText(/free tier can only be used from within OpenCode/)).toBeInTheDocument();
+      expect(within(pane).getByTestId("release-model-problem-select")).toBeInTheDocument();
+      expect(pane).not.toHaveTextContent(/ProviderRejected|RpcException|ACP/);
+    });
+
+    it("keeps the action disabled until a model is chosen", async () => {
+      await openDetail(refusedRelease());
+      const pane = await screen.findByTestId("release-model-problem");
+
+      expect(within(pane).getByTestId("release-model-problem-use-btn")).toBeDisabled();
+      await waitFor(() => expect(mockApi.getAvailableModelsAsync).toHaveBeenCalled());
+      pickModel(pane, "Model Two");
+
+      await waitFor(() => expect(within(pane).getByTestId("release-model-problem-use-btn")).toBeEnabled());
+    });
+
+    it("does not open for other kinds of failure", async () => {
+      const disconnected = refusedRelease();
+      disconnected.stageRuns[0].lastErrorKind = "Disconnected";
+      await openDetail(disconnected);
+
+      await waitFor(() => expect(screen.getByTestId("release-stage-log")).toBeInTheDocument());
+      expect(screen.queryByTestId("release-model-problem")).not.toBeInTheDocument();
+    });
+
+    it("switches model, waits for the connection check, then resumes an autonomous stage", async () => {
+      const release = refusedRelease();
+      mockApi.switchStageModelAsync.mockImplementation(async () => {
+        mockApi.getReleaseAsync.mockResolvedValue(recoveredRelease());
+        return { ok: true, message: "Connected. Resuming your work with the new model.", modelId: "b/two" };
+      });
+      await openDetail(release);
+      const pane = await screen.findByTestId("release-model-problem");
+      await waitFor(() => expect(mockApi.getAvailableModelsAsync).toHaveBeenCalled());
+
+      pickModel(pane, "Model Two");
+      fireEvent.click(within(pane).getByTestId("release-model-problem-use-btn"));
+
+      await waitFor(() => expect(mockApi.switchStageModelAsync).toHaveBeenCalledWith("f1", "b/two"));
+      await waitFor(() => expect(mockApi.runStageAsync).toHaveBeenCalledWith("f1"));
+      await waitFor(() => expect(screen.queryByTestId("release-model-problem")).not.toBeInTheDocument());
+    });
+
+    it("resumes an interactive stage by asking the agent to continue", async () => {
+      const release = refusedRelease("business-analyst", 0);
+      mockApi.switchStageModelAsync.mockImplementation(async () => {
+        mockApi.getReleaseAsync.mockResolvedValue(recoveredRelease("business-analyst", 0));
+        return { ok: true, message: "Connected.", modelId: "b/two" };
+      });
+      await openDetail(release);
+      const pane = await screen.findByTestId("release-model-problem");
+      await waitFor(() => expect(mockApi.getAvailableModelsAsync).toHaveBeenCalled());
+
+      pickModel(pane, "Model Two");
+      fireEvent.click(within(pane).getByTestId("release-model-problem-use-btn"));
+
+      await waitFor(() => expect(mockApi.sendStageMessageAsync).toHaveBeenCalledWith("f1", expect.stringMatching(/continue/i)));
+      expect(mockApi.runStageAsync).not.toHaveBeenCalled();
+    });
+
+    it("keeps the pane open and asks for another model when the chosen one can't be used", async () => {
+      mockApi.switchStageModelAsync.mockResolvedValue({
+        ok: false, message: "That model couldn't be used: quota exceeded. Please try another.", modelId: "b/two",
+      });
+      await openDetail(refusedRelease());
+      const pane = await screen.findByTestId("release-model-problem");
+      await waitFor(() => expect(mockApi.getAvailableModelsAsync).toHaveBeenCalled());
+
+      pickModel(pane, "Model Two");
+      fireEvent.click(within(pane).getByTestId("release-model-problem-use-btn"));
+
+      const alert = await within(pane).findByRole("alert");
+      expect(alert).toHaveTextContent("That model couldn't be used: quota exceeded. Please try another.");
+      expect(screen.getByTestId("release-model-problem")).toBeInTheDocument();
+      expect(mockApi.runStageAsync).not.toHaveBeenCalled();
+      expect(mockApi.sendStageMessageAsync).not.toHaveBeenCalled();
+      // the user can immediately try a different one
+      await waitFor(() => expect(within(pane).getByTestId("release-model-problem-use-btn")).toBeEnabled());
+    });
+
+    it("also keeps the pane open when the check itself errors out", async () => {
+      mockApi.switchStageModelAsync.mockRejectedValue(new Error("Network down"));
+      await openDetail(refusedRelease());
+      const pane = await screen.findByTestId("release-model-problem");
+      await waitFor(() => expect(mockApi.getAvailableModelsAsync).toHaveBeenCalled());
+
+      pickModel(pane, "Model One");
+      fireEvent.click(within(pane).getByTestId("release-model-problem-use-btn"));
+
+      expect(await within(pane).findByRole("alert")).toHaveTextContent(/couldn't check|try another/i);
+      expect(mockApi.runStageAsync).not.toHaveBeenCalled();
+    });
+
+    it("shows progress while the connection is being checked and blocks a second click", async () => {
+      let finish!: (r: { ok: boolean; message: string; modelId: string }) => void;
+      mockApi.switchStageModelAsync.mockReturnValue(new Promise((res) => { finish = res; }));
+      await openDetail(refusedRelease());
+      const pane = await screen.findByTestId("release-model-problem");
+      await waitFor(() => expect(mockApi.getAvailableModelsAsync).toHaveBeenCalled());
+
+      pickModel(pane, "Model Two");
+      fireEvent.click(within(pane).getByTestId("release-model-problem-use-btn"));
+
+      await waitFor(() => expect(within(pane).getByTestId("release-model-problem-use-btn")).toBeDisabled());
+      expect(within(pane).getByTestId("release-model-problem-use-btn")).toHaveTextContent(/checking/i);
+      await act(async () => { finish({ ok: false, message: "That model didn't answer in time. Please try another.", modelId: "b/two" }); });
+    });
+  });
+
   it("shows a stall hint when the stage is Active but no turn is actually running", async () => {
     const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing", acpSessionId: "acp-dev-1" });
     const release = makeRelease({
@@ -833,14 +1021,14 @@ describe("ReleaseWizard", () => {
     });
     const user = await openDetail(release);
 
-    expect(screen.queryByText("Auto-generated from gate failure")).not.toBeInTheDocument();
+    expect(screen.queryByText("Added automatically after a check failed")).not.toBeInTheDocument();
 
     await user.click(await screen.findByTestId("release-diagnostics-btn"));
 
     expect(await screen.findByText("Stage diagnostics")).toBeInTheDocument();
     expect(screen.getAllByText("fail: Foo.cs: TODO").length).toBeGreaterThan(0);
     expect(screen.getByText("Fix the TODO in Foo.cs")).toBeInTheDocument();
-    expect(screen.getByText("Auto-generated from gate failure")).toBeInTheDocument();
+    expect(screen.getByText("Added automatically after a check failed")).toBeInTheDocument();
   });
 
   it("groups entry vs exit checks in the diagnostics pane and shows who owns a gate assigned elsewhere", async () => {
@@ -861,8 +1049,8 @@ describe("ReleaseWizard", () => {
 
     await user.click(await screen.findByTestId("release-diagnostics-btn"));
 
-    expect(await screen.findByText("Entry checks")).toBeInTheDocument();
-    expect(screen.getByText("Exit checks")).toBeInTheDocument();
+    expect(await screen.findByText("Checks before this step")).toBeInTheDocument();
+    expect(screen.getByText("Checks after this step")).toBeInTheDocument();
     expect(screen.getByText(/owned by Business Analyst/)).toBeInTheDocument();
     expect(screen.getByText(/owned by Developer/)).toBeInTheDocument();
   });
