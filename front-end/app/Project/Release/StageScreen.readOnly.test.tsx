@@ -165,6 +165,29 @@ describe("StageScreen readOnly", () => {
       expect(screen.queryByText(/Run Stage|Start Conversation/i)).not.toBeInTheDocument();
     });
 
+    it("shows a completed stage's log rather than 'hasn't started'", async () => {
+      const run = makeRun({ id: "sr3", stageName: "developer", status: "Complete", phase: "Gates" });
+      renderStage({ run, stage: 1, readOnly: true });
+
+      expect(await screen.findByTestId("release-stage-log")).toBeInTheDocument();
+      expect(screen.queryByText(/hasn.t started/i)).not.toBeInTheDocument();
+    });
+
+    it("shows a completed interactive stage's conversation read-only", async () => {
+      renderStage({ run: makeRun({ status: "Complete" }), readOnly: true });
+
+      expect(await screen.findByText("We need a login form")).toBeInTheDocument();
+      expect(screen.queryByTestId("release-chat-input")).not.toBeInTheDocument();
+      expect(screen.queryByText(/hasn.t started/i)).not.toBeInTheDocument();
+    });
+
+    it("still treats a completed run as needing a fresh start when NOT read-only (unchanged behaviour)", async () => {
+      renderStage({ run: makeRun({ id: "sr4", stageName: "developer", status: "Complete" }), stage: 1 });
+
+      expect(await screen.findByText(/Run Stage|Start Conversation|Running|automatically/i)).toBeInTheDocument();
+      expect(screen.queryByTestId("release-stage-log")).not.toBeInTheDocument();
+    });
+
     it("still lets you open the diagnostics for a stage", async () => {
       renderStage({ run: makeRun({ status: "Complete" }), readOnly: true });
 

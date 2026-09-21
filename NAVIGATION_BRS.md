@@ -18,10 +18,10 @@
 | 0b Frontend uses effective status; regression tests | ✅ done — commit `739c5a6` |
 | 1 Pure helpers: `releaseView.ts`, `routes.ts`, `terms.ts` (+ tests) | ✅ done |
 | 2 `readOnly` plumbing through `StageScreen` / `ChatStage` / `StageLog` (default false) | ✅ done |
-| 3 Make stage components importable | ⏳ next — by adding `export` (not moving code); a physical extraction is optional and deferred |
-| 4 `useHashRoute` + `Breadcrumb` | ⏳ |
-| 5 `FeatureView` | ⏳ |
-| 6 `ReleaseFolder` + `NewFeatureTile` | ⏳ |
+| 3 Make stage components importable (added `export`, no code moved) | ✅ done |
+| 4 `useHashRoute` + `Breadcrumb` (+ `crumbsFor`) | ✅ done |
+| 5 `FeatureView` (live / paused / done / not-started / not-found; read-only; resume) | ✅ done |
+| 6 `ReleaseFolder` + `NewFeatureTile` | ⏳ next |
 | 7 `ProjectHome` + mount in `App.tsx` | ⏳ |
 | 8 Attention badges UI, shipped section, polish, a11y | ⏳ |
 

@@ -1,0 +1,54 @@
+/* Project → release → feature navigation */
+
+.breadcrumb {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+}
+
+.breadcrumbList {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.breadcrumbItem:not(:last-child)::after {
+  content: "›";
+  margin-left: 0.35rem;
+  opacity: 0.5;
+}
+
+.breadcrumbLink {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.breadcrumbCurrent {
+  font-weight: 600;
+}
+
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid #d97706;
+  border-radius: 4px;
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.bannerDone {
+  border-left-color: #16a34a;
+  background: rgba(22, 163, 74, 0.08);
+}
+
+.notFound {
+  padding: 1rem;
+}

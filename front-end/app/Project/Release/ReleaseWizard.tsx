@@ -33,7 +33,7 @@ interface IReleaseWizardProps {
 
 type WizardView = "list" | "create" | "detail";
 
-function toErrorMessage(error: unknown): string {
+export function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -55,7 +55,7 @@ function shouldPollStage(status: string): boolean {
   return status === "Active" || status === "GatesRunning" || status === "BlockedGate" || status === "BlockedEntry" || status === "BlockedSignoff" || status === "Escalated";
 }
 
-function latestRunFor(release: ReleaseDto, stageName: string): ReleaseStageRunDto | undefined {
+export function latestRunFor(release: ReleaseDto, stageName: string): ReleaseStageRunDto | undefined {
   const runs = release.stageRuns.filter((sr) => sr.stageName === stageName);
   if (runs.length === 0) return undefined;
   return [...runs].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""))[0];
@@ -619,7 +619,7 @@ interface IShipReleaseButtonProps {
   onReleaseUpdated: (release: ReleaseDto) => void;
 }
 
-function ShipReleaseButton({ release, api, testIdPrefix, onReleaseUpdated }: IShipReleaseButtonProps) {
+export function ShipReleaseButton({ release, api, testIdPrefix, onReleaseUpdated }: IShipReleaseButtonProps) {
   const [shipping, setShipping] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -728,7 +728,7 @@ function CreateFeatureForm({ release, api, testIdPrefix, onReleaseUpdated }: ICr
 
 // ─── pipeline stepper ──────────────────────────────────────────────────────
 
-function PipelineStepper({
+export function PipelineStepper({
   pipeline,
   stageIndex,
   signoffs,
@@ -860,7 +860,9 @@ export function StageScreen({ release, featureId, api, pipeline, role, run, test
   // stage's own (already Complete) run row — nothing else ever advances the position onto a
   // stage whose current run is Complete, so this combination only happens via push-back, and
   // means "this is the current stage again, but it has no fresh work in flight yet."
-  const needsFreshStart = !run || run.status === "Complete";
+  // A Complete run means "no fresh work in flight" — except when only looking, where it is
+  // exactly the record to show (a finished feature's last stage).
+  const needsFreshStart = !run || (run.status === "Complete" && !readOnly);
 
   return (
     <ZestResponsiveLayout
@@ -2003,7 +2005,7 @@ function PushBackPanel({ featureId, api, stageIndex, pipeline, stageRun, testIdP
 
 // Shared by the full stage-complete card and the always-visible approve control below it —
 // both need to trigger the same "approve every pending signoff for this stage" action.
-function useApproveSignoff(
+export function useApproveSignoff(
   featureId: string,
   pendingSignoffs: ReleaseSignoffDto[],
   api: BrokerApi,
@@ -2044,7 +2046,7 @@ interface IStageCompleteCardProps {
   onContinue: () => void;
 }
 
-function StageCompleteCard({ featureId, stageRun, pendingSignoffs, api, testIdPrefix, nextStageName, onReleaseUpdated, onContinue }: IStageCompleteCardProps) {
+export function StageCompleteCard({ featureId, stageRun, pendingSignoffs, api, testIdPrefix, nextStageName, onReleaseUpdated, onContinue }: IStageCompleteCardProps) {
   const [artifacts, setArtifacts] = useState<StageArtifactDto[]>([]);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const { approve: handleProceed, loading, error } = useApproveSignoff(featureId, pendingSignoffs, api, onReleaseUpdated);
@@ -2113,7 +2115,7 @@ interface IStageHistoryCardProps {
   testIdPrefix: string;
 }
 
-function StageHistoryCard({ stageRun, testIdPrefix }: IStageHistoryCardProps) {
+export function StageHistoryCard({ stageRun, testIdPrefix }: IStageHistoryCardProps) {
   return (
     <div className={styles.stageCard} data-testid={`${testIdPrefix}-stage-${stageRun.stageName}`}>
       <div className={styles.stageHeader}>

@@ -47,3 +47,32 @@ export function parseRoute(hash: string | null | undefined): Route {
   if (!SAFE_ID.test(stageName)) return HOME;
   return { kind: "stage", releaseId, featureId, stageName };
 }
+
+// ─── breadcrumb ────────────────────────────────────────────────────────────
+
+export interface Crumb {
+  label: string;
+  route: Route;
+}
+
+export interface CrumbNames {
+  project: string;
+  release?: string;
+  feature?: string;
+  stage?: string;
+}
+
+/** One crumb per level down to `route`; each points at its own level. */
+export function crumbsFor(route: Route, names: CrumbNames): Crumb[] {
+  const crumbs: Crumb[] = [{ label: names.project, route: { kind: "home" } }];
+  if (route.kind === "home") return crumbs;
+
+  crumbs.push({ label: names.release ?? "Release", route: { kind: "release", releaseId: route.releaseId } });
+  if (route.kind === "release") return crumbs;
+
+  crumbs.push({ label: names.feature ?? "Feature", route: { kind: "feature", releaseId: route.releaseId, featureId: route.featureId } });
+  if (route.kind === "feature") return crumbs;
+
+  crumbs.push({ label: names.stage ?? route.stageName, route });
+  return crumbs;
+}
