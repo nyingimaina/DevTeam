@@ -100,4 +100,53 @@ public class SliceScopeGateTests
 
         Assert.False(result.Passed);
     }
+
+    [Fact]
+    public async Task InvokesGitStatusWithUntrackedFilesAll()
+    {
+        // Plain `git status --porcelain` collapses a brand-new, entirely-untracked directory
+        // (e.g. a feature's first subfolder) into a single "?? path/to/dir/" line instead of
+        // listing the files inside it. That collapsed line then fails the slice-template match
+        // (which expects "path/to/dir/<feature>/File.cs"), so the gate must ask git to expand
+        // every file individually.
+        var runner = new FakeProcessRunner(_ => new ProcessRunResult(0, "", "", false, TimeSpan.Zero));
+        var gate = new SliceScopeGate(runner);
+
+        await gate.RunAsync(new GateRequest(BuiltinRegistry.SliceScope, Workspace, "feat-001"), CancellationToken.None);
+
+        var call = Assert.Single(runner.Calls);
+        Assert.Equal("git", call.FileName);
+        Assert.Contains("--untracked-files=all", call.Arguments);
+    }
+
+    [Fact]
+    public async Task RealGit_NewFeatureSubdirectoryWithNestedFiles_IsNotFlaggedAsOutOfSlice()
+    {
+        var dir = Directory.CreateTempSubdirectory("slice-scope-real-git-");
+        try
+        {
+            var runner = new SystemProcessRunner();
+            await runner.RunAsync(new ProcessRunRequest("git", "init", dir.FullName), CancellationToken.None);
+            await runner.RunAsync(new ProcessRunRequest("git", "config user.email test@example.com", dir.FullName), CancellationToken.None);
+            await runner.RunAsync(new ProcessRunRequest("git", "config user.name Test", dir.FullName), CancellationToken.None);
+
+            var featureDir = Path.Combine(dir.FullName, "back-end", "src", "Features", "addition");
+            Directory.CreateDirectory(featureDir);
+            await File.WriteAllTextAsync(Path.Combine(featureDir, "MainViewModel.cs"), "// vm");
+            await File.WriteAllTextAsync(Path.Combine(featureDir, "MainWindow.xaml.cs"), "// window");
+
+            var slice = new Dictionary<string, string> { ["codePaths"] = "back-end/src/Features/<F>" };
+            var gate = new SliceScopeGate(runner);
+
+            var result = await gate.RunAsync(
+                new GateRequest(BuiltinRegistry.SliceScope, dir.FullName, "addition", "developer", slice),
+                CancellationToken.None);
+
+            Assert.True(result.Passed, result.EvidenceText);
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
+    }
 }

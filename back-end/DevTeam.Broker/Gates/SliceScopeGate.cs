@@ -38,7 +38,7 @@ public sealed class SliceScopeGate : IGate
         templates.Add(coreFront);
 
         var status = await _runner.RunAsync(
-            new ProcessRunRequest("git", "status --porcelain", request.WorkspacePath),
+            new ProcessRunRequest("git", "status --porcelain --untracked-files=all", request.WorkspacePath),
             cancellationToken);
 
         if (status.ExitCode != 0)
