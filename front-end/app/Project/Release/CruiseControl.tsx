@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
 import { PipelineStageDto, ReleaseDto } from "../../Chat/Data/BrokerTypes";
 import styles from "../Styles/Negotiation.module.css";
-import { autoAdvanceStopReason, latestRun, nextAutoStep } from "./autoAdvance";
+import { AutoStep, latestRun, nextAutoStep } from "./autoAdvance";
 
 export const AUTO_ADVANCE_SECONDS = 15;
 
@@ -18,10 +18,14 @@ interface ICruiseControlProps {
 }
 
 /**
- * "Continue automatically": once the analyst stage is approved, the user can walk away and the
- * remaining autonomous stages run and are approved one after another, with a visible countdown
- * and a Stop button. It stops the moment a human is actually needed (a failed check, or the end
- * of the feature) and says why. The whole decision lives in autoAdvance.ts; this is the shell.
+ * "Continue automatically": a standing, persisted release preference ("keep this running
+ * unattended whenever possible"), not a one-shot action — so it's a single always-visible
+ * toggle, settable at any time (mid-conversation, mid-run, while blocked), never something you
+ * have to stop first to change. Turning it on doesn't require anything else to be true; turning
+ * it off doesn't happen on its own just because a blocker showed up — a block is where the
+ * automation is paused, not a reason to abandon the preference, so it resumes on its own once
+ * the block clears. The status line below the toggle is purely informational. The step decision
+ * itself lives in autoAdvance.ts; this is the shell.
  */
 export default function CruiseControl({
   featureId,
@@ -34,21 +38,14 @@ export default function CruiseControl({
 }: ICruiseControlProps) {
   const [armed, setArmed] = useState(() => release?.autonomousEnabled ?? false);
   const [secondsLeft, setSecondsLeft] = useState(AUTO_ADVANCE_SECONDS);
-  const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // `release` can still be loading on first mount (the lazy initializer above only sees
-  // whatever was passed on that very first render) — pick up the persisted flag the moment
-  // real release data arrives, but only once: after that, local Start/Stop clicks (which
-  // persist immediately, see setArmedAndPersist) are the source of truth, not each poll's
-  // echo of what we already told the server.
-  const syncedFromReleaseRef = useRef(release !== undefined);
+  // The server's own value is authoritative and nothing here ever silently overrides it (no
+  // auto-disarm-on-blocker — see the doc comment above), so it's always safe to mirror it as it
+  // changes, not just once on mount.
   useEffect(() => {
-    if (!syncedFromReleaseRef.current && release) {
-      syncedFromReleaseRef.current = true;
-      setArmed(release.autonomousEnabled ?? false);
-    }
-  }, [release]);
+    setArmed(release?.autonomousEnabled ?? false);
+  }, [release?.autonomousEnabled]);
 
   const setArmedAndPersist = useCallback(
     (next: boolean) => {
@@ -84,15 +81,6 @@ export default function CruiseControl({
   useEffect(() => {
     setSecondsLeft(AUTO_ADVANCE_SECONDS);
   }, [stepKey]);
-
-  // Stop (and explain) the moment the next step needs a person — persisted, so a reload
-  // doesn't silently re-arm into the same blocker.
-  useEffect(() => {
-    if (armed && step.kind === "wait" && step.reason !== "busy") {
-      setArmedAndPersist(false);
-      setMessage(autoAdvanceStopReason(step.reason));
-    }
-  }, [armed, step, setArmedAndPersist]);
 
   const act = useCallback(async () => {
     if (step.kind === "run-stage") {
@@ -130,56 +118,54 @@ export default function CruiseControl({
     return () => window.clearTimeout(timer);
   }, [act, armed, busy, secondsLeft, step.kind, deferToAutoRunNotice]);
 
-  if (readOnly) {
+  if (readOnly || !release) {
     return null;
   }
 
-  // AutoRunNotice already owns this exact moment (see deferToAutoRunNotice above) — showing our
-  // own countdown alongside its "starting automatically…" message would be confusing, and racing
-  // it entirely would double-trigger runStageAsync.
-  if (deferToAutoRunNotice) {
-    return null;
-  }
-
-  // Nothing worth offering before the conversation stage is done.
-  if (!armed && step.kind === "wait" && step.reason === "interactive") {
-    return null;
-  }
+  const message = statusMessage(step, deferToAutoRunNotice, busy, secondsLeft);
 
   return (
     <section className={styles.panel} data-testid={`${testIdPrefix}-cruise`}>
-      {armed ? (
-        <div className={styles.actions}>
-          <span className={styles.heading} data-testid={`${testIdPrefix}-cruise-countdown`}>
-            {step.kind === "signoff"
-              ? `Approving the next step in ${secondsLeft}s`
-              : `Starting the next step in ${secondsLeft}s`}
-          </span>
-          <button
-            type="button"
-            data-testid={`${testIdPrefix}-cruise-stop`}
-            onClick={() => setArmedAndPersist(false)}
-          >
-            Stop
-          </button>
-        </div>
-      ) : (
-        <button
-          type="button"
-          data-testid={`${testIdPrefix}-cruise-start`}
-          onClick={() => {
-            setMessage(null);
-            setArmedAndPersist(true);
-          }}
-        >
-          Continue automatically
-        </button>
-      )}
-      {message && (
+      <label className={styles.toggle}>
+        <input
+          type="checkbox"
+          checked={armed}
+          onChange={(e) => setArmedAndPersist(e.target.checked)}
+          data-testid={`${testIdPrefix}-cruise-toggle`}
+        />
+        <span>Continue automatically</span>
+      </label>
+      {armed && message && (
         <div className={styles.meta} data-testid={`${testIdPrefix}-cruise-message`}>
           {message}
         </div>
       )}
     </section>
   );
+}
+
+function statusMessage(
+  step: AutoStep,
+  deferToAutoRunNotice: boolean,
+  busy: boolean,
+  secondsLeft: number,
+): string | null {
+  // AutoRunNotice already shows its own "starting automatically…" message for this moment.
+  if (deferToAutoRunNotice) return null;
+
+  if (step.kind === "run-stage") return busy ? "Starting the next step…" : `Starting the next step in ${secondsLeft}s`;
+  if (step.kind === "signoff") return busy ? "Approving…" : `Approving the next step in ${secondsLeft}s`;
+
+  switch (step.reason) {
+    case "interactive":
+      return "Will continue on its own once you finish this conversation.";
+    case "blocked":
+      return "Paused — something needs your attention. Will continue once it's resolved.";
+    case "busy":
+      return "Working…";
+    case "done":
+      return "All stages are done.";
+    default:
+      return null;
+  }
 }

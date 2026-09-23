@@ -184,7 +184,7 @@ describe("StageScreen readOnly", () => {
     it("still treats a completed run as needing a fresh start when NOT read-only (unchanged behaviour)", async () => {
       renderStage({ run: makeRun({ id: "sr4", stageName: "developer", status: "Complete" }), stage: 1 });
 
-      expect(await screen.findByText(/Run Stage|Start Conversation|Running|automatically/i)).toBeInTheDocument();
+      expect(await screen.findByText(/Run Stage|Start Conversation|Running|starting automatically/i)).toBeInTheDocument();
       expect(screen.queryByTestId("release-stage-log")).not.toBeInTheDocument();
     });
 
