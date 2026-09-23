@@ -89,4 +89,56 @@ public class ScaffoldSpecsGateTests : IDisposable
         Assert.NotNull(manifest);
         Assert.Equal(["back-end/**/Features/<F>", "front-end/app/<F>"], manifest!.EffectiveCodePaths);
     }
+
+    [Fact]
+    public async Task ProjectTypeGiven_WritesTheWorkspaceProfileOnce()
+    {
+        var inputs = new Dictionary<string, string>
+        {
+            ["projectType"] = "wpf-desktop",
+            ["codePaths"] = "src/Features/<F>",
+            ["buildCommand"] = "dotnet build Calculator.slnx",
+            ["testCommand"] = "dotnet test Calculator.slnx",
+        };
+        var gate = new ScaffoldSpecsGate();
+
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ScaffoldSpecs, _workspace.Path, "feat-001", "business-analyst", inputs),
+            CancellationToken.None);
+
+        var profile = ProjectProfileIO.TryRead(_workspace.Path);
+        Assert.NotNull(profile);
+        Assert.Equal("wpf-desktop", profile!.ProjectType);
+        Assert.Equal("dotnet build Calculator.slnx", profile.BuildCommand);
+        Assert.Equal("dotnet test Calculator.slnx", profile.TestCommand);
+    }
+
+    [Fact]
+    public async Task NoProjectTypeAndNoCodePaths_DoesNotWriteAProfile()
+    {
+        // The classic backend/frontend split has nothing non-default to declare — leaving the
+        // profile absent means readiness detection keeps convention-sniffing unchanged.
+        var gate = new ScaffoldSpecsGate();
+
+        await gate.RunAsync(Request(), CancellationToken.None);
+
+        Assert.False(ProjectProfileIO.Exists(_workspace.Path));
+    }
+
+    [Fact]
+    public async Task ProfileAlreadyExists_SecondFeatureNeverOverwritesIt()
+    {
+        ProjectProfileIO.Write(_workspace.Path, new ProjectProfile { ProjectType = "original-type" });
+        var writtenAt = File.GetLastWriteTimeUtc(ProjectProfileIO.ProfilePath(_workspace.Path));
+
+        var inputs = new Dictionary<string, string> { ["projectType"] = "a-different-type" };
+        var gate = new ScaffoldSpecsGate();
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ScaffoldSpecs, _workspace.Path, "feat-002", "business-analyst", inputs),
+            CancellationToken.None);
+
+        var profile = ProjectProfileIO.TryRead(_workspace.Path);
+        Assert.Equal("original-type", profile!.ProjectType);
+        Assert.Equal(writtenAt, File.GetLastWriteTimeUtc(ProjectProfileIO.ProfilePath(_workspace.Path)));
+    }
 }

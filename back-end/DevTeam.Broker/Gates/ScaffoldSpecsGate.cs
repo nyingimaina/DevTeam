@@ -61,6 +61,7 @@ public sealed class ScaffoldSpecsGate : IGate
         cancellationToken.ThrowIfCancellationRequested();
         SliceManifestIO.Write(manifestPath, manifest);
         WriteRequirements(request.WorkspacePath, featureKey, title, requirements);
+        WriteProjectProfileOnce(request);
 
         var artifacts =
             $"{Path.GetRelativePath(request.WorkspacePath, manifestPath)}" + Environment.NewLine +
@@ -69,6 +70,31 @@ public sealed class ScaffoldSpecsGate : IGate
             $"Scaffolded feature '{featureKey}' with {requirements.Count} requirement(s)",
             artifacts,
             Path.GetRelativePath(request.WorkspacePath, manifestPath)));
+    }
+
+    // Machine-written once, from whichever feature's business-analyst conversation first settles
+    // on an app type and/or a non-default code hierarchy — a later feature scaffolding into the
+    // same workspace must never overwrite it (see ScaffoldSpecsGateTests.ProfileAlreadyExists_*).
+    // The classic backend/frontend split (no projectType, no free-form codePaths) has nothing
+    // non-default to declare, so it deliberately leaves the profile absent — see the precedence
+    // rule in ReadinessProfileLoader: no profile means convention-sniffing runs unchanged.
+    private static void WriteProjectProfileOnce(GateRequest request)
+    {
+        if (ProjectProfileIO.Exists(request.WorkspacePath))
+            return;
+
+        var projectType = GateInputs.GetOptional(request.Inputs, "projectType");
+        var codePaths = GateInputs.GetList(request.Inputs, "codePaths");
+        if (projectType is null && codePaths.Count == 0)
+            return;
+
+        ProjectProfileIO.Write(request.WorkspacePath, new ProjectProfile
+        {
+            ProjectType = projectType ?? string.Empty,
+            CorePaths = GateInputs.GetList(request.Inputs, "corePaths").ToList(),
+            BuildCommand = GateInputs.GetOptional(request.Inputs, "buildCommand"),
+            TestCommand = GateInputs.GetOptional(request.Inputs, "testCommand"),
+        });
     }
 
     private static void WriteRequirements(string workspacePath, string featureKey, string title, IReadOnlyList<RequirementDtos.Requirement> requirements)
