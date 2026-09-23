@@ -45,6 +45,63 @@ public class SliceManifestTests
     }
 
     [Fact]
+    public void EffectiveCorePaths_NoFreeFormCorePathsSet_FallsBackToCorePathBackAndFront()
+    {
+        var manifest = new SliceManifest(
+            "feat-001", "Feature", "back-end/**/Features/<F>", "front-end/app/<F>", [], "dotnet test",
+            corePathBack: "back-end/src/Core", corePathFront: "front-end/app/core");
+
+        Assert.Equal(["back-end/src/Core", "front-end/app/core"], manifest.EffectiveCorePaths);
+    }
+
+    [Fact]
+    public void EffectiveCorePaths_CorePathBackOrFrontEmpty_OmitsTheEmptyOne()
+    {
+        var manifest = new SliceManifest(
+            "feat-001", "Feature", "back-end/**/Features/<F>", "front-end/app/<F>", [], "dotnet test",
+            corePathBack: "back-end/src/Core", corePathFront: null);
+
+        Assert.Equal(["back-end/src/Core"], manifest.EffectiveCorePaths);
+    }
+
+    [Fact]
+    public void FreeFormCorePaths_TakesPrecedenceOverCorePathBackAndFront()
+    {
+        // A single-project app's shared core doesn't naturally split into "back" and "front"
+        // either — it declares its own arbitrary list of core paths.
+        var manifest = new SliceManifest("feat-001", "Feature", "src/Features/<F>", "", [], "dotnet test")
+        {
+            CorePaths = ["src/Core", "src/Core.Tests", "src/Core.Resources"],
+        };
+
+        Assert.Equal(["src/Core", "src/Core.Tests", "src/Core.Resources"], manifest.EffectiveCorePaths);
+    }
+
+    [Fact]
+    public void RoundTripsThroughYaml_PreservesFreeFormCorePaths()
+    {
+        var dir = Directory.CreateTempSubdirectory("slice-manifest-core-roundtrip-");
+        try
+        {
+            var path = Path.Combine(dir.FullName, "manifest.yaml");
+            var manifest = new SliceManifest("feat-001", "Feature", "src/Features/<F>", "", [], "dotnet test")
+            {
+                CorePaths = ["src/Core", "src/Core.Tests"],
+            };
+            SliceManifestIO.Write(path, manifest);
+
+            var reread = SliceManifestIO.TryRead(path);
+
+            Assert.NotNull(reread);
+            Assert.Equal(["src/Core", "src/Core.Tests"], reread!.EffectiveCorePaths);
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RoundTripsThroughYaml_PreservesFreeFormCodePaths()
     {
         var dir = Directory.CreateTempSubdirectory("slice-manifest-roundtrip-");

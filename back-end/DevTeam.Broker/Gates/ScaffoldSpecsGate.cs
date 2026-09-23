@@ -39,6 +39,9 @@ public sealed class ScaffoldSpecsGate : IGate
         // or a business-analyst conversation that agreed on a different hierarchy — supplies its
         // own free-form list instead of the classic two-slot split.
         var codePaths = GateInputs.GetList(request.Inputs, "codePaths");
+        // Mirrors codePaths above: a shared core that doesn't split into "back"/"front" either
+        // supplies its own free-form list instead of the classic corePathBack/corePathFront pair.
+        var corePaths = GateInputs.GetList(request.Inputs, "corePaths");
         var manifest = codePaths.Count > 0
             ? new SliceManifest(
                 featureKey,
@@ -48,6 +51,9 @@ public sealed class ScaffoldSpecsGate : IGate
                 GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"),
                 GateInputs.Get(request.Inputs, "corePathBack", CorePaths.DefaultBack),
                 GateInputs.Get(request.Inputs, "corePathFront", CorePaths.DefaultFront))
+                {
+                    CorePaths = corePaths.Count > 0 ? corePaths.ToList() : [],
+                }
             : new SliceManifest(
                 featureKey,
                 title,

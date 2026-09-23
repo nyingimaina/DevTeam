@@ -89,6 +89,17 @@ public sealed class SliceManifest
     public string CorePathBack { get; set; } = string.Empty;
 
     public string CorePathFront { get; set; } = string.Empty;
+
+    // Free-form list of core paths — for a shared core that doesn't split into exactly a "back"
+    // and a "front" either (same idea as CodePaths/EffectiveCodePaths above). Empty on a
+    // manifest that never needed more than the classic pair; EffectiveCorePaths falls back to
+    // CorePathBack/CorePathFront in that case.
+    public List<string> CorePaths { get; set; } = [];
+
+    public IReadOnlyList<string> EffectiveCorePaths =>
+        CorePaths.Count > 0
+            ? CorePaths
+            : new[] { CorePathBack, CorePathFront }.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
 }
 
 public static class SliceManifestIO

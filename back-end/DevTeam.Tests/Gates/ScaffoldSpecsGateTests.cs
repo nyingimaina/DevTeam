@@ -91,6 +91,42 @@ public class ScaffoldSpecsGateTests : IDisposable
     }
 
     [Fact]
+    public async Task PluralCorePathsInput_SetsTheManifestsFreeFormCorePaths()
+    {
+        // A single-project app's shared core doesn't split into "back" and "front" either — the
+        // free-form branch should read a plural corePaths input, not always corePathBack/Front.
+        var inputs = new Dictionary<string, string>
+        {
+            ["codePaths"] = "src/Features/<F>",
+            ["corePaths"] = "src/Core;src/Core.Tests",
+        };
+        var gate = new ScaffoldSpecsGate();
+
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ScaffoldSpecs, _workspace.Path, "feat-001", "business-analyst", inputs),
+            CancellationToken.None);
+
+        var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace.Path, "feat-001"));
+        Assert.NotNull(manifest);
+        Assert.Equal(["src/Core", "src/Core.Tests"], manifest!.EffectiveCorePaths);
+    }
+
+    [Fact]
+    public async Task FreeFormBranch_NoPluralCorePathsInput_FallsBackToCorePathBackAndFrontDefaults()
+    {
+        var inputs = new Dictionary<string, string> { ["codePaths"] = "src/Features/<F>" };
+        var gate = new ScaffoldSpecsGate();
+
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ScaffoldSpecs, _workspace.Path, "feat-001", "business-analyst", inputs),
+            CancellationToken.None);
+
+        var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace.Path, "feat-001"));
+        Assert.NotNull(manifest);
+        Assert.Equal([CorePaths.DefaultBack, CorePaths.DefaultFront], manifest!.EffectiveCorePaths);
+    }
+
+    [Fact]
     public async Task ProjectTypeGiven_WritesTheWorkspaceProfileOnce()
     {
         var inputs = new Dictionary<string, string>
