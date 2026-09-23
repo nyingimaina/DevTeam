@@ -852,6 +852,78 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
+    public async Task BAProgression_AgentWritesAFreeFormManifestMidConversation_ScaffoldRespectsItInsteadOfTheDefault()
+    {
+        // Regression: scaffold_specs/core_scaffold used to run BEFORE the BA's first prompt, so
+        // every feature got locked into the generic back-end/front-end default regardless of what
+        // the BA (per its own seed prompt, which tells it to hand-write manifest.yaml itself)
+        // actually decided. They now run AFTER the agent's own turn — this simulates the agent's
+        // file-tool edit landing mid-conversation (before gates are checked) and proves the real,
+        // free-form hierarchy survives instead of being overwritten by the default, and that the
+        // shared project core_scaffold materializes lands inside that chosen hierarchy, not a
+        // stray back-end folder.
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-ba-freeform-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var client = _factory.CreateClient();
+            var brsPath = DevTeam.Broker.Gates.ArtifactPaths.BrsPath(workspace, "feat-calc-001");
+            Directory.CreateDirectory(Path.GetDirectoryName(brsPath)!);
+            await File.WriteAllTextAsync(brsPath,
+                "## REQ-001: User can add two numbers" + Environment.NewLine +
+                "Given two numbers" + Environment.NewLine +
+                "When the user adds them" + Environment.NewLine +
+                "Then the sum is shown");
+
+            var create = await client.PostAsJsonAsync("/api/releases",
+                new { featureKey = "feat-calc-001", workspacePath = workspace });
+            create.EnsureSuccessStatusCode();
+            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+            Assert.NotNull(release);
+            var featureId = release!.CurrentFeatureId;
+
+            (await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { })).EnsureSuccessStatusCode();
+
+            // No manifest.yaml exists yet at this point — scaffold_specs hasn't run (it's
+            // trailing now), so there is nothing for a premature scaffold to have locked in.
+            var manifestPath = DevTeam.Broker.Gates.ArtifactPaths.ManifestPath(workspace, "feat-calc-001");
+            Assert.False(File.Exists(manifestPath));
+
+            var send = await client.PostAsJsonAsync($"/api/features/{featureId}/send-message",
+                new { text = "It's a single-project WPF calculator app, no backend/frontend split" });
+            send.EnsureSuccessStatusCode();
+
+            // Simulates the agent's own file-tool write, per its seed prompt instructions.
+            DevTeam.Broker.Gates.SliceManifestIO.Write(manifestPath, new DevTeam.Broker.Gates.SliceManifest(
+                "feat-calc-001", "Calculator", ["src/Features/calc", "src/Features/calc.Tests"], [], "dotnet test Calculator.slnx")
+            {
+                CorePathBack = "src/Core",
+            });
+
+            var runGates = await client.PostAsJsonAsync($"/api/features/{featureId}/run-gates", new { });
+            runGates.EnsureSuccessStatusCode();
+            var after = await runGates.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+            Assert.NotNull(after);
+            var baRun = after!.StageRuns.Single(sr => sr.StageName == "business-analyst");
+            Assert.True(baRun.GateChecks.All(gc => gc.Passed), string.Join("; ", baRun.GateChecks.Where(gc => !gc.Passed).Select(gc => gc.EvidenceText)));
+
+            // The BA's real free-form paths survived — scaffold_specs did not overwrite them.
+            var manifest = DevTeam.Broker.Gates.SliceManifestIO.TryRead(manifestPath);
+            Assert.NotNull(manifest);
+            Assert.Equal(["src/Features/calc", "src/Features/calc.Tests"], manifest!.EffectiveCodePaths);
+
+            // The shared project landed inside the BA's chosen core location, not "back-end/".
+            var srcDir = Path.Combine(workspace, "src");
+            Assert.True(Directory.Exists(srcDir), "expected the shared project under src/, not back-end/");
+            Assert.False(Directory.Exists(Path.Combine(workspace, "back-end")), "no back-end folder should have been created");
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task BAProgression_WithoutRequirements_GatesFail()
 
     {

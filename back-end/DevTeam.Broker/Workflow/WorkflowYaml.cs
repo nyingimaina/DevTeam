@@ -29,11 +29,15 @@ public sealed class WorkflowYaml
                 " Early on, ask about the app type (e.g. web API, desktop/WPF, console, library) and the file and folder " +
                 "hierarchy the code should live in — don't assume a backend/frontend split; a single-project desktop or " +
                 "console app has no \"frontend\" at all, and forcing one on it just creates an unused folder the developer " +
-                "has to clean up later. The feature's manifest.yaml already exists (scaffolded with a generic default); " +
-                "once you know the real app type and hierarchy, update devteam/features/<F>/manifest.yaml directly with " +
-                "your file tools — set its codePaths list to the actual folders this feature's code and tests belong " +
-                "under (e.g. [\"src/Features/<F>\", \"src/Features/<F>.Tests\"] for a single-project app), replacing the " +
-                "generic backend/frontend default. " +
+                "has to clean up later. Once you know the real app type and hierarchy, if it doesn't fit a classic " +
+                "backend/frontend split, write devteam/features/<F>/manifest.yaml yourself with your file tools (create " +
+                "the directory if needed) — DevTeam only scaffolds a generic backend/frontend default there once you " +
+                "finish, so writing it yourself is how a different hierarchy actually takes effect instead of a stray " +
+                "back-end folder appearing regardless of what was decided here. Minimum shape: `feature: <F>`, " +
+                "`title: <title>`, `codePaths: [\"src/Features/<F>\", \"src/Features/<F>.Tests\"]` (the folders this " +
+                "feature's code and tests belong under), `corePathBack: \"src/Core\"` (where this app's one shared " +
+                "project should live — leaving this unset defaults it to an unrelated back-end folder), " +
+                "`testCommand: \"dotnet test <Solution>.slnx\"`. " +
                 "Author the agreed requirements into devteam/features/<F>/" + ArtifactPaths.BrsFileName + " " +
                 "(the BRS — Business Requirements Specification) using your file tools (create the directory if needed): " +
                 "one \"## REQ-N: <Title>\" section per requirement, " +
@@ -43,12 +47,22 @@ public sealed class WorkflowYaml
             ExpectedArtifacts = ["devteam/features/<F>/specs.feature", "devteam/features/<F>/handoff.md"],
             Steps =
             [
-                new StepYaml { Builtin = BuiltinRegistry.ScaffoldSpecs },
-                new StepYaml { Builtin = BuiltinRegistry.CoreScaffold },
+                // No context_bundle here: it fails outright with no manifest yet (which is the
+                // normal state before the BA has even started), and it would be redundant even if
+                // it degraded gracefully — the developer stage's own leading context_bundle call
+                // regenerates context.md unconditionally once it starts, by which point
+                // scaffold_specs below has already produced a real manifest.
                 new StepYaml { Builtin = BuiltinRegistry.RepoHygiene },
                 new StepYaml { Builtin = BuiltinRegistry.CodeMap },
-                new StepYaml { Builtin = BuiltinRegistry.ContextBundle },
                 new StepYaml { Agent = new AgentYaml { Mode = "business-analyst" } },
+                // Trailing, not leading: scaffold_specs/core_scaffold must see whatever real
+                // hierarchy the BA settled on and (per the seed prompt above) wrote to
+                // manifest.yaml itself — running them before the conversation locked every
+                // feature into the generic backend/frontend default regardless of what was
+                // actually decided (both gates are idempotent no-ops once a real manifest/project
+                // already exists, so re-running them on every gate check is safe).
+                new StepYaml { Builtin = BuiltinRegistry.ScaffoldSpecs },
+                new StepYaml { Builtin = BuiltinRegistry.CoreScaffold },
                 new StepYaml { Builtin = BuiltinRegistry.GherkinValidator },
                 new StepYaml { Builtin = BuiltinRegistry.RenderHandoff },
             ],

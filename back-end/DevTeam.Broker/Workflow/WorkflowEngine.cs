@@ -2838,8 +2838,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (manifest is not null)
             {
                 scaffold.AppendLine($"Title: {manifest.Title}");
-                scaffold.AppendLine($"Backend path: {manifest.CodePathBack}");
-                scaffold.AppendLine($"Frontend path: {manifest.CodePathFront}");
+                foreach (var codePath in manifest.EffectiveCodePaths)
+                    scaffold.AppendLine($"Code path: {codePath}");
             }
             if (hasRequirements)
             {

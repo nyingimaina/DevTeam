@@ -1968,7 +1968,7 @@ public class WorkflowEngineTests : IDisposable
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
 
         Assert.Equal(
-            ["scaffold_specs", "core_scaffold", "repo_hygiene", "code_map", "context_bundle", "agent:business-analyst", "gherkin_validator", "render_handoff"],
+            ["repo_hygiene", "code_map", "agent:business-analyst", "scaffold_specs", "core_scaffold", "gherkin_validator", "render_handoff"],
             pipeline[0].Steps);
         // The loop's inner steps are flattened once, not repeated per retry attempt.
         Assert.Equal(
@@ -2107,8 +2107,12 @@ public class WorkflowEngineTests : IDisposable
     // ─── pipeline discipline: leading builtins, write scoping, artifact handoff ─
 
     [Fact]
-    public async Task StartStage_RunsScaffoldSpecsAndContextBundleBeforeFirstPrompt()
+    public async Task StartStage_RunsOnlyRepoHygieneAndCodeMapBeforeFirstPrompt()
     {
+        // scaffold_specs/core_scaffold deliberately do NOT run before the first prompt — see
+        // RunGates_ScaffoldSpecsAndCoreScaffoldRunAfterTheAgentTurn_NotBeforeIt below for why:
+        // running before the BA has even asked about hierarchy locked every feature into the
+        // generic backend/frontend default regardless of what the BA/user actually decided.
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
@@ -2116,11 +2120,34 @@ public class WorkflowEngineTests : IDisposable
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
 
         Assert.Equal(
-            [BuiltinRegistry.ScaffoldSpecs, BuiltinRegistry.CoreScaffold, BuiltinRegistry.RepoHygiene, BuiltinRegistry.CodeMap, BuiltinRegistry.ContextBundle],
+            [BuiltinRegistry.RepoHygiene, BuiltinRegistry.CodeMap],
             _gateRunner.Requests.Select(r => r.Builtin).ToList());
-        Assert.Equal(5, stageRun.GateChecks.Count);
+        Assert.Equal(2, stageRun.GateChecks.Count);
         Assert.All(stageRun.GateChecks, gc => Assert.True(gc.Passed));
         Assert.Single(_coordinator.Prompts);
+    }
+
+    [Fact]
+    public async Task RunGates_ScaffoldSpecsAndCoreScaffoldRunAfterTheAgentTurn_NotBeforeIt()
+    {
+        // The whole point of moving these two to trailing: by the time they run, the BA has
+        // already had its turn (and, per its seed prompt, the chance to write a real
+        // manifest.yaml) — never before.
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        Assert.DoesNotContain(BuiltinRegistry.ScaffoldSpecs, _gateRunner.Requests.Select(r => r.Builtin));
+        Assert.DoesNotContain(BuiltinRegistry.CoreScaffold, _gateRunner.Requests.Select(r => r.Builtin));
+
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+
+        var builtinsAfterGates = _gateRunner.Requests.Select(r => r.Builtin).ToList();
+        Assert.Contains(BuiltinRegistry.ScaffoldSpecs, builtinsAfterGates);
+        Assert.Contains(BuiltinRegistry.CoreScaffold, builtinsAfterGates);
+        Assert.Single(_coordinator.Prompts, p => p.StartsWith("We need a login form", StringComparison.Ordinal));
     }
 
     [Fact]

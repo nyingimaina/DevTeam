@@ -52,15 +52,15 @@ public class WorkflowResilienceTests : IDisposable
     private static GateResult Pass(string evidence) => new(true, "OK", evidence);
     private static GateResult Fail(string evidence) => new(false, "failed", evidence);
 
-    // scaffold_specs, core_scaffold, repo_hygiene, code_map, context_bundle (start-stage), then
-    // gherkin FAIL, render (pass), then a re-run of gherkin+render PASS — the classic "gates
-    // failed, artifact fixed, gates re-pass" BA story.
+    // repo_hygiene, code_map (start-stage), then scaffold_specs, core_scaffold, gherkin FAIL,
+    // render (pass), then a re-run of scaffold_specs, core_scaffold, gherkin+render PASS — the
+    // classic "gates failed, artifact fixed, gates re-pass" BA story.
     private void SeedBaGateSequence_FailThenPass()
     {
         _gateRunner.Results.AddRange([
-            Pass("scaffold"), Pass("core"), Pass("hygiene"), Pass("map"), Pass("context"),
-            Fail("REQ-004 missing Given"), Pass("handoff"),
-            Pass("gherkin fixed"), Pass("handoff"),
+            Pass("hygiene"), Pass("map"),
+            Pass("scaffold"), Pass("core"), Fail("REQ-004 missing Given"), Pass("handoff"),
+            Pass("scaffold"), Pass("core"), Pass("gherkin fixed"), Pass("handoff"),
         ]);
     }
 
@@ -156,11 +156,11 @@ public class WorkflowResilienceTests : IDisposable
         var result = await engine.RunGatesAsync(featureId, CancellationToken.None);
 
         var run = result.StageRuns.Single(sr => sr.Id == runId);
+        // The re-run sweeps the previous attempt's exit checks and records fresh ones, so each
+        // exit check (including scaffold_specs/core_scaffold, now trailing rather than leading)
+        // appears exactly once — never an accumulating history on the same run row.
         Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.ScaffoldSpecs));
         Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.CoreScaffold));
-        Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.ContextBundle));
-        // The re-run sweeps the previous attempt's exit checks and records fresh ones, so each
-        // exit check appears exactly once — never an accumulating history on the same run row.
         Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.GherkinValidator));
         Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.RenderHandoff));
         Assert.All(run.GateChecks, gc => Assert.True(gc.Passed));
@@ -186,7 +186,7 @@ public class WorkflowResilienceTests : IDisposable
     [Fact]
     public async Task RunGates_WritesStepLedgerCheckpointIncludingFailures()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("hygiene"), Pass("map"), Pass("context"), Fail("REQ-004 missing Given")]);
+        _gateRunner.Results.AddRange([Pass("hygiene"), Pass("map"), Pass("scaffold"), Pass("core"), Fail("REQ-004 missing Given")]);
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
@@ -200,7 +200,7 @@ public class WorkflowResilienceTests : IDisposable
         Assert.NotNull(checkpoint.Steps);
         var gherkin = checkpoint.Steps.Single(s => s.Name == BuiltinRegistry.GherkinValidator);
         Assert.False(gherkin.Passed);
-        Assert.Equal(2, checkpoint.Steps.Count);
+        Assert.Equal(4, checkpoint.Steps.Count);
     }
 
     // ─── RetryStage escape hatch ──────────────────────────────────────────

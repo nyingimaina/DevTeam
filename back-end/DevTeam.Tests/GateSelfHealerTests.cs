@@ -43,18 +43,17 @@ public class GateSelfHealerTests : IDisposable
         new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
         new ModelCatalogService(_coordinator), new FakeGitCredentialStore(), new ActiveTurnTracker());
 
-    // Leading builtins (scaffold, core scaffold, repo hygiene, code map, context) consume five
-    // results at start-stage, then each exit pass consumes two (gherkin_validator, render_handoff)
-    // for the default BA role.
+    // Leading builtins (repo hygiene, code map) consume two results at start-stage; scaffold_specs/
+    // core_scaffold now run as trailing (exit) steps, so each exit pass consumes four
+    // (scaffold_specs, core_scaffold, gherkin_validator, render_handoff) for the default BA role.
     private void ScriptGherkinResults(params bool[] gherkinPassesPerRun)
     {
         _gateRunner.Results.Add(Pass());
         _gateRunner.Results.Add(Pass());
-        _gateRunner.Results.Add(Pass());
-        _gateRunner.Results.Add(Pass());
-        _gateRunner.Results.Add(Pass());
         foreach (var passes in gherkinPassesPerRun)
         {
+            _gateRunner.Results.Add(Pass());
+            _gateRunner.Results.Add(Pass());
             _gateRunner.Results.Add(passes ? Pass() : Fail(GherkinEvidence));
             _gateRunner.Results.Add(Pass());
         }
