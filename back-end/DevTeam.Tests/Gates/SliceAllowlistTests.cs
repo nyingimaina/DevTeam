@@ -35,4 +35,16 @@ public class SliceAllowlistTests
     [InlineData("dll/thing.dll")]
     public void AnythingElse_IsRejected(string path)
         => Assert.False(SliceAllowlist.IsAllowed(path, "login", Shared, Templates));
+
+    [Fact]
+    public void SharedEntries_SupportTheSameGlobSyntaxAsCodePathTemplates()
+    {
+        // Shared is a declared-intent list (see DeveloperScopeSnapshot) — a developer whose
+        // legitimate touch spans a whole folder shouldn't have to enumerate every file in it.
+        var shared = new[] { "Program.cs", "src/Utils/**" };
+
+        Assert.True(SliceAllowlist.IsAllowed("src/Utils/Helpers/StringExtensions.cs", "login", shared, Templates));
+        Assert.True(SliceAllowlist.IsAllowed("src/Utils/Format.cs", "login", shared, Templates));
+        Assert.False(SliceAllowlist.IsAllowed("src/Other/File.cs", "login", shared, Templates));
+    }
 }

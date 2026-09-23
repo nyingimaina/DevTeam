@@ -14,9 +14,13 @@ public static class SliceAllowlist
         if (StartsWithSegment(normalized, "devteam"))
             return true;
 
+        // Same template syntax (including "**") as codePathTemplates below — a Shared entry
+        // documenting a legitimate touch that spans a whole folder shouldn't have to enumerate
+        // every file in it one by one.
         foreach (var shared in sharedFiles)
         {
-            if (string.Equals(normalized, Normalize(shared), StringComparison.OrdinalIgnoreCase))
+            var concreteShared = Normalize(shared).Replace("<F>", featureKey, StringComparison.OrdinalIgnoreCase);
+            if (TemplatePattern(concreteShared).IsMatch(normalized))
                 return true;
         }
 
@@ -70,10 +74,22 @@ public static class SliceAllowlist
                 var parts = template.Split(["**"], StringSplitOptions.None);
                 for (var i = 0; i < parts.Length; i++)
                 {
+                    var isLast = i == parts.Length - 1;
                     var part = i == 0 ? parts[i] : parts[i].TrimStart('/');
-                    pattern.Append(Regex.Escape(part));
-                    if (i < parts.Length - 1)
-                        pattern.Append("(?:[^/]+/)*");
+                    if (isLast && part.Length == 0)
+                    {
+                        // A trailing "**" with nothing after it ("prefix/**") means "everything
+                        // under here, including the final filename" — not one more directory
+                        // boundary followed by the "(?:/.*)?$" suffix below, which can never
+                        // match a bare filename with no leading "/".
+                        pattern.Append(".*");
+                    }
+                    else
+                    {
+                        pattern.Append(Regex.Escape(part));
+                        if (!isLast)
+                            pattern.Append("(?:[^/]+/)*");
+                    }
                 }
             }
             else
