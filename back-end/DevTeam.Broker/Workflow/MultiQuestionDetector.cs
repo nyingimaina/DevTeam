@@ -21,6 +21,16 @@ public static partial class MultiQuestionDetector
         "(no \"and what about…\" follow-ups in the same message). " +
         "Resolve the current question fully before asking the next.";
 
+    // Without this, a question with a handful of discrete answers ("should X show a message, or
+    // just stay blank?") gets phrased as ordinary prose with an inline "or" — the chat UI's
+    // quick-reply buttons only recognize a bare trailing list, so a natural-language question
+    // like that never gets buttons and the user has to type the answer out by hand every time.
+    public const string QuickReplyFormattingInstruction =
+        "When your question has 2 to 4 short, discrete answer choices (not open-ended), end the " +
+        "message with those choices as a plain numbered list — one short option per line, e.g. " +
+        "\"1. Option\" — with nothing after the list, no closing remark or summary sentence below " +
+        "it. The chat UI turns a trailing list like that into clickable buttons for the user.";
+
     // Stable opening line so a correction prompt can be recognised by callers/tests without
     // string-matching the whole (now dynamic) body.
     public const string CorrectionPromptPrefix = "You asked several questions in one message:";

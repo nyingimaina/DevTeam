@@ -167,6 +167,25 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task StartStage_PromptInstructsAgentToFormatShortOptionQuestionsAsATrailingList()
+    {
+        // Regression: without this, the BA (and any other interactive role) phrases a small-choice
+        // question as ordinary prose with an inline "or" — the chat UI's quick-reply buttons only
+        // recognize a bare trailing list (see quickReply.ts), so those buttons never actually
+        // appear and the user is stuck typing every answer by hand.
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
+        Assert.Contains("2 to 4 short, discrete answer choices", openingPrompt);
+        Assert.Contains("nothing after the list", openingPrompt);
+    }
+
+    [Fact]
     public async Task RunStage_PromptTellsAgentNooneIsWatchingSoStayTerse()
     {
         // Autonomous stages (developer/qa) have no one watching live — the opening prompt

@@ -610,7 +610,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
             : ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
 
         var baseInstruction = $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
-            MultiQuestionDetector.SingleQuestionInstruction +
+            MultiQuestionDetector.SingleQuestionInstruction + " " +
+            MultiQuestionDetector.QuickReplyFormattingInstruction +
             " Follow each answer to its logical conclusion before asking the next. " +
             "When you have enough information to produce the required output, say DONE and provide the structured result.";
         var delegationClause = BuildDelegationClause(specialists, featureKey);
@@ -705,7 +706,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // drifts, and each drifting turn costs a correction round-trip. The rule is appended for
         // the model only — displayText keeps the user's chat bubble showing exactly what they typed.
         var modelText = role.UserInputRequired
-            ? text + " " + MultiQuestionDetector.SingleQuestionInstruction
+            ? text + " " + MultiQuestionDetector.SingleQuestionInstruction + " " + MultiQuestionDetector.QuickReplyFormattingInstruction
             : text;
 
         using var agentCts = InteractiveTurnCts();

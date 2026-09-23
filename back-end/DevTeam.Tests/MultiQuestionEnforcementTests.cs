@@ -281,6 +281,24 @@ public class MultiQuestionEnforcementTests : IDisposable
     }
 
     [Fact]
+    public async Task SendMessage_EveryInteractiveTurnRestatesTheQuickReplyFormattingRule()
+    {
+        // Re-stated on every turn, not just the opening prompt — same reasoning as the single-
+        // question rule above: a long conversation drifts, and the BA reverting to inline-prose
+        // "or" phrasing partway through silently kills the quick-reply buttons for the rest of it.
+        _coordinator.UserTurnReply = "What should the login form do?";
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
+
+        var userTurn = Assert.Single(_coordinator.Prompts, p => p.StartsWith("We need a login form", StringComparison.Ordinal));
+        Assert.Contains("2 to 4 short, discrete answer choices", userTurn);
+    }
+
+    [Fact]
     public async Task SendMessage_StubbornMultiQuestion_CapsCorrections()
     {
         _coordinator.UserTurnReply = "Do you want A? Or B? Or C?";
