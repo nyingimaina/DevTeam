@@ -1533,6 +1533,37 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_QaScopeReviewGatePromptFindsAProblem_RoutesBackToDeveloper()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+
+        // qa stage: code_map, context_bundle, verify_code, coverage_matrix all pass; only the
+        // independent scope/architecture review (a GatePrompt, driven by _coordinator's stop
+        // reason, not _gateRunner) finds a problem — this must route back to developer, same as
+        // any other QA-owned gate whose failure only developer can fix.
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.AddRange([
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
+        ]);
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.StopReasonsToReturn.Enqueue("end_turn"); // qa's own agent turn
+        fake.StopReasonsToReturn.Enqueue("max_tokens"); // the scope review itself — fails
+
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(1, updated.FlowPosition!.CurrentStageIndex);
+        Assert.Equal("developer", updated.FlowPosition.CurrentStageName);
+        var qaRun = updated.StageRuns.Where(sr => sr.StageName == "qa").OrderByDescending(sr => sr.StartedAt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, qaRun.Status);
+        Assert.Contains(qaRun.GateChecks, gc => gc.Name.StartsWith("gate_prompt:") && !gc.Passed);
+    }
+
+    [Fact]
     public async Task RunStage_DelegatesToASpecialist_FoldsTheAnswerIntoAFollowUpPromptAndRecordsTheConsultation()
     {
         var workspace = Path.Combine(Path.GetTempPath(), "devteam-delegation-" + Guid.NewGuid().ToString("N"));
@@ -1974,9 +2005,14 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(
             ["code_map", "context_bundle", "agent:developer", "build_check", "verify_code", "code_hygiene", "app_launch", "reuse_gate", "project_structure", "slice_scope", "render_pr"],
             pipeline[1].Steps);
-        Assert.Equal(
-            ["code_map", "context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"],
-            pipeline[2].Steps);
+        Assert.Equal("code_map", pipeline[2].Steps[0]);
+        Assert.Equal("context_bundle", pipeline[2].Steps[1]);
+        Assert.Equal("agent:qa", pipeline[2].Steps[2]);
+        Assert.Equal("verify_code", pipeline[2].Steps[3]);
+        Assert.Equal("coverage_matrix", pipeline[2].Steps[4]);
+        Assert.StartsWith("gate_prompt:", pipeline[2].Steps[5]);
+        Assert.Equal("render_handoff", pipeline[2].Steps[6]);
+        Assert.Equal(7, pipeline[2].Steps.Count);
     }
 
     [Fact]

@@ -134,6 +134,29 @@ public sealed class WorkflowYaml
                 // it structurally cannot make progress on.
                 new StepYaml { Builtin = BuiltinRegistry.VerifyCode, ResponsibleRole = "developer" },
                 new StepYaml { Builtin = BuiltinRegistry.CoverageMatrix, ResponsibleRole = "developer" },
+                // Independent review of the developer's own committed work, not the developer's
+                // own self-declared scope — slice_scope (developer's own gate) checks against a
+                // frozen snapshot so the developer can't self-expand it, but only QA is positioned
+                // to judge whether an out-of-slice touch was actually a legitimate, minimal
+                // bugfix/refactor rather than unjustified scope creep. Same reasoning covers
+                // architecture damage a slice check alone can't see: a file moved for no clear
+                // reason, or a new file that duplicates logic already present elsewhere in the
+                // diff/core instead of reusing it (a shortcut/workaround copy).
+                new StepYaml
+                {
+                    GatePrompt =
+                        "Review this feature's full branch diff (git diff release/<F>...feature/<F> --name-status) " +
+                        "against the scope frozen at devteam/scope-snapshots/<F>.json when the developer stage began " +
+                        "(its codePaths/core/shared fields) — devteam/features/<F>/manifest.yaml may have drifted from " +
+                        "that since, so treat the snapshot as authoritative. For every changed file outside that frozen " +
+                        "scope, judge whether it is a legitimate, minimal touch a real bugfix or refactor genuinely " +
+                        "needed, or unjustified scope creep. Separately, look for architecture damage regardless of " +
+                        "scope: files moved without a clear reason, or new files/functions that duplicate logic already " +
+                        "in the shared core or elsewhere in this same diff instead of reusing it (a shortcut/workaround " +
+                        "copy instead of a proper extension). If you find either problem, explain exactly which file(s) " +
+                        "and why; if the diff is clean on both counts, say so plainly.",
+                    ResponsibleRole = "developer",
+                },
                 new StepYaml { Builtin = BuiltinRegistry.RenderHandoff },
             ],
         },

@@ -111,6 +111,21 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void LoadDefault_QaHasAnIndependentScopeAndArchitectureReviewRoutedToDeveloper()
+    {
+        // slice_scope (developer's own gate) checks a frozen snapshot the developer can't move,
+        // but only an independent stage can judge whether an out-of-slice touch was legitimate —
+        // that's QA's job here, not the developer's own self-declaration.
+        var qa = LoadDefault().Pipeline.Single(r => r.Name == "qa");
+
+        var review = qa.Steps.Single(s => s.Kind == WorkflowStepKind.GatePrompt);
+        Assert.Equal("developer", review.ResponsibleRole);
+        Assert.Contains("scope-snapshots", review.GatePromptText);
+        Assert.Contains("scope creep", review.GatePromptText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("duplicate", review.GatePromptText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Load_ParsesGatePromptStepsAndEntryGates()
     {
         const string yaml = """
