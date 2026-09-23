@@ -2419,12 +2419,21 @@ public sealed class WorkflowEngine : IWorkflowEngine
             case ArtifactRoots.FeatureCodeRootBack:
             case ArtifactRoots.FeatureCodeRootFront:
                 var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
-                // Pre-scaffold (no manifest yet), fall back to the declared pattern instead of
-                // failing outright — same "soft degrade" treatment ResolveAllowedWritePrefixes
-                // already gives a missing manifest.
-                var relative = rootKey == ArtifactRoots.FeatureCodeRootBack
-                    ? (manifest?.CodePathBack ?? workflow.Slices.CodeBack.Replace("<F>", featureKey))
-                    : (manifest?.CodePathFront ?? workflow.Slices.CodeFront.Replace("<F>", featureKey));
+                // Read through EffectiveCodePaths, not CodePathBack/CodePathFront directly — a
+                // manifest built from the free-form codePaths list (or hand-authored YAML that
+                // only declares that list) can leave CodePathBack/CodePathFront at their
+                // zero-value empty string, which is not null, so a null-coalescing fallback on
+                // those fields directly would never trigger. Pre-scaffold (no manifest yet, or
+                // fewer declared paths than this slot), fall back to the declared pattern
+                // instead of failing outright — same "soft degrade" treatment
+                // ResolveAllowedWritePrefixes already gives a missing manifest.
+                var index = rootKey == ArtifactRoots.FeatureCodeRootBack ? 0 : 1;
+                var effectivePaths = manifest?.EffectiveCodePaths;
+                var relative = effectivePaths is not null && effectivePaths.Count > index
+                    ? effectivePaths[index]
+                    : (rootKey == ArtifactRoots.FeatureCodeRootBack
+                        ? workflow.Slices.CodeBack.Replace("<F>", featureKey)
+                        : workflow.Slices.CodeFront.Replace("<F>", featureKey));
                 return Path.Combine(workspacePath, relative);
             case ArtifactRoots.WorkspaceRoot:
                 return workspacePath;
