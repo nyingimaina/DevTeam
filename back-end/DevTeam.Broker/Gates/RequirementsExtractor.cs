@@ -56,10 +56,24 @@ public static class RequirementsExtractor
         title = string.Empty;
 
         var trimmed = line.Trim();
-        if (!trimmed.StartsWith("##", StringComparison.Ordinal) || trimmed.StartsWith("###", StringComparison.Ordinal))
+        string rest;
+        if (trimmed.StartsWith("##", StringComparison.Ordinal) && !trimmed.StartsWith("###", StringComparison.Ordinal))
+        {
+            rest = trimmed[2..].TrimStart(' ', '\t');
+        }
+        else if (LooksLikeBareRequirementId(trimmed))
+        {
+            // Lenient fallback, defense-in-depth: the agent occasionally drops the "##" markdown
+            // marker but still gets the "REQ-<n>" id right — the id convention exists precisely
+            // so a formatting slip like that doesn't silently lose the whole requirement (and the
+            // progress bars / coverage gate that depend on every REQ being found).
+            rest = trimmed;
+        }
+        else
+        {
             return false;
+        }
 
-        var rest = trimmed[2..].TrimStart(' ', '\t');
         if (rest.Length == 0)
             return false;
 
@@ -71,8 +85,9 @@ public static class RequirementsExtractor
             return id.Length > 0;
         }
 
-        // Tolerate "## REQ-1 Title" without a colon, but only when the first token looks like an id
-        // (letters and digits) so prose headings like "## Overview" are not misread as requirements.
+        // Tolerate "## REQ-1 Title" (or the bare "REQ-1 Title") without a colon, but only when
+        // the first token looks like an id (letters and digits) so prose headings like
+        // "## Overview" are not misread as requirements.
         var space = rest.IndexOf(' ');
         var candidate = space > 0 ? rest[..space] : rest;
         var looksLikeId = candidate.Length > 0
@@ -84,5 +99,21 @@ public static class RequirementsExtractor
         id = candidate;
         title = space > 0 ? rest[(space + 1)..].Trim() : string.Empty;
         return true;
+    }
+
+    // Conservative on purpose: only the bare (no "##") fallback uses this, so it must actually
+    // look like "REQ-<digits>" right at the start of the line, or ordinary prose ("Requirements
+    // are listed below") would be misread as a requirement heading.
+    private static bool LooksLikeBareRequirementId(string trimmed)
+    {
+        if (!trimmed.StartsWith("REQ-", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var afterPrefix = trimmed[4..];
+        var digitCount = 0;
+        while (digitCount < afterPrefix.Length && char.IsDigit(afterPrefix[digitCount]))
+            digitCount++;
+
+        return digitCount > 0;
     }
 }

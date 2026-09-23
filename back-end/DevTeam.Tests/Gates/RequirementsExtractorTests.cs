@@ -103,6 +103,47 @@ public class RequirementsExtractorTests : IDisposable
     }
 
     [Fact]
+    public void Extract_ParsesABareRequirementLineWithNoHeadingMarker()
+    {
+        // Defense-in-depth: the agent occasionally drops the "##" markdown marker but still gets
+        // the "REQ-<n>:" id right — the id convention exists specifically so a formatting slip
+        // like that doesn't silently lose the whole requirement.
+        Seed("REQ-1: User can log in" + Environment.NewLine +
+             "Given a registered user" + Environment.NewLine +
+             "When they enter valid credentials" + Environment.NewLine +
+             "Then they are signed in");
+
+        var requirements = RequirementsExtractor.Extract(_workspace, "feat-001");
+
+        var requirement = Assert.Single(requirements);
+        Assert.Equal("REQ-1", requirement.Id);
+        Assert.Equal("User can log in", requirement.Title);
+        Assert.Contains("When they enter valid credentials", requirement.AcceptanceCriteria);
+    }
+
+    [Fact]
+    public void Extract_MixOfHeadingAndBareRequirementLines_ParsesBoth()
+    {
+        Seed("## REQ-1: User can log in" + Environment.NewLine +
+             "Given a registered user" + Environment.NewLine +
+             "When they enter valid credentials" + Environment.NewLine +
+             "Then they are signed in" + Environment.NewLine +
+             Environment.NewLine +
+             "REQ-2: User can log out" + Environment.NewLine +
+             "Given a signed-in user" + Environment.NewLine +
+             "When they click logout" + Environment.NewLine +
+             "Then they are signed out");
+
+        var requirements = RequirementsExtractor.Extract(_workspace, "feat-001");
+
+        Assert.Equal(2, requirements.Count);
+        Assert.Equal("REQ-1", requirements[0].Id);
+        Assert.Equal("REQ-2", requirements[1].Id);
+        Assert.Equal("User can log out", requirements[1].Title);
+        Assert.Contains("Then they are signed out", requirements[1].AcceptanceCriteria);
+    }
+
+    [Fact]
     public void Extract_TrimsLeadingAndTrailingBlankLinesFromAcceptance()
     {
         Seed("## REQ-4: Empty state" + Environment.NewLine +

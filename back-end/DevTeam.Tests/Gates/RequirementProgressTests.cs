@@ -77,6 +77,26 @@ public class RequirementProgressTests : IDisposable
     }
 
     [Fact]
+    public void Compute_TreatsABareReqLineTheSameAsAProperHeading()
+    {
+        // Regression: a BRS with a REQ that's missing its "##" markdown marker used to be
+        // silently absorbed into the previous requirement's body instead of counted at all —
+        // the progress bars stayed permanently empty for a feature whose BA dropped the marker
+        // on even one requirement.
+        _workspace.Write(
+            "devteam/features/feat-001/BRS.md",
+            "# feat\n\n" +
+            "## REQ-1: Add\nGiven a, When b, Then c\n\n" +
+            "REQ-2: Subtract\nGiven a, When b, Then c\n");
+        _workspace.Write("src/Calculator.cs", "// REQ-1\npublic int Add(int a, int b) => a + b;\n// REQ-2\n");
+
+        var progress = RequirementProgressCalculator.Compute(_workspace.Path, "feat-001");
+
+        Assert.Equal(2, progress.Requirements);
+        Assert.Equal(new ProgressCount(2, 2), progress.Code);
+    }
+
+    [Fact]
     public void Compute_IsEmptyWithoutARequirementList()
     {
         var progress = RequirementProgressCalculator.Compute(_workspace.Path, "feat-001");
