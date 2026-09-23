@@ -57,8 +57,8 @@ public sealed class ScaffoldSpecsGate : IGate
             : new SliceManifest(
                 featureKey,
                 title,
-                GateInputs.Get(request.Inputs, "codePathBack", "back-end/**/Features/<F>"),
-                GateInputs.Get(request.Inputs, "codePathFront", "front-end/app/<F>"),
+                GateInputs.Get(request.Inputs, "codePathBack", CodePathDefaults.DefaultBack),
+                GateInputs.Get(request.Inputs, "codePathFront", CodePathDefaults.DefaultFront),
                 GateInputs.GetList(request.Inputs, "sharedFiles"),
                 GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"),
                 GateInputs.Get(request.Inputs, "corePathBack", CorePaths.DefaultBack),

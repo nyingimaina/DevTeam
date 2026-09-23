@@ -2430,11 +2430,23 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 // ResolveAllowedWritePrefixes already gives a missing manifest.
                 var index = rootKey == ArtifactRoots.FeatureCodeRootBack ? 0 : 1;
                 var effectivePaths = manifest?.EffectiveCodePaths;
-                var relative = effectivePaths is not null && effectivePaths.Count > index
-                    ? effectivePaths[index]
-                    : (rootKey == ArtifactRoots.FeatureCodeRootBack
-                        ? workflow.Slices.CodeBack.Replace("<F>", featureKey)
-                        : workflow.Slices.CodeFront.Replace("<F>", featureKey));
+                string relative;
+                if (effectivePaths is not null && effectivePaths.Count > index)
+                {
+                    relative = effectivePaths[index];
+                }
+                else
+                {
+                    // No manifest-level path for this slot either — fall back to the release's
+                    // own free-form template list (same precedence idea), then its classic
+                    // CodeBack/CodeFront pair.
+                    var slicesCodePaths = workflow.Slices.EffectiveCodePaths;
+                    relative = slicesCodePaths.Count > index
+                        ? slicesCodePaths[index].Replace("<F>", featureKey)
+                        : (rootKey == ArtifactRoots.FeatureCodeRootBack
+                            ? workflow.Slices.CodeBack.Replace("<F>", featureKey)
+                            : workflow.Slices.CodeFront.Replace("<F>", featureKey));
+                }
                 return Path.Combine(workspacePath, relative);
             case ArtifactRoots.WorkspaceRoot:
                 return workspacePath;

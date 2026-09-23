@@ -56,7 +56,16 @@ public sealed record WorkflowSlices(
     // The shared-core app each feature slice builds additively on top of — resolved to
     // CorePaths defaults when empty. See CorePaths for the convention.
     string CoreBack = CorePaths.DefaultBack,
-    string CoreFront = CorePaths.DefaultFront);
+    string CoreFront = CorePaths.DefaultFront,
+    // Free-form alternative to CodeBack/CodeFront — see SlicesYaml.CodePaths. Empty means "use
+    // CodeBack/CodeFront", same precedence SliceManifest.EffectiveCodePaths already uses.
+    IReadOnlyList<string>? CodePaths = null)
+{
+    // A true computed property (not a field captured at construction time) so a `with { CodePaths
+    // = ... }` expression — used freely by tests — is reflected correctly instead of reading a
+    // stale value from whatever the original constructor call captured.
+    public IReadOnlyList<string> EffectiveCodePaths => CodePaths ?? [];
+}
 
 public sealed record WorkflowRole(
     string Name,

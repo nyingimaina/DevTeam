@@ -38,6 +38,35 @@ public class WorkflowDefinitionLoaderTests
     }
 
     [Fact]
+    public void LoadDefault_SlicesCodePathsMatchTheSharedCodePathDefaultsConstant()
+    {
+        // Regression: CodeBack/CodeFront's default template used to be a literal string
+        // duplicated independently in SlicesYaml and ScaffoldSpecsGate — this pins both sides to
+        // the one shared constant so they can't drift apart again.
+        var definition = LoadDefault();
+
+        Assert.Equal(DevTeam.Broker.Gates.CodePathDefaults.DefaultBack, definition.Slices.CodeBack);
+        Assert.Equal(DevTeam.Broker.Gates.CodePathDefaults.DefaultFront, definition.Slices.CodeFront);
+    }
+
+    [Fact]
+    public void Load_SlicesCodePathsFreeFormListDefaultsEmptyAndCanBeOverridden()
+    {
+        // A release whose apps don't split into backend/frontend at all can declare its own
+        // free-form default template list — same idea as SliceManifest.CodePaths, one level up.
+        Assert.Empty(LoadDefault().Slices.EffectiveCodePaths);
+
+        var definition = Load("""
+            slices:
+              codePaths:
+                - src/Features/<F>
+                - src/Features/<F>.Tests
+            """);
+
+        Assert.Equal(["src/Features/<F>", "src/Features/<F>.Tests"], definition.Slices.EffectiveCodePaths);
+    }
+
+    [Fact]
     public void LoadDefault_DefinesOpinionatedCorePipeline()
     {
         var definition = LoadDefault();

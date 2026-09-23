@@ -185,9 +185,15 @@ public sealed class SlicesYaml
 
     public string Artifacts { get; set; } = "devteam/features/<F>";
 
-    public string CodeBack { get; set; } = "back-end/**/Features/<F>";
+    public string CodeBack { get; set; } = CodePathDefaults.DefaultBack;
 
-    public string CodeFront { get; set; } = "front-end/app/<F>";
+    public string CodeFront { get; set; } = CodePathDefaults.DefaultFront;
+
+    // Free-form alternative to CodeBack/CodeFront above — for a release whose apps don't split
+    // into backend/frontend at all. Only consulted as the pre-scaffold fallback (before a
+    // feature's own manifest exists yet — see WorkflowEngine.ResolveRootDirectory); empty means
+    // "use CodeBack/CodeFront", same precedence as SliceManifest.CodePaths/EffectiveCodePaths.
+    public List<string> CodePaths { get; set; } = [];
 
     // The shared-core app each feature builds additively on — see CorePaths. Empty uses the
     // platform defaults (back-end/src/Core, front-end/app/core).

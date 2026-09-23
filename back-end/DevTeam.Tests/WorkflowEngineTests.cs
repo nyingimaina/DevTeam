@@ -1356,6 +1356,55 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_RequiresArtifactRootFeatureCodeRootBack_PreScaffold_FallsBackToTheReleasesOwnFreeFormCodePathsList()
+    {
+        // Pre-scaffold: no manifest exists yet at all. A release whose apps don't split into
+        // backend/frontend can declare its own free-form default template list at the release
+        // level (slices.codePaths) — the resolver should consult that before the classic
+        // codeBack/codeFront pair, same precedence idea as the manifest-level list.
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            slices:
+              codePaths:
+                - src/Features/<F>
+                - src/Features/<F>.Tests
+            pipeline:
+              code-map:
+                signoff: reviewed
+                artifact:
+                  root: feature-code-root-back
+                  fileName: codemap.json
+                  kind: json
+                steps:
+                  - agent: { mode: code-map }
+                  - requiresArtifact: code-map
+            """);
+
+        try
+        {
+            var artifactDir = Path.Combine(workspace, "src", "Features", "feat-001");
+            Directory.CreateDirectory(artifactDir);
+            File.WriteAllText(Path.Combine(artifactDir, "codemap.json"), """{"modules": []}""");
+
+            var engine = CreateEngine();
+            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var featureId = release.CurrentFeatureId!.Value;
+
+            var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+            var stageRun = updated.StageRuns.Single(sr => sr.StageName == "code-map");
+            var gateCheck = stageRun.GateChecks.Single(gc => gc.Name == "requires_artifact:code-map");
+            Assert.True(gateCheck.Passed);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunStage_FailingRequiresArtifactEntryGate_NeverOpensASessionOrSendsAPrompt()
     {
         var workspace = Path.Combine(Path.GetTempPath(), "devteam-artifact-" + Guid.NewGuid().ToString("N"));
