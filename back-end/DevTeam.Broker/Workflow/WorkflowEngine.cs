@@ -2376,6 +2376,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (!writesCode)
             return [featureDir, docsRoot];
 
+        // The developer has write access to its own manifest.yaml for legitimate reasons (e.g.
+        // authoring a free-form hierarchy) — a live read here would let it self-expand
+        // codePaths/Shared and have a later retry's fresh session pick that straight back up,
+        // making slice_scope grade the developer's own homework instead of enforcing a real
+        // boundary. The scope is frozen the first time it's resolved and reused after that; see
+        // DeveloperScopeSnapshotIO.
+        if (string.Equals(ownerName, "developer", StringComparison.OrdinalIgnoreCase))
+        {
+            var frozen = DeveloperScopeSnapshotIO.TryRead(workspacePath, featureKey);
+            if (frozen is not null)
+                return BuildPrefixes(featureDir, docsRoot, frozen.CodePaths, frozen.CoreBack, frozen.CoreFront, frozen.Shared);
+        }
+
         var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
         if (manifest is null)
         {
@@ -2386,18 +2399,30 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
 
         var (coreBack, coreFront) = CorePaths.Resolve(workflow.Slices, manifest);
-        var prefixes = new List<string> { featureDir, docsRoot };
-        prefixes.AddRange(manifest.EffectiveCodePaths);
-        AddUnique(coreBack);
-        AddUnique(coreFront);
-        prefixes.AddRange(manifest.Shared);
-        return prefixes;
+        if (string.Equals(ownerName, "developer", StringComparison.OrdinalIgnoreCase))
+        {
+            DeveloperScopeSnapshotIO.WriteIfAbsent(workspacePath, featureKey,
+                new DeveloperScopeSnapshot(manifest.EffectiveCodePaths, coreBack, coreFront, manifest.Shared.ToList()));
+        }
+
+        return BuildPrefixes(featureDir, docsRoot, manifest.EffectiveCodePaths, coreBack, coreFront, manifest.Shared);
+
+        static IReadOnlyList<string> BuildPrefixes(
+            string featureDir, string docsRoot, IReadOnlyList<string> codePaths, string coreBack, string coreFront, IReadOnlyList<string> shared)
+        {
+            var prefixes = new List<string> { featureDir, docsRoot };
+            prefixes.AddRange(codePaths);
+            AddUnique(prefixes, coreBack);
+            AddUnique(prefixes, coreFront);
+            prefixes.AddRange(shared);
+            return prefixes;
+        }
 
         // A feature may legitimately resolve its core to the same directory as its own slice
         // (or have configured an empty core) — don't hand the permission policy duplicate
         // prefixes, but never drop a distinct core path: it is exactly what lets a feature
         // extend the shared core additively.
-        void AddUnique(string prefix)
+        static void AddUnique(List<string> prefixes, string prefix)
         {
             if (!string.IsNullOrWhiteSpace(prefix) && !prefixes.Contains(prefix, StringComparer.OrdinalIgnoreCase))
                 prefixes.Add(prefix);

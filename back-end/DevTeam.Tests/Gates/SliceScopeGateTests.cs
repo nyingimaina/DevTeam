@@ -79,6 +79,36 @@ public class SliceScopeGateTests
     }
 
     [Fact]
+    public async Task FrozenScopeSnapshotExists_ChecksAgainstItInsteadOfALiveManifestTheDeveloperWidened()
+    {
+        // The developer has write access to its own manifest.yaml (legitimate reasons — free-form
+        // hierarchies) — this proves slice_scope can't be defeated by editing codePaths/Shared to
+        // include wherever it already wrote once the frozen snapshot exists.
+        var dir = Directory.CreateTempSubdirectory("slice-scope-frozen-");
+        try
+        {
+            SliceManifestIO.Write(
+                ArtifactPaths.ManifestPath(dir.FullName, "feat-001"),
+                new SliceManifest(
+                    "feat-001", "Login", "some/unrelated/folder", "another/unrelated/folder", ["secrets.txt"], "dotnet test"));
+            DeveloperScopeSnapshotIO.WriteIfAbsent(dir.FullName, "feat-001",
+                new DeveloperScopeSnapshot(["back-end/Features/feat-001"], "back-end/src/Core", "", []));
+
+            var gate = GateReturning("?? some/unrelated/folder/Stolen.cs\n");
+            var result = await gate.RunAsync(
+                new GateRequest(BuiltinRegistry.SliceScope, dir.FullName, "feat-001", "developer"),
+                CancellationToken.None);
+
+            Assert.False(result.Passed);
+            Assert.Contains("some/unrelated/folder/Stolen.cs", result.EvidenceText);
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task MissingFeatureKey_Fails()
     {
         var gate = GateReturning("");

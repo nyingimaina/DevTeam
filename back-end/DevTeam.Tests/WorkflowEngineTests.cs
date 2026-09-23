@@ -2224,6 +2224,69 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_DeveloperSessionFirstResolution_FreezesTheScopeSnapshot()
+    {
+        using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
+        SliceManifestIO.Write(
+            ArtifactPaths.ManifestPath(workspace.Path, "feat-001"),
+            new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", ["Program.cs"], "dotnet test"));
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "business-analyst", "pm", null, CancellationToken.None);
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var snapshot = DeveloperScopeSnapshotIO.TryRead(workspace.Path, "feat-001");
+        Assert.NotNull(snapshot);
+        Assert.Equal(["back-end/Features/login", "front-end/app/login"], snapshot!.CodePaths);
+        Assert.Equal(["Program.cs"], snapshot.Shared);
+    }
+
+    [Fact]
+    public async Task RunStage_DeveloperSecondAttemptAfterTheDeveloperEditsItsOwnManifest_StillUsesTheOriginalFrozenPrefixes()
+    {
+        // The developer has write access to its own manifest.yaml for legitimate reasons (e.g.
+        // free-form hierarchies) — this proves it can't exploit that to self-expand its write
+        // scope on a retry by editing codePaths/shared between attempts.
+        using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
+        SliceManifestIO.Write(
+            ArtifactPaths.ManifestPath(workspace.Path, "feat-001"),
+            new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", [], "dotnet test"));
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "business-analyst", "pm", null, CancellationToken.None);
+
+        // Attempt 1: force a gate failure so the stage ends BlockedGate, leaving room for a retry.
+        _gateRunner.Results.Add(new GateResult(false, "failed", "fail: forced failure"));
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        // Simulate the developer having edited its own manifest mid-turn to widen its own scope.
+        SliceManifestIO.Save(
+            ArtifactPaths.ManifestPath(workspace.Path, "feat-001"),
+            new SliceManifest("feat-001", "Login", "some/unrelated/folder", "another/unrelated/folder", ["secrets.txt"], "dotnet test"));
+
+        _coordinator.AllowedWritePrefixesCalls.Clear();
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
+        Assert.Contains("back-end/Features/login", prefixes!);
+        Assert.Contains("front-end/app/login", prefixes!);
+        Assert.DoesNotContain("some/unrelated/folder", prefixes!);
+        Assert.DoesNotContain("another/unrelated/folder", prefixes!);
+        Assert.DoesNotContain("secrets.txt", prefixes!);
+    }
+
+    [Fact]
     public async Task RunStage_QaSession_RequestsSameCodePathsAsDeveloper()
     {
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));

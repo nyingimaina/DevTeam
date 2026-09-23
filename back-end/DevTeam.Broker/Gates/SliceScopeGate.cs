@@ -26,16 +26,38 @@ public sealed class SliceScopeGate : IGate
         if (string.IsNullOrWhiteSpace(request.FeatureKey))
             return GateResult.Fail("slice_scope requires a featureKey", "featureKey input missing");
 
-        var manifestPath = ArtifactPaths.ManifestPath(request.WorkspacePath, request.FeatureKey);
-        var manifest = SliceManifestIO.TryRead(manifestPath);
-        var sharedFiles = manifest?.Shared?.ToArray() ?? GateInputs.GetList(request.Inputs, "sharedFiles").ToArray();
-        var coreBack = CorePaths.Back(manifest);
-        var coreFront = CorePaths.Front(manifest);
-        var templates = (manifest is null
-            ? GateInputs.GetList(request.Inputs, "codePaths")
-            : manifest.EffectiveCodePaths).ToList();
-        templates.Add(coreBack);
-        templates.Add(coreFront);
+        // The developer has write access to its own manifest.yaml for legitimate reasons (e.g.
+        // free-form hierarchies) — a live read here would let it self-expand codePaths/Shared to
+        // wherever it already wrote, grading its own homework. Once the developer stage has
+        // frozen a snapshot (see DeveloperScopeSnapshotIO), that boundary wins; the live manifest
+        // is only consulted before one exists (e.g. this gate invoked outside the developer
+        // stage, or in isolation as here).
+        var frozen = DeveloperScopeSnapshotIO.TryRead(request.WorkspacePath, request.FeatureKey);
+        IReadOnlyList<string> sharedFiles;
+        IReadOnlyList<string> templates;
+        string coreBack;
+        string coreFront;
+        if (frozen is not null)
+        {
+            sharedFiles = frozen.Shared;
+            templates = frozen.CodePaths.ToList();
+            coreBack = frozen.CoreBack;
+            coreFront = frozen.CoreFront;
+        }
+        else
+        {
+            var manifestPath = ArtifactPaths.ManifestPath(request.WorkspacePath, request.FeatureKey);
+            var manifest = SliceManifestIO.TryRead(manifestPath);
+            sharedFiles = manifest?.Shared?.ToArray() ?? GateInputs.GetList(request.Inputs, "sharedFiles").ToArray();
+            coreBack = CorePaths.Back(manifest);
+            coreFront = CorePaths.Front(manifest);
+            templates = (manifest is null
+                ? GateInputs.GetList(request.Inputs, "codePaths")
+                : manifest.EffectiveCodePaths).ToList();
+        }
+        var allTemplates = templates.ToList();
+        allTemplates.Add(coreBack);
+        allTemplates.Add(coreFront);
 
         var status = await _runner.RunAsync(
             new ProcessRunRequest("git", "status --porcelain --untracked-files=all", request.WorkspacePath),
@@ -47,7 +69,7 @@ public sealed class SliceScopeGate : IGate
         var violations = new List<string>();
         foreach (var filePath in ChangedFileParser.Parse(status.StandardOutput))
         {
-            if (!SliceAllowlist.IsAllowed(filePath, request.FeatureKey, sharedFiles, templates))
+            if (!SliceAllowlist.IsAllowed(filePath, request.FeatureKey, sharedFiles, allTemplates))
                 violations.Add(filePath);
         }
 
