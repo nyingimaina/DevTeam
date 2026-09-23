@@ -46,13 +46,17 @@ public class ScaffoldAndContextGateTests : IDisposable
     }
 
     [Fact]
-    public async Task Scaffold_RefusesToOverwriteExistingManifest()
+    public async Task Scaffold_RefusesToOverwriteAManifestForADifferentFeature()
     {
+        // A manifest sitting at this feature's path but stamped for another feature key is a
+        // real contamination case — refuse it. (A manifest that matches THIS feature's own key
+        // is a legitimate retry of an already-scaffolded feature and must pass instead — see
+        // ScaffoldSpecsGateTests.RetryOfTheSameFeature_ManifestAlreadyMatches_PassesWithoutRewriting.)
         var gate = new ScaffoldSpecsGate();
         Directory.CreateDirectory(ArtifactPaths.FeatureDir(_workspace, "feat-001"));
         SliceManifestIO.Write(
             ArtifactPaths.ManifestPath(_workspace, "feat-001"),
-            new SliceManifest("feat-001", "Login", "back", "front", [], "test"));
+            new SliceManifest("some-other-feature", "Login", "back", "front", [], "test"));
 
         var result = await gate.RunAsync(Request(_workspace), CancellationToken.None);
 

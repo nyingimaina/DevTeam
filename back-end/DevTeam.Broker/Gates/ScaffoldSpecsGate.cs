@@ -18,9 +18,21 @@ public sealed class ScaffoldSpecsGate : IGate
         var manifestPath = ArtifactPaths.ManifestPath(request.WorkspacePath, featureKey);
 
         if (File.Exists(manifestPath))
+        {
+            // A retried attempt (RetryStageAsync — see WorkflowEngine) opens a brand-new
+            // business-analyst run for a feature that already scaffolded successfully earlier;
+            // its manifest is valid and simply has nothing to do here. Only an unexpected
+            // manifest for a DIFFERENT feature key is the "something's wrong" case this refusal
+            // exists to catch.
+            var existing = SliceManifestIO.TryRead(manifestPath);
+            if (existing is not null && string.Equals(existing.Feature, featureKey, StringComparison.OrdinalIgnoreCase))
+                return Task.FromResult(GateResult.Pass(
+                    $"Scaffold for '{featureKey}' already exists", "nothing to change"));
+
             return Task.FromResult(GateResult.Fail(
                 $"Scaffold already exists at {manifestPath}",
                 "Refusing to overwrite existing scaffold. Remove the manifest to re-scaffold."));
+        }
 
         var title = GateInputs.Get(request.Inputs, "title", featureKey);
         var manifest = new SliceManifest(
