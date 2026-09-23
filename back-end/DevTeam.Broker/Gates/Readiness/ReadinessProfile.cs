@@ -19,9 +19,42 @@ public static class ReadinessProfileLoader
     public static ReadinessProfile Load(string workspacePath)
     {
         var overridePath = Path.Combine(workspacePath, "devteam", "readiness.yaml");
-        return File.Exists(overridePath)
-            ? FromYaml(File.ReadAllText(overridePath))
-            : ReadinessProfileDetector.Detect(workspacePath);
+        if (File.Exists(overridePath))
+            return FromYaml(File.ReadAllText(overridePath));
+
+        // Workspace-level free-form config (see ProjectProfile) — written once by scaffold_specs
+        // for a project that doesn't fit the backend/frontend convention. Only takes over when it
+        // actually yields something to check; a profile written purely for its projectType/
+        // corePaths, with no build/test command declared, falls through to convention-sniffing
+        // instead of silently producing an always-passing empty readiness profile.
+        var projectProfile = ProjectProfileIO.TryRead(workspacePath);
+        if (projectProfile is not null)
+        {
+            var fromProjectProfile = FromProjectProfile(projectProfile);
+            if (fromProjectProfile.Phases.Count > 0)
+                return fromProjectProfile;
+        }
+
+        return ReadinessProfileDetector.Detect(workspacePath);
+    }
+
+    private const string ProjectBuildPhaseId = "project-build";
+    private const string ProjectTestsPhaseId = "project-tests";
+
+    private static ReadinessProfile FromProjectProfile(ProjectProfile profile)
+    {
+        var phases = new List<ReadinessPhaseDefinition>();
+
+        if (!string.IsNullOrWhiteSpace(profile.BuildCommand))
+            phases.Add(new ReadinessPhaseDefinition(
+                ProjectBuildPhaseId, "The project builds", profile.BuildCommand, TimeoutMs: 15 * 60 * 1000));
+
+        if (!string.IsNullOrWhiteSpace(profile.TestCommand))
+            phases.Add(new ReadinessPhaseDefinition(
+                ProjectTestsPhaseId, "The project's tests pass", profile.TestCommand,
+                DependsOn: phases.Count > 0 ? [ProjectBuildPhaseId] : [], TimeoutMs: 20 * 60 * 1000));
+
+        return new ReadinessProfile(phases);
     }
 
     public static ReadinessProfile FromYaml(string yaml)
