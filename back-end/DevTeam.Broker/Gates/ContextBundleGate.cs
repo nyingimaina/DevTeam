@@ -32,8 +32,8 @@ public sealed class ContextBundleGate : IGate
         builder.AppendLine(brsText);
         builder.AppendLine("## Allowed working areas");
         builder.AppendLine();
-        builder.AppendLine($"- Backend: `{manifest.CodePathBack}`");
-        builder.AppendLine($"- Frontend: `{manifest.CodePathFront}`");
+        foreach (var codePath in manifest.EffectiveCodePaths)
+            builder.AppendLine($"- Code: `{codePath}`");
         builder.AppendLine("- Artifacts: `devteam/features/" + featureKey + "/*`");
         if (manifest.Shared.Count > 0)
         {
@@ -51,8 +51,11 @@ public sealed class ContextBundleGate : IGate
         var corePaths = CoreReuseChecker.CoreSourcePaths(request.WorkspacePath, manifest);
         if (corePaths.Count == 0)
         {
-            builder.AppendLine($"- `{CorePaths.Back(manifest)}` (backend core — relative to workspace root)");
-            builder.AppendLine($"- `{CorePaths.Front(manifest)}` (frontend core — relative to workspace root)");
+            // Nothing on disk yet (pre-scaffold) — fall back to the manifest's declared paths
+            // (relative to workspace root) instead of a hardcoded backend/frontend pair, so a
+            // free-form core (e.g. a single WPF project) shows every path it actually declared.
+            foreach (var declaredCorePath in manifest.EffectiveCorePaths)
+                builder.AppendLine($"- `{declaredCorePath}` (relative to workspace root)");
         }
         else
         {

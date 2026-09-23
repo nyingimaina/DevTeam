@@ -141,6 +141,54 @@ public class ScaffoldAndContextGateTests : IDisposable
     }
 
     [Fact]
+    public async Task Context_FreeFormManifestWithMoreThanTwoCodePaths_ListsAllOfThemNotJustTheFirstTwo()
+    {
+        // A single-project app (e.g. WPF) can declare any number of code paths — the context
+        // bundle must not silently drop everything past the first two under a hardcoded
+        // "Backend:"/"Frontend:" pair (a previous, real bug: downstream stages only ever saw
+        // two of N declared paths).
+        var manifestPath = ArtifactPaths.ManifestPath(_workspace, "feat-001");
+        SliceManifestIO.Write(manifestPath, new SliceManifest(
+            "feat-001", "Calculator",
+            ["src/Features/calc", "src/Features/calc.Tests", "src/Features/calc.Resources"],
+            [], "dotnet test"));
+
+        var gate = new ContextBundleGate();
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ContextBundle, _workspace, "feat-001", "developer"),
+            CancellationToken.None);
+
+        var context = System.IO.File.ReadAllText(ArtifactPaths.ContextPath(_workspace, "feat-001"));
+        Assert.Contains("src/Features/calc`", context);
+        Assert.Contains("src/Features/calc.Tests`", context);
+        Assert.Contains("src/Features/calc.Resources`", context);
+    }
+
+    [Fact]
+    public async Task Context_FreeFormCorePathsWithNoDirsOnDiskYet_ListsAllOfThemNotJustBackAndFront()
+    {
+        // Same gap on the shared-core side: before any core directory has been created on disk
+        // (CoreSourcePaths finds nothing yet), the fallback line must list every declared core
+        // path, not just a hardcoded back/front pair.
+        var manifestPath = ArtifactPaths.ManifestPath(_workspace, "feat-001");
+        var manifest = new SliceManifest("feat-001", "Calculator", "src/Features/calc", "", [], "dotnet test")
+        {
+            CorePaths = ["src/Core", "src/Core.Tests", "src/Core.Resources"],
+        };
+        SliceManifestIO.Write(manifestPath, manifest);
+
+        var gate = new ContextBundleGate();
+        await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ContextBundle, _workspace, "feat-001", "developer"),
+            CancellationToken.None);
+
+        var context = System.IO.File.ReadAllText(ArtifactPaths.ContextPath(_workspace, "feat-001"));
+        Assert.Contains("src/Core`", context);
+        Assert.Contains("src/Core.Tests`", context);
+        Assert.Contains("src/Core.Resources`", context);
+    }
+
+    [Fact]
     public void TryRead_MalformedYaml_ReturnsNullInsteadOfThrowing()
     {
         // manifest.yaml lives under the feature's own artifacts directory, so any role's agent
