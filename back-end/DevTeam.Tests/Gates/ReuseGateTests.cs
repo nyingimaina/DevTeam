@@ -36,6 +36,31 @@ public class CorePathsTests
         Assert.Equal("custom-back", back);
         Assert.Equal("custom-front", front);
     }
+
+    [Fact]
+    public void ResolveList_ReturnsBothPathsInOrder()
+    {
+        // The list-returning form is what a caller that doesn't want to special-case exactly two
+        // named slots (ContextBundleGate, CoreReuseChecker) should use going forward — same
+        // precedence (manifest wins over slices) as the tuple form, just shaped as a list.
+        var manifest = new SliceManifest("f", "t", "back", "front", [], "t", "custom-back", "custom-front");
+        var slices = new WorkflowSlices(true, [], "a", "b", "c", "slices-back", "slices-front");
+
+        var paths = CorePaths.ResolveList(slices, manifest);
+
+        Assert.Equal(["custom-back", "custom-front"], paths);
+    }
+
+    [Fact]
+    public void ResolveList_FallsBackToDefaults_WhenNeitherManifestNorSlicesConfigureAnything()
+    {
+        var manifest = new SliceManifest("f", "t", "back", "front", [], "t");
+        var slices = new WorkflowSlices(true, [], "a", "b", "c");
+
+        var paths = CorePaths.ResolveList(slices, manifest);
+
+        Assert.Equal([CorePaths.DefaultBack, CorePaths.DefaultFront], paths);
+    }
 }
 
 public class ReuseGateTests : IDisposable

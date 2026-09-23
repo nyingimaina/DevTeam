@@ -31,6 +31,16 @@ public static class CorePaths
         => (manifest is { } m && !string.IsNullOrWhiteSpace(m.CorePathBack) ? m.CorePathBack : Back(slices),
             manifest is { } m2 && !string.IsNullOrWhiteSpace(m2.CorePathFront) ? m2.CorePathFront : Front(slices));
 
+    // The list-returning shape a caller that doesn't want to special-case exactly two named
+    // slots (ContextBundleGate, CoreReuseChecker) should use — same precedence as the tuple
+    // form above, just generalized. Back/Front always resolve to something non-empty (there's
+    // always a default), so this is currently always a 2-element list.
+    public static IReadOnlyList<string> ResolveList(WorkflowSlices slices, SliceManifest? manifest)
+    {
+        var (back, front) = Resolve(slices, manifest);
+        return new[] { back, front }.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+    }
+
     private static string Defaults(string? configured, string fallback)
         => string.IsNullOrWhiteSpace(configured) ? fallback : configured!;
 }
