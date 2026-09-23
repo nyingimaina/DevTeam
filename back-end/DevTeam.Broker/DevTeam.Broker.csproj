@@ -3,6 +3,10 @@
   <ItemGroup>
     <ProjectReference Include="..\DevTeam.Shared\DevTeam.Shared.csproj" />
     <ProjectReference Include="..\DevTeam.GitCli\DevTeam.GitCli.csproj" />
+    <!-- Direct cross-repo reference for MVP; NuGet packaging is a later hardening step.
+         Only SemaNami.Core is referenced — CLI-only pieces (PipeSubscriptionServer, OS service
+         registrars, SetupWizard, console I/O) live in SemaNami.Cli, never referenced here. -->
+    <ProjectReference Include="..\..\..\..\utilities\semanami\src\SemaNami.Core\SemaNami.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
