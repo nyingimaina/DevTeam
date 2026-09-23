@@ -380,6 +380,13 @@ export interface NotificationSettingsDto {
   sound: boolean;
 }
 
+export interface SemaNamiSettingsDto {
+  enabled: boolean;
+  // Whether TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are actually set — the toggle can still be
+  // flipped on when this is false, it just won't do anything until the env vars are set too.
+  available: boolean;
+}
+
 export interface ReleaseSignoffDto {
   id: string;
   releaseFeatureId: string;

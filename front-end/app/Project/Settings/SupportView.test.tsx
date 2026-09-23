@@ -44,6 +44,8 @@ beforeEach(() => {
     sound: true,
     ...settings,
   }));
+  mockApi.getSemaNamiSettingsAsync.mockResolvedValue({ enabled: false, available: true });
+  mockApi.setSemaNamiEnabledAsync.mockImplementation(async (enabled) => ({ enabled, available: true }));
 });
 
 describe("SupportView", () => {
@@ -118,5 +120,35 @@ describe("SupportView", () => {
     await waitFor(() =>
       expect(mockApi.setNotificationSettingsAsync).toHaveBeenCalledWith({ stageComplete: false }),
     );
+  });
+
+  it("lets the user turn the Telegram channel on", async () => {
+    renderSupport();
+
+    const toggle = await screen.findByTestId("support-semanami-toggle");
+    expect(toggle).not.toBeChecked();
+
+    await userEvent.click(toggle);
+
+    await waitFor(() => expect(mockApi.setSemaNamiEnabledAsync).toHaveBeenCalledWith(true));
+  });
+
+  it("warns when the channel is on but the bot isn't configured", async () => {
+    mockApi.getSemaNamiSettingsAsync.mockResolvedValue({ enabled: true, available: false });
+
+    renderSupport();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("support-semanami-unavailable")).toHaveTextContent(/TELEGRAM_BOT_TOKEN/),
+    );
+  });
+
+  it("shows no warning once the channel is on and configured", async () => {
+    mockApi.getSemaNamiSettingsAsync.mockResolvedValue({ enabled: true, available: true });
+
+    renderSupport();
+
+    await screen.findByTestId("support-semanami-toggle");
+    expect(screen.queryByTestId("support-semanami-unavailable")).not.toBeInTheDocument();
   });
 });

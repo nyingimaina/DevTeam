@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
-import { DiagnosticsSettingsDto, NotificationSettingsDto } from "../../Chat/Data/BrokerTypes";
+import { DiagnosticsSettingsDto, NotificationSettingsDto, SemaNamiSettingsDto } from "../../Chat/Data/BrokerTypes";
 import { clearErrors, recentErrors } from "../../UI/diagnostics";
 import { saveBlob } from "../../UI/download";
 import { toErrorMessage } from "../Release/ReleaseWizard";
@@ -16,6 +16,7 @@ interface ISupportViewProps {
 export default function SupportView({ api }: ISupportViewProps) {
   const [settings, setSettings] = useState<DiagnosticsSettingsDto | null>(null);
   const [notifications, setNotifications] = useState<NotificationSettingsDto | null>(null);
+  const [semaNami, setSemaNami] = useState<SemaNamiSettingsDto | null>(null);
   const [problemCount, setProblemCount] = useState(0);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -31,6 +32,8 @@ export default function SupportView({ api }: ISupportViewProps) {
         if (!cancelled) setSettings(loaded);
         const notifications = await api.getNotificationSettingsAsync();
         if (!cancelled) setNotifications(notifications);
+        const semaNami = await api.getSemaNamiSettingsAsync();
+        if (!cancelled) setSemaNami(semaNami);
       } catch (e) {
         if (!cancelled) setError(toErrorMessage(e));
       }
@@ -80,6 +83,15 @@ export default function SupportView({ api }: ISupportViewProps) {
     setError(null);
     try {
       setNotifications(await api.setNotificationSettingsAsync({ [key]: enabled }));
+    } catch (e) {
+      setError(toErrorMessage(e));
+    }
+  }, [api]);
+
+  const toggleSemaNami = useCallback(async (enabled: boolean) => {
+    setError(null);
+    try {
+      setSemaNami(await api.setSemaNamiEnabledAsync(enabled));
     } catch (e) {
       setError(toErrorMessage(e));
     }
@@ -213,6 +225,33 @@ export default function SupportView({ api }: ISupportViewProps) {
         >
           {testing ? "Sending…" : "Send a test notification"}
         </button>
+      </section>
+
+      <section className={styles.section} data-testid="support-semanami">
+        <h3 className={styles.subheading}>Telegram (SemaNami)</h3>
+        <p className={styles.hint}>
+          Get notified on Telegram when a stage is blocked or waiting for your approval, and reply
+          right there — your reply is sent back into the conversation, same as typing it here.
+        </p>
+        {semaNami && (
+          <>
+            <label className={styles.toggle}>
+              <input
+                type="checkbox"
+                checked={semaNami.enabled}
+                onChange={(e) => void toggleSemaNami(e.target.checked)}
+                data-testid="support-semanami-toggle"
+              />
+              <span>Send stage updates to Telegram</span>
+            </label>
+            {semaNami.enabled && !semaNami.available && (
+              <div className={styles.hint} data-testid="support-semanami-unavailable">
+                Turned on, but not connected yet — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and
+                restart DevTeam for it to actually start sending.
+              </div>
+            )}
+          </>
+        )}
       </section>
     </div>
   );

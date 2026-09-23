@@ -28,6 +28,7 @@ import {
   ReleaseDto,
   RunGatesRepairResultDto,
   ReleaseFeatureDto,
+  SemaNamiSettingsDto,
   SessionDetail,
   StageArtifactDto,
   StagePromptResult,
@@ -226,6 +227,17 @@ export default class BrokerApi {
 
   sendTestNotificationAsync(): Promise<void> {
     return this.requestAsync<void>("/api/notifications/test", { method: "POST" });
+  }
+
+  getSemaNamiSettingsAsync(): Promise<SemaNamiSettingsDto> {
+    return this.requestAsync<SemaNamiSettingsDto>("/api/semanami/settings");
+  }
+
+  setSemaNamiEnabledAsync(enabled: boolean): Promise<SemaNamiSettingsDto> {
+    return this.requestAsync<SemaNamiSettingsDto>("/api/semanami/settings", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
   }
 
   // ─── release endpoints ────────────────────────────────────────────────
