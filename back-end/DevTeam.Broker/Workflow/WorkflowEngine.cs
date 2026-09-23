@@ -1,8 +1,10 @@
 using System.Text;
 
+using DevTeam.Broker.Context;
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Notifications;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
@@ -19,6 +21,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
     private readonly IGitService _gitService;
     private readonly IGitCredentialStore _credentialStore;
     private readonly ActiveTurnTracker _turnTracker;
+    private readonly IUserNotifier? _userNotifier;
+    private readonly IRepoContextService? _repoContext;
     private readonly WorkflowDefinitionLoader _loader;
     private readonly ILogger<WorkflowEngine> _logger;
     private readonly ModelCatalogService _modelCatalog;
@@ -61,6 +65,21 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // Always request a known-good default explicitly instead.
     private const string DefaultModelId = "opencode/big-pickle";
 
+    /// <summary>
+    /// The model a new stage session should use: whatever the person last chose for this
+    /// workspace, falling back to the pinned default. Without this, every stage started on the
+    /// default again and the user had to re-pick their model on every single step.
+    /// </summary>
+    private async Task<string> ResolveModelIdAsync(string workspacePath, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        var preferred = await db.WorkspaceModelSettings
+            .Where(s => s.WorkspacePath == workspacePath)
+            .Select(s => s.ModelId)
+            .FirstOrDefaultAsync(ct);
+        return string.IsNullOrWhiteSpace(preferred) ? DefaultModelId : preferred;
+    }
+
     // A confused agent could otherwise ping-pong delegation requests forever — same shape as
     // WorkflowStep.LoopAttempts, just for a different kind of retry.
     private const int MaxDelegationRoundTrips = 3;
@@ -94,7 +113,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         ILogger<WorkflowEngine> logger,
         ModelCatalogService modelCatalog,
         IGitCredentialStore credentialStore,
-        ActiveTurnTracker turnTracker)
+        ActiveTurnTracker turnTracker,
+        IUserNotifier? userNotifier = null,
+        IRepoContextService? repoContext = null)
     {
         _dbFactory = dbFactory;
         _gateRunner = gateRunner;
@@ -106,6 +127,28 @@ public sealed class WorkflowEngine : IWorkflowEngine
         _modelCatalog = modelCatalog;
         _credentialStore = credentialStore;
         _turnTracker = turnTracker;
+        _userNotifier = userNotifier;
+        _repoContext = repoContext;
+    }
+
+    // Raises a desktop notification for a stage that reached a terminal state, so someone who
+    // walked away learns that work finished or needs them. Failures are swallowed: a notification
+    // problem must never affect the work it reports on.
+    private async Task NotifyStageFinishedAsync(WorkflowRole role, string featureKey, ReleaseStageRun stageRun, bool allPassed)
+    {
+        if (_userNotifier is null)
+            return;
+
+        try
+        {
+            await _userNotifier.StageFinishedAsync(
+                new StageOutcome(featureKey, role.Name, stageRun.Status.ToString(), allPassed),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Notification for stage {Stage} failed.", role.Name);
+        }
     }
 
     public async Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct)
@@ -504,15 +547,26 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         var role = workflow.Pipeline[currentStageIndex];
 
+        // AcpSessionId is required here, not just Status == Active: RetryStageAsync inserts a
+        // fresh Active row with no session yet (its whole point is to replace a stuck/orphaned
+        // one), and without this check that row satisfies "already active" and gets handed back
+        // as-is — no new session ever opens, so the retry silently does nothing.
         var existingActive = feature.StageRuns
-            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
+            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active
+                && sr.AcpSessionId is not null);
         if (existingActive is not null)
             return existingActive;
 
         var featureKey = feature.Key;
         var workspacePath = feature.Release.WorkspacePath;
 
-        var stageRun = new ReleaseStageRun
+        // RetryStageAsync may already have inserted a fresh Active/sessionless row for this
+        // stage (see the comment above) — reuse it instead of adding another one alongside it.
+        var pendingRetry = feature.StageRuns
+            .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active
+                && sr.AcpSessionId is null);
+
+        var stageRun = pendingRetry ?? new ReleaseStageRun
         {
             Feature = feature,
             StageName = role.Name,
@@ -520,7 +574,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
             Status = ReleaseStageStatus.Active,
             Phase = StagePhase.GuidedQA,
         };
-        db.ReleaseStageRuns.Add(stageRun);
+        if (pendingRetry is null)
+            db.ReleaseStageRuns.Add(stageRun);
         SetCheckpoint(stageRun, StageCheckpointSignal.Idle);
         await db.SaveChangesAsync(ct);
 
@@ -530,7 +585,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             return stageRun;
 
         var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey, workflow);
-        var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
+        var session = await _coordinator.NewSessionAsync(workspacePath, await ResolveModelIdAsync(workspacePath, ct), allowedWritePrefixes, ct);
         stageRun.AcpSessionId = session.SessionId.ToString();
         await db.SaveChangesAsync(ct);
 
@@ -554,18 +609,26 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ? string.Empty
             : ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
 
+        var baseInstruction = $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
+            MultiQuestionDetector.SingleQuestionInstruction +
+            " Follow each answer to its logical conclusion before asking the next. " +
+            "When you have enough information to produce the required output, say DONE and provide the structured result.";
+        var delegationClause = BuildDelegationClause(specialists, featureKey);
+        var profileClause = AsAugmentingClause(profilePromptText);
+        var pointsContext = BuildNegotiationContext(feature, role.Name);
+
         var finalPrompt = resolvedPrompt.OverridesBuiltIn
             ? profilePromptText
-            : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
-              MultiQuestionDetector.SingleQuestionInstruction +
-              " Follow each answer to its logical conclusion before asking the next. " +
-              "When you have enough information to produce the required output, say DONE and provide the structured result." +
-              requirementsAuthoring +
-              HandoffAutomationClause +
-              BuildDelegationClause(specialists, featureKey) +
-              AsAugmentingClause(profilePromptText) +
-              guidanceContext +
-              artifactContext;
+            : baseInstruction + requirementsAuthoring + HandoffAutomationClause + delegationClause +
+              profileClause + guidanceContext + pointsContext + artifactContext;
+
+        // What the prompt is made of — so a bloated opening prompt can be traced to a section.
+        var composition = resolvedPrompt.OverridesBuiltIn
+            ? new PromptComposition(finalPrompt.Length, 0, 0, 0, 0, 0, 0, 0, InterviewChars(workspacePath, featureKey))
+            : new PromptComposition(
+                baseInstruction.Length, requirementsAuthoring.Length, profileClause.Length,
+                HandoffAutomationClause.Length, delegationClause.Length, guidanceContext.Length,
+                pointsContext.Length, artifactContext.Length, InterviewChars(workspacePath, featureKey));
 
         // Use a separate cancellation for the agent prompt so HTTP timeouts don't kill it.
         // The agent may take time to process the initial prompt — that's expected.
@@ -577,14 +640,28 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await db.SaveChangesAsync(ct);
         try
         {
-            await PromptWithDelegationAsync(session.SessionId, finalPrompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
+            var promptResponse = await PromptWithDelegationAsync(session.SessionId, finalPrompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
+            await RecordTurnMetricAsync(
+                db, stageRun, featureKey, workspacePath, role.Name, TurnKind.Stage,
+                await ResolveModelIdAsync(workspacePath, agentCts.Token),
+                finalPrompt.Length, composition.ToJson(), promptResponse, agentCts.Token);
             SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
             ClearPromptFailure(stageRun);
             await db.SaveChangesAsync(ct);
         }
+        catch (OperationCanceledException)
+        {
+            // Cancelling the first turn of an interactive stage is not an agent failure.
+            MarkPromptCancelled(stageRun);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
+        }
         catch (Exception ex)
         {
-            await RecordPromptFailureAsync(db, stageRun, ex, ct);
+            // Not ct: by the time a minutes-long agent turn fails, the caller (an HTTP request)
+            // may well have already disconnected and cancelled ct — recording the failure must
+            // still go through, or the stage is left looking "Active" forever with no error.
+            await RecordPromptFailureAsync(db, stageRun, ex, CancellationToken.None);
             throw;
         }
 
@@ -624,13 +701,28 @@ public sealed class WorkflowEngine : IWorkflowEngine
         SetCheckpoint(stageRun, StageCheckpointSignal.PromptInProgress);
         await db.SaveChangesAsync(ct);
 
+        // Re-state the one-question rule on every turn, not just the opening prompt: a chat model
+        // drifts, and each drifting turn costs a correction round-trip. The rule is appended for
+        // the model only — displayText keeps the user's chat bubble showing exactly what they typed.
+        var modelText = role.UserInputRequired
+            ? text + " " + MultiQuestionDetector.SingleQuestionInstruction
+            : text;
+
         using var agentCts = InteractiveTurnCts();
         PromptResponse response;
         try
         {
-            response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, text, agentCts.Token);
+            response = await _coordinator.PromptWithSessionRecoveryAsync(
+                acpSessionId, modelText, agentCts.Token, displayText: text);
             SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
             ClearPromptFailure(stageRun);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelling a chat turn is not an agent failure.
+            MarkPromptCancelled(stageRun);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw;
         }
         catch (Exception ex)
         {
@@ -640,6 +732,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         stageRun.QuestionCount++;
         await db.SaveChangesAsync(agentCts.Token);
+
+        // Persist this turn's Q&A to disk now, so a crash mid-interview can resume from here
+        // instead of asking everything again.
+        await TryRecordInterviewTurnAsync(db, acpSessionId, feature.Key, feature.Release.WorkspacePath, text, agentCts.Token);
+        await RecordTurnMetricAsync(
+            db, stageRun, feature.Key, feature.Release.WorkspacePath, role.Name, TurnKind.Stage,
+            await ResolveModelIdAsync(feature.Release.WorkspacePath, agentCts.Token),
+            modelText.Length, null, response, agentCts.Token);
 
         return new StagePromptResult(
             Response: response.StopReason,
@@ -675,8 +775,15 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (!MultiQuestionDetector.ContainsMultipleQuestions(latest))
                 break;
 
+            // Quote the offending questions back (see BuildCorrectionPrompt) — the model must not
+            // have to guess which message or which question we're objecting to.
+            var correctionPrompt = MultiQuestionDetector.BuildCorrectionPrompt(latest);
             var correction = await _coordinator.PromptWithSessionRecoveryAsync(
-                acpSessionId, MultiQuestionDetector.CorrectionPrompt, token, isPriming: true);
+                acpSessionId, correctionPrompt, token, isPriming: true);
+            await RecordTurnMetricAsync(
+                db, stageRun, feature.Key, feature.Release.WorkspacePath, role.Name, TurnKind.Correction,
+                await ResolveModelIdAsync(feature.Release.WorkspacePath, token),
+                correctionPrompt.Length, null, correction, token);
             result = new StagePromptResult(
                 Response: correction.StopReason,
                 InputTokens: correction.TotalTokens,
@@ -795,23 +902,18 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // from those already-recorded results instead of assuming success.
         var allPassed = stageRun.GateChecks.All(gc => gc.Passed);
         var stepResults = new List<CheckpointStepResult>();
-        var pastLeadingSteps = false;
-        foreach (var step in role.Steps)
+
+        async Task RunAndRecordAsync(WorkflowStep stepToRun)
         {
-            if (!pastLeadingSteps)
-            {
-                if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
-                    pastLeadingSteps = true;
-                continue;
-            }
-            if (step.Kind == WorkflowStepKind.Agent) continue;
-            var result = await ExecuteStepAsync(step, role, featureKey, workspacePath, workflow, stageRun, db, ct);
+            var result = await ExecuteStepAsync(stepToRun, role, featureKey, workspacePath, workflow, stageRun, db, ct);
             db.ReleaseGateChecks.Add(new ReleaseGateCheck
             {
                 StageRun = stageRun,
                 Name = result.StepName,
                 Passed = result.Passed,
                 EvidenceText = result.Evidence,
+                StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-result.DurationMs),
+                CompletedAt = DateTimeOffset.UtcNow,
             });
             stepResults.Add(new CheckpointStepResult(result.StepName, result.Passed, result.Evidence));
             // Flush the step ledger after EACH step so a crash mid-gates leaves an exact trail
@@ -819,6 +921,34 @@ public sealed class WorkflowEngine : IWorkflowEngine
             SetCheckpoint(stageRun, StageCheckpointSignal.Gates, stepResults);
             await db.SaveChangesAsync(ct);
             if (!result.Passed) allPassed = false;
+        }
+
+        var pastLeadingSteps = false;
+        foreach (var step in role.Steps)
+        {
+            if (!pastLeadingSteps)
+            {
+                if (step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop)
+                {
+                    pastLeadingSteps = true;
+
+                    // A Loop step bundles the agent turn with follow-up checks (e.g. verify_code)
+                    // that must still be re-validated on every gates-only recheck — skipping the
+                    // whole Loop step here (as "already ran at start-stage") used to mean a
+                    // post-repair recheck could go green without the tests ever running again.
+                    if (step.Kind == WorkflowStepKind.Loop)
+                    {
+                        foreach (var innerStep in step.LoopSteps ?? [])
+                        {
+                            if (innerStep.Kind == WorkflowStepKind.Agent) continue;
+                            await RunAndRecordAsync(innerStep);
+                        }
+                    }
+                }
+                continue;
+            }
+            if (step.Kind == WorkflowStepKind.Agent) continue;
+            await RunAndRecordAsync(step);
         }
 
         // Only worth an antagonist-review call when the deterministic gates above already
@@ -878,12 +1008,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ? $"Stage {role.Name} passed all gates and challenge."
             : $"Stage {role.Name} failed gates or challenge.";
 
+        await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed);
+
         feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
         if (isLastStage)
         {
-            await FinalizeFeatureCompletionAsync(db, feature, ct);
+                await FinalizeFeatureCompletionAndIndexAsync(db, feature, ct);
         }
 
         await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
@@ -958,6 +1090,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
             .FirstOrDefault(sr => sr.StageName == role.Name && sr.Status == ReleaseStageStatus.Active);
         if (stageRun is null)
         {
+            // A failed run is BlockedGate, so a re-run lands here as a brand-new row. Carry the
+            // loop-guard state forward, or every "Run Stage Again" would reset the failure count
+            // and the same dead-end check could bounce forever.
+            var previousRun = feature.StageRuns
+                .Where(sr => sr.StageName == role.Name)
+                .OrderByDescending(sr => sr.Attempt)
+                .FirstOrDefault();
+
             stageRun = new ReleaseStageRun
             {
                 Feature = feature,
@@ -965,6 +1105,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Attempt = feature.StageRuns.Count(sr => sr.StageName == role.Name) + 1,
                 Status = ReleaseStageStatus.Active,
                 Phase = StagePhase.GuidedQA,
+                ConsecutiveFailures = previousRun?.ConsecutiveFailures ?? 0,
+                LastFailureSignature = previousRun?.LastFailureSignature,
+                AutoRetrySuppressed = previousRun?.AutoRetrySuppressed ?? false,
             };
             db.ReleaseStageRuns.Add(stageRun);
             SetCheckpoint(stageRun, StageCheckpointSignal.Idle);
@@ -985,15 +1128,40 @@ public sealed class WorkflowEngine : IWorkflowEngine
             }
 
             var allowedWritePrefixes = ResolveAllowedWritePrefixes(role.WritesCode, role.Name, workspacePath, featureKey, workflow);
-            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
-            stageRun.AcpSessionId = session.SessionId.ToString();
-            await db.SaveChangesAsync(ct);
+            // A purely deterministic role (no Agent/Loop step — e.g. the 'verification' stage)
+            // never talks to a model, so it must not pay for — or depend on — an opencode session
+            // being available. Its builtin steps still run below via the normal step loop.
+            if (RoleUsesAgent(role))
+            {
+                var session = await _coordinator.NewSessionAsync(workspacePath, await ResolveModelIdAsync(workspacePath, ct), allowedWritePrefixes, ct);
+                stageRun.AcpSessionId = session.SessionId.ToString();
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         stageRun.Phase = StagePhase.Producing;
         await db.SaveChangesAsync(ct);
 
-        async Task PromptRoleAsync()
+        // A re-invoked run (a retry after a cancel/stall, or a second Run click) must not
+        // accumulate duplicate step rows — clear this run's own exit-side ledger and let the
+        // loop below re-record it, mirroring RunGatesAsync's sweep. Entry gates keep their rows:
+        // they ran once, when the run was opened, and are never re-run.
+        foreach (var stale in stageRun.GateChecks.Where(gc => !gc.IsEntryGate).ToList())
+        {
+            stageRun.GateChecks.Remove(stale);
+            db.ReleaseGateChecks.Remove(stale);
+        }
+        await db.SaveChangesAsync(ct);
+
+        // Set when a prompt is cancelled — see PromptRoleAsync's catch and the early return below.
+        var cancelled = false;
+        // Set when the agent accepted the prompt and then went silent (BrokerCoordinator's stall
+        // watchdog). Also unwinds the stage, but escalates rather than leaving it resumable.
+        var stalled = false;
+        // Set when the model provider itself refused the request — see ProviderUnavailableException.
+        var providerRefused = false;
+
+        async Task PromptRoleAsync(int attempt = 1)
         {
             if (stageRun.AcpSessionId is null)
                 throw new InvalidOperationException("Stage run has no linked session.");
@@ -1014,30 +1182,65 @@ public sealed class WorkflowEngine : IWorkflowEngine
             var seedInstruction = role.SeedPrompt is null
                 ? string.Empty
                 : " " + ResolvePlaceholders(role.SeedPrompt, workflow, workspacePath, featureKey);
+            var autonomyInstruction = $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
+                "Work autonomously and do not ask the user for input. Produce the required artifacts.";
+            var delegationClause = BuildDelegationClause(specialists, featureKey);
+            var profileClause = AsAugmentingClause(profilePromptText);
+            var pointsContext = BuildNegotiationContext(feature, role.Name);
+            var closingInstruction = "When you are done, say DONE and provide a summary of what you changed.";
             var prompt = resolvedPrompt.OverridesBuiltIn
                 ? profilePromptText
-                : $"You are the {role.Name} for feature '{featureKey}' in workspace '{workspacePath}'. " +
-                  "Work autonomously and do not ask the user for input. Produce the required artifacts." +
-                  seedInstruction +
-                  HandoffAutomationClause +
-                  AutonomousTersenessClause +
-                  BuildDelegationClause(specialists, featureKey) +
-                  AsAugmentingClause(profilePromptText) +
-                  guidanceContext +
-                  artifactContext +
-                  "When you are done, say DONE and provide a summary of what you changed.";
+                : autonomyInstruction + seedInstruction + HandoffAutomationClause + AutonomousTersenessClause +
+                  delegationClause + profileClause + guidanceContext + pointsContext + artifactContext + closingInstruction;
+            var composition = resolvedPrompt.OverridesBuiltIn
+                ? new PromptComposition(prompt.Length, 0, 0, 0, 0, 0, 0, 0, 0)
+                : new PromptComposition(
+                    autonomyInstruction.Length, seedInstruction.Length, profileClause.Length,
+                    HandoffAutomationClause.Length, delegationClause.Length, guidanceContext.Length,
+                    pointsContext.Length, artifactContext.Length, 0);
             try
             {
                 SetCheckpoint(stageRun, StageCheckpointSignal.PromptInProgress);
                 await db.SaveChangesAsync(ct);
-                await PromptWithDelegationAsync(acpSessionId, prompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
+                var promptResponse = await PromptWithDelegationAsync(acpSessionId, prompt, stageRun, workspacePath, featureKey, workflow, db, agentCts.Token);
+                await RecordTurnMetricAsync(
+                    db, stageRun, featureKey, workspacePath, role.Name,
+                    attempt > 1 ? TurnKind.Retry : TurnKind.Stage,
+                    await ResolveModelIdAsync(workspacePath, agentCts.Token),
+                    prompt.Length, composition.ToJson(), promptResponse, agentCts.Token);
                 SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
                 ClearPromptFailure(stageRun);
                 await db.SaveChangesAsync(ct);
             }
+            catch (OperationCanceledException)
+            {
+                // Not a failure — a person cancelled this turn. Leave the run resumable and let
+                // the loop below return the unchanged release instead of a raw 500.
+                cancelled = true;
+                MarkPromptCancelled(stageRun);
+                await db.SaveChangesAsync(CancellationToken.None);
+            }
+            catch (ProviderUnavailableException ex)
+            {
+                // The model provider refused the request (rate limit, unavailable, unknown model).
+                // Record the real reason so the user sees "the AI service is busy", not a mystery.
+                providerRefused = true;
+                await RecordPromptFailureAsync(db, stageRun, ex, CancellationToken.None);
+                stageRun.Summary = $"{ex.PlainReason} Run the stage again, or choose a different AI model.";
+            }
+            catch (AcpStalledException ex)
+            {
+                // The agent accepted the prompt and then produced nothing at all for minutes.
+                // Record it as a failure the user can act on ("stopped responding"), then unwind
+                // so the request still returns normally instead of surfacing as a 500.
+                stalled = true;
+                await RecordPromptFailureAsync(db, stageRun, ex, CancellationToken.None);
+                stageRun.Summary = "The agent stopped responding — run the stage again.";
+            }
             catch (Exception ex)
             {
-                await RecordPromptFailureAsync(db, stageRun, ex, ct);
+                // Not ct — see the matching comment in StartStageAsync's own catch.
+                await RecordPromptFailureAsync(db, stageRun, ex, CancellationToken.None);
                 throw;
             }
         }
@@ -1069,6 +1272,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                         Passed = builtin.Passed,
                         EvidenceText = builtin.Evidence,
                         ResponsibleRole = builtin.ResponsibleRole,
+                        StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-builtin.DurationMs),
+                        CompletedAt = DateTimeOffset.UtcNow,
                     });
                     // Flushed immediately (not just at phase boundaries) so a concurrent poll —
                     // the frontend's live step checklist — can see progress as it happens.
@@ -1090,7 +1295,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                         {
                             if (innerStep.Kind == WorkflowStepKind.Agent)
                             {
-                                await PromptRoleAsync();
+                                await PromptRoleAsync(attempt);
+                                if (cancelled || stalled || providerRefused) break;
                                 continue;
                             }
 
@@ -1101,6 +1307,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                                 Name = inner.StepName,
                                 Passed = inner.Passed,
                                 EvidenceText = inner.Evidence,
+                                StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-inner.DurationMs),
+                                CompletedAt = DateTimeOffset.UtcNow,
                             });
                             await db.SaveChangesAsync(ct);
                             if (!inner.Passed)
@@ -1110,6 +1318,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                             }
                         }
 
+                        if (cancelled || stalled || providerRefused) break;
                         lastAttemptPassed = attemptPassed;
                         if (attemptPassed) break;
 
@@ -1138,6 +1347,29 @@ public sealed class WorkflowEngine : IWorkflowEngine
                     if (!lastAttemptPassed) allPassed = false;
                     break;
             }
+
+            // A cancelled or stalled prompt unwinds the whole stage immediately — see PromptRoleAsync.
+            if (cancelled || stalled || providerRefused) break;
+        }
+
+        if (cancelled || stalled || providerRefused)
+        {
+            stageRun.FinishedAt = DateTimeOffset.UtcNow;
+            feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(CancellationToken.None);
+            await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
+            {
+                StageName = role.Name,
+                Status = stageRun.Status.ToString(),
+                Phase = stageRun.Phase.ToString(),
+                AllPassed = false,
+                Cancelled = cancelled,
+                Stalled = stalled,
+                ProviderRefused = providerRefused,
+            }, ct);
+
+            await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed: false);
+            return await LoadReleaseAsync(db, feature.ReleaseId, ct);
         }
 
         // A consolidated record of whatever failed on this run — including gates that only
@@ -1150,13 +1382,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // *this* role's own loop can never converge (e.g. QA's verify_code failing because
         // developer didn't write tests — QA cannot author tests). Route the feature back to
         // whoever can actually fix it instead of leaving this stage in a dead-end retry loop.
+        var routed = false;
         if (!allPassed && finalFailedSteps.Count > 0)
         {
             var owner = finalFailedSteps
                 .Select(s => s.ResponsibleRole)
                 .FirstOrDefault(r => !string.IsNullOrWhiteSpace(r) && r != role.Name);
 
-            var routed = owner is not null && await RouteGateFailureToOwnerAsync(
+            routed = owner is not null && await RouteGateFailureToOwnerAsync(
                 feature, workflow, position, role.Name, currentIndex, owner, finalFailedSteps, db, ct);
 
             if (!routed)
@@ -1186,6 +1419,22 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
                 if (!challengeResult.Passed) allPassed = false;
             }
+        }
+
+        // Close this stage's negotiation points when it passes, or record how it answered them
+        // when it fails (so the next push-back can be more specific about what's still open).
+        // Also track repeated identical failures: past the cap we stop auto-retrying and ask a
+        // person instead of letting "Run Stage Again" bounce the same dead-end forever.
+        if (allPassed)
+        {
+            await ResolveOpenPointsForStageAsync(db, feature, role.Name, ct);
+            GateFailureLoopGuard.Clear(stageRun);
+        }
+        else
+        {
+            await CaptureNegotiationResponsesAsync(db, feature, role.Name, ct);
+            if (!routed)
+                GateFailureLoopGuard.RecordFailure(stageRun, finalFailedSteps.Select(step => step.StepName).ToList());
         }
 
         stageRun.ReadyToProceed = allPassed;
@@ -1224,14 +1473,24 @@ public sealed class WorkflowEngine : IWorkflowEngine
         stageRun.FinishedAt = DateTimeOffset.UtcNow;
         stageRun.Summary = allPassed
             ? $"Stage {role.Name} passed all gates and challenge."
-            : $"Stage {role.Name} failed gates or challenge.";
+            : stageRun.AutoRetrySuppressed
+                ? "The same check keeps failing and the agent can't fix it — a person needs to look before running it again."
+                : $"Stage {role.Name} failed gates or challenge.";
+
+        // One line per stage outcome: the breadcrumb that makes a support report readable without
+        // the specialist having to reconstruct the flow from the request log.
+        _logger.LogInformation(
+            "Stage {Stage} (feature {FeatureKey}, attempt {Attempt}) finished: status={Status} phase={Phase} allPassed={AllPassed}",
+            role.Name, featureKey, stageRun.Attempt, stageRun.Status, stageRun.Phase, allPassed);
+
+        await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed);
 
         feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
         if (isLastStage)
         {
-            await FinalizeFeatureCompletionAsync(db, feature, ct);
+                await FinalizeFeatureCompletionAndIndexAsync(db, feature, ct);
         }
 
         await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
@@ -1288,7 +1547,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// </summary>
     private async Task MoveToStageAsync(
         ReleaseFeature feature, ReleaseFlowPosition position, string fromStageName, int targetIndex,
-        string targetStageName, string? instructions, string addedBy, DevTeamDbContext db, CancellationToken ct)
+        string targetStageName, string? instructions, string addedBy, DevTeamDbContext db, CancellationToken ct,
+        IReadOnlyList<StepExecutionResult>? failedSteps = null)
     {
         var notesTarget = feature.StageRuns
             .Where(sr => sr.StageName == fromStageName)
@@ -1305,6 +1565,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Text = instructions,
                 AddedBy = addedBy,
             });
+        }
+
+        // Alongside the free-text note, open structured "points" so the receiving stage can be
+        // handed its own numbered asks and answer them one by one (see NegotiationProtocol).
+        if (notesTarget is not null)
+        {
+            var round = NegotiationProtocol.NextRound(PriorPointsTo(feature, targetStageName));
+            OpenNegotiationPoints(db, notesTarget, targetStageName, addedBy, round, failedSteps, instructions);
         }
 
         position.CurrentStageIndex = targetIndex;
@@ -1346,9 +1614,27 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var targetIndex = FindRoleIndex(workflow, responsibleRole);
         if (targetIndex < 0 || targetIndex >= fromIndex) return false;
 
+        // Bound the exchange: after MaxRounds of the same owner failing the same checks, stop
+        // bouncing and hand it to the analyst to re-scope instead of looping forever.
+        var nextRound = NegotiationProtocol.NextRound(PriorPointsTo(feature, responsibleRole));
+        if (nextRound > NegotiationProtocol.MaxRounds)
+        {
+            var analyst = workflow.Pipeline.Count > 0 ? workflow.Pipeline[0].Name : null;
+            var analystIndex = analyst is null ? -1 : FindRoleIndex(workflow, analyst);
+            if (analystIndex < 0 || analystIndex >= fromIndex)
+                return false;
+
+            await MoveToStageAsync(
+                feature, position, fromStageName, analystIndex, analyst,
+                NegotiationProtocol.ReScopeSummary(nextRound) + Environment.NewLine + Environment.NewLine +
+                    BuildGateFailureFeedback(failedSteps),
+                "system:negotiation-cap", db, ct, failedSteps);
+            return true;
+        }
+
         await MoveToStageAsync(
             feature, position, fromStageName, targetIndex, responsibleRole,
-            BuildGateFailureFeedback(failedSteps), "system:gate-failure", db, ct);
+            BuildGateFailureFeedback(failedSteps), "system:gate-failure", db, ct, failedSteps);
         return true;
     }
 
@@ -1356,6 +1642,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         Guid featureId, Guid stageRunId, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        // Read-only and disposed on return — see the matching comment on GetReleaseAsync.
+        db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
         var feature = await LoadFeatureAsync(db, featureId, ct);
         var stageRun = feature.StageRuns.FirstOrDefault(sr => sr.Id == stageRunId)
             ?? throw new KeyNotFoundException($"Stage run {stageRunId} not found for feature {featureId}.");
@@ -1384,7 +1672,13 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var workflow = LoadWorkflow(feature.Release.WorkspacePath);
 
         return workflow.Pipeline
-            .Select(r => new PipelineStageDto(r.Name, r.UserInputRequired, r.Signoff, r.ExpectedArtifacts, FlattenStepNames(r.Steps)))
+            .Select(r =>
+            {
+                var steps = FlattenStepNames(r.Steps);
+                return new PipelineStageDto(
+                    r.Name, r.UserInputRequired, r.Signoff, r.ExpectedArtifacts,
+                    steps, steps.Select(StepFriendlyText.Describe).ToArray());
+            })
             .ToArray();
     }
 
@@ -1438,6 +1732,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // (leading steps up to and including the first Agent/Loop step). Re-entrancy keeps these rows
     // and never sweeps or re-runs them, matching the engine's "these already ran at start-stage"
     // invariant.
+    // A role "uses an agent" when any of its steps (directly or inside a retry loop) drives a
+    // model turn. The 'verification' stage deliberately does not, which is what lets it run
+    // deterministically with no opencode session — see RunStageAsync.
+    private static bool RoleUsesAgent(WorkflowRole role)
+        => role.Steps.Any(step =>
+            step.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop
+            || (step.LoopSteps?.Any(inner => inner.Kind == WorkflowStepKind.Agent) ?? false));
+
     private static IReadOnlyList<string> CollectBaselineCheckNames(WorkflowRole role)
     {
         var names = new List<string>();
@@ -1492,6 +1794,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
     public async Task<IReadOnlyList<string>> GetWorkspaceChangesAsync(Guid featureId, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
+        // Read-only and disposed on return — see the matching comment on GetReleaseAsync.
+        db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
         var feature = await LoadFeatureAsync(db, featureId, ct);
 
         var status = await _gitService.StatusAsync(feature.Release.WorkspacePath, ct);
@@ -1568,6 +1872,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Name = result.StepName,
                 Passed = result.Passed,
                 EvidenceText = result.Evidence,
+                StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-result.DurationMs),
+                CompletedAt = DateTimeOffset.UtcNow,
             });
             if (!result.Passed) allPassed = false;
         }
@@ -1607,7 +1913,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         if (isLastStage)
         {
-            await FinalizeFeatureCompletionAsync(db, feature, ct);
+                await FinalizeFeatureCompletionAndIndexAsync(db, feature, ct);
         }
 
         await BroadcastEventAsync(feature.ReleaseId, "stageStateChanged", new
@@ -1686,7 +1992,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             // Throws on a genuine merge conflict — the signoff itself still stands
             // (a human did approve this stage), but the feature is not marked
             // complete and the release keeps its CurrentFeatureId until resolved.
-            await FinalizeFeatureCompletionAsync(db, feature, ct);
+                await FinalizeFeatureCompletionAndIndexAsync(db, feature, ct);
         }
 
         await BroadcastEventAsync(feature.ReleaseId, "signoffApproved", new
@@ -1804,6 +2110,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
         try
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            // This context is used for nothing but this one read and is disposed the instant we
+            // return — hot-polled every 2-3s by the frontend, so skipping EF's change-tracking
+            // overhead for the whole Release->Features->StageRuns->GateChecks graph is free.
+            db.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
             return await LoadReleaseAsync(db, releaseId, ct);
         }
         catch (Exception ex) when (ex is not KeyNotFoundException)
@@ -1856,6 +2166,25 @@ public sealed class WorkflowEngine : IWorkflowEngine
     }
 
     // ─── GitFlow: merge a completed feature into its release ───────────────
+
+    // The completion hook. Calls the untouched FinalizeFeatureCompletionAsync (which does the
+    // merge) and, only if that returned, queues a code-overview refresh. Indexing is best-effort:
+    // a failure to queue it must never surface as a completion failure (spec REQ-001/REQ-007).
+    private async Task FinalizeFeatureCompletionAndIndexAsync(DevTeamDbContext db, ReleaseFeature feature, CancellationToken ct)
+    {
+        await FinalizeFeatureCompletionAsync(db, feature, ct);
+
+        try
+        {
+            _repoContext?.EnqueueRefresh(
+                feature.Release.WorkspacePath,
+                feature.Release.IsHotfix ? "hotfix-complete" : "feature-complete");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Queueing the code overview refresh failed for {Workspace}", feature.Release.WorkspacePath);
+        }
+    }
 
     private async Task FinalizeFeatureCompletionAsync(DevTeamDbContext db, ReleaseFeature feature, CancellationToken ct)
     {
@@ -2056,7 +2385,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
 
         var (coreBack, coreFront) = CorePaths.Resolve(workflow.Slices, manifest);
-        var prefixes = new List<string> { featureDir, docsRoot, manifest.CodePathBack, manifest.CodePathFront };
+        var prefixes = new List<string> { featureDir, docsRoot };
+        prefixes.AddRange(manifest.EffectiveCodePaths);
         AddUnique(coreBack);
         AddUnique(coreFront);
         prefixes.AddRange(manifest.Shared);
@@ -2248,6 +2578,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
         {
             var followUp = await HandleDelegationRequestAsync(requestPath, stageRun, workspacePath, featureKey, workflow, db, ct);
             response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, followUp, ct, isPriming: false);
+            await RecordTurnMetricAsync(
+                db, stageRun, featureKey, workspacePath, stageRun.StageName, TurnKind.Delegation,
+                await ResolveModelIdAsync(workspacePath, ct), followUp.Length, null, response, ct);
         }
 
         // A well-behaved agent stops asking once it has what it needs; if the file is still
@@ -2304,7 +2637,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         try
         {
             var allowedPrefixes = ResolveAllowedWritePrefixes(specialist.WritesCode, specialist.Name, workspacePath, featureKey, workflow);
-            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedPrefixes, ct);
+            var session = await _coordinator.NewSessionAsync(workspacePath, await ResolveModelIdAsync(workspacePath, ct), allowedPrefixes, ct);
             await _coordinator.PromptWithSessionRecoveryAsync(
                 session.SessionId, specialist.PrimingPrompt + "\n\nQuestion from another stage: " + request.Question,
                 ct, isPriming: true);
@@ -2353,7 +2686,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var remaining = conflictedFiles;
         for (var attempt = 1; attempt <= MaxConflictResolutionAttempts; attempt++)
         {
-            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, allowedWritePrefixes, ct);
+            var session = await _coordinator.NewSessionAsync(workspacePath, await ResolveModelIdAsync(workspacePath, ct), allowedWritePrefixes, ct);
             await _coordinator.PromptWithSessionRecoveryAsync(
                 session.SessionId, BuildConflictResolutionPrompt(remaining), ct, isPriming: true);
             var answer = await GetLatestAssistantTextAsync(db, session.SessionId, ct) ?? "(no response)";
@@ -2415,6 +2748,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 EvidenceText = result.Evidence,
                 ResponsibleRole = result.ResponsibleRole,
                 IsEntryGate = true,
+                StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-result.DurationMs),
+                CompletedAt = DateTimeOffset.UtcNow,
             });
             if (!result.Passed) allPassed = false;
         }
@@ -2446,6 +2781,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 Passed = result.Passed,
                 EvidenceText = result.Evidence,
                 ResponsibleRole = result.ResponsibleRole,
+                StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-result.DurationMs),
+                CompletedAt = DateTimeOffset.UtcNow,
             });
             if (!result.Passed) allPassed = false;
         }
@@ -2467,7 +2804,9 @@ public sealed class WorkflowEngine : IWorkflowEngine
             var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
             var brsPath = ArtifactPaths.BrsPath(workspacePath, featureKey);
             var hasRequirements = File.Exists(brsPath);
-            if (manifest is null && !hasRequirements)
+            var interviewPath = ArtifactPaths.InterviewPath(workspacePath, featureKey);
+            var hasInterview = File.Exists(interviewPath);
+            if (manifest is null && !hasRequirements && !hasInterview)
                 return string.Empty;
 
             var scaffold = new StringBuilder();
@@ -2484,6 +2823,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
             {
                 scaffold.AppendLine();
                 scaffold.Append(File.ReadAllText(brsPath));
+            }
+            if (hasInterview)
+            {
+                scaffold.AppendLine();
+                scaffold.AppendLine("--- Interview so far (resume: continue from the last unanswered question; do NOT re-ask what is already answered) ---");
+                scaffold.Append(File.ReadAllText(interviewPath));
             }
             return scaffold.ToString();
         }
@@ -2525,8 +2870,17 @@ public sealed class WorkflowEngine : IWorkflowEngine
     private async Task<StepExecutionResult> ExecuteBuiltinAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
     {
         var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: await BuildBuiltinInputsAsync(gateName, featureKey, workspacePath, ct));
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var result = await _gateRunner.RunAsync(gateName, request, ct);
-        return new StepExecutionResult { StepName = gateName, Passed = result.Passed, Reason = result.Reason, Evidence = result.EvidenceText };
+        stopwatch.Stop();
+        return new StepExecutionResult
+        {
+            StepName = gateName,
+            Passed = result.Passed,
+            Reason = result.Reason,
+            Evidence = result.EvidenceText,
+            DurationMs = stopwatch.ElapsedMilliseconds,
+        };
     }
 
     /// <summary>
@@ -2567,12 +2921,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         if (gateName is BuiltinRegistry.CoverageMatrix or BuiltinRegistry.RenderPr)
         {
-            var testFiles = TestDiscovery.Discover(workspacePath);
+            // Only this feature's tests — requirement ids are per-feature, so a workspace-wide scan
+            // would let one feature's tests satisfy another's requirements.
+            var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey));
+            var testFiles = FeatureTestFiles.Discover(workspacePath, featureKey, manifest);
             if (testFiles.Count > 0)
                 inputs["testFilesJson"] = System.Text.Json.JsonSerializer.Serialize(testFiles);
 
-            var testCommand = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspacePath, featureKey))?.TestCommand
-                ?? "dotnet test DevTeam.slnx";
+            var testCommand = manifest?.TestCommand ?? "dotnet test DevTeam.slnx";
             inputs["testOutput"] = await CaptureTestOutputAsync(testCommand, workspacePath, ct);
         }
 
@@ -2623,8 +2979,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         try
         {
-            var session = await _coordinator.NewSessionAsync(workspacePath, DefaultModelId, null, ct);
+            var session = await _coordinator.NewSessionAsync(workspacePath, await ResolveModelIdAsync(workspacePath, ct), null, ct);
             var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, promptText, ct, isPriming: true);
+            await RecordTurnMetricAsync(
+                db, stageRun, null, workspacePath, stageRun.StageName, TurnKind.GatePrompt,
+                await ResolveModelIdAsync(workspacePath, ct), promptText.Length, null, response, ct);
 
             var passed = response.StopReason == "end_turn";
             if (!passed)
@@ -2774,6 +3133,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         {
             AcpDisconnectedException => (StageErrorKind.Disconnected, true),
             RpcException => (StageErrorKind.ProviderRejected, true),
+            AcpStalledException => (StageErrorKind.Stalled, true),
+            ProviderUnavailableException => (StageErrorKind.ProviderUnavailable, true),
             OperationCanceledException or TimeoutException => (StageErrorKind.TimedOut, true),
             _ => ((StageErrorKind?)null, false),
         };
@@ -2787,6 +3148,18 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await db.SaveChangesAsync(ct);
     }
 
+    // A user-cancelled turn is not a stage failure: leave the run resumable (still Active, no
+    // error marker, a plain "cancelled" summary) instead of escalating it as an agent error.
+    private static void MarkPromptCancelled(ReleaseStageRun stageRun)
+    {
+        ClearPromptFailure(stageRun);
+        stageRun.Status = ReleaseStageStatus.Active;
+        stageRun.Phase = StagePhase.GuidedQA;
+        stageRun.ReadyToProceed = false;
+        stageRun.FinishedAt = null;
+        stageRun.Summary = "Cancelled — run the stage again when you're ready.";
+    }
+
     private static void ClearPromptFailure(ReleaseStageRun stageRun)
     {
         stageRun.LastErrorKind = StageErrorKind.None;
@@ -2796,6 +3169,106 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // once a prompt succeeds again the stage is simply back to working normally.
         if (stageRun.Status == ReleaseStageStatus.Escalated)
             stageRun.Status = ReleaseStageStatus.Active;
+    }
+
+    // Appends the turn's answered question to the crash-proof interview log. Best-effort: a
+    // failure to write it must never affect the turn the user just had.
+    private async Task TryRecordInterviewTurnAsync(
+        DevTeamDbContext db, Guid acpSessionId, string featureKey, string workspacePath, string userText, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(userText))
+            return;
+
+        try
+        {
+            var assistant = await GetLatestAssistantTextAsync(db, acpSessionId, ct);
+            var questions = MultiQuestionDetector.ExtractQuestions(assistant);
+            if (questions.Count == 0)
+                return;
+
+            var path = ArtifactPaths.InterviewPath(workspacePath, featureKey);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var existing = File.Exists(path) ? File.ReadAllText(path) : null;
+            File.WriteAllText(path, InterviewLog.Append(existing, questions[^1], userText));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not record the interview turn for feature {FeatureKey}.", featureKey);
+        }
+    }
+
+    // ─── turn metrics ──────────────────────────────────────────────────────
+    // Every prompt gets a row so a stage's token total can be broken down by cause (retries,
+    // the antagonist review, delegation, …) and by prompt section. Best-effort: a metrics write
+    // must never break the turn it is measuring.
+
+    private async Task RecordTurnMetricAsync(
+        DevTeamDbContext db, ReleaseStageRun? stageRun, string? featureKey, string workspacePath,
+        string stageName, TurnKind kind, string? modelId, int promptChars, string? breakdownJson,
+        PromptResponse response, CancellationToken ct)
+    {
+        try
+        {
+            var measurement = response.Measurement;
+            var durationMs = measurement?.DurationMs ?? 0;
+            db.TurnMetrics.Add(new TurnMetric
+            {
+                StageRunId = stageRun?.Id,
+                StageRun = stageRun,
+                SessionId = response.SessionId,
+                WorkspacePath = workspacePath,
+                StageName = stageName,
+                FeatureKey = featureKey,
+                ModelId = modelId,
+                Kind = kind,
+                Attempt = stageRun?.Attempt ?? 1,
+                StartedAt = DateTimeOffset.UtcNow.AddMilliseconds(-durationMs),
+                DurationMs = durationMs,
+                TimeToFirstEventMs = measurement?.TimeToFirstEventMs,
+                InputTokens = response.InputTokens,
+                OutputTokens = response.OutputTokens,
+                TotalTokens = response.TotalTokens,
+                CachedReadTokens = measurement?.CachedReadTokens,
+                ContextTokens = measurement?.ContextTokens,
+                CostAmount = measurement?.CostAmount,
+                CostCurrency = measurement?.CostCurrency,
+                PromptChars = promptChars,
+                PromptBreakdownJson = breakdownJson,
+                TextEvents = measurement?.TextEvents ?? 0,
+                ThoughtEvents = measurement?.ThoughtEvents ?? 0,
+                ToolEvents = measurement?.ToolEvents ?? 0,
+                StopReason = response.StopReason,
+                Outcome = Enum.TryParse<TurnOutcome>(measurement?.Outcome, ignoreCase: true, out var outcome)
+                    ? outcome
+                    : TurnOutcome.Ok,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not record turn metrics for feature {FeatureKey}.", featureKey);
+        }
+    }
+
+    private static int InterviewChars(string workspacePath, string featureKey)
+    {
+        var path = ArtifactPaths.InterviewPath(workspacePath, featureKey);
+        try
+        {
+            return File.Exists(path) ? (int)new FileInfo(path).Length : 0;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
     }
 
     private static string BuildGuidanceContext(ReleaseFeature feature)
@@ -2811,6 +3284,122 @@ public sealed class WorkflowEngine : IWorkflowEngine
             : Environment.NewLine + Environment.NewLine +
               "Feedback from the team to incorporate:" + Environment.NewLine +
               string.Join(Environment.NewLine, notes.Select(n => "  - " + n));
+    }
+
+    // ─── negotiation ledger ────────────────────────────────────────────────
+    // Every push-back opens numbered "points" (ReviewFinding rows) for the stage it was sent to,
+    // so the receiving stage answers each one instead of re-reading a growing pile of free text.
+    // The round number is what bounds the exchange (NegotiationProtocol.MaxRounds).
+
+    private static IEnumerable<ReviewFinding> PriorPointsTo(ReleaseFeature feature, string targetStageName)
+        => feature.StageRuns
+            .SelectMany(sr => sr.Findings)
+            .Where(f => string.Equals(f.PushedBackTo, targetStageName, StringComparison.OrdinalIgnoreCase));
+
+    private static void OpenNegotiationPoints(
+        DevTeamDbContext db, ReleaseStageRun attachTo, string targetStageName, string openedBy,
+        int round, IReadOnlyList<StepExecutionResult>? failedSteps, string? instructions)
+    {
+        if (failedSteps is { Count: > 0 })
+        {
+            foreach (var step in failedSteps)
+            {
+                db.ReviewFindings.Add(new ReviewFinding
+                {
+                    StageRunId = attachTo.Id,
+                    StageRun = attachTo,
+                    Target = step.StepName,
+                    Kind = ReviewFindingKind.Process,
+                    Severity = ReviewFindingSeverity.Major,
+                    Summary = $"{GateFriendlyText.Describe(step.StepName, step.Evidence).Title} didn't pass: {step.Reason ?? "failed"}",
+                    Expected = Truncate(step.Evidence, MaxEvidenceCharsPerStep),
+                    Round = round,
+                    OpenedBy = openedBy,
+                    PushedBackTo = targetStageName,
+                    Status = ReviewFindingStatus.Open,
+                });
+            }
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(instructions))
+            return;
+
+        db.ReviewFindings.Add(new ReviewFinding
+        {
+            StageRunId = attachTo.Id,
+            StageRun = attachTo,
+            Target = targetStageName,
+            Kind = ReviewFindingKind.Process,
+            Severity = ReviewFindingSeverity.Major,
+            Summary = Truncate(instructions, 600),
+            Round = round,
+            OpenedBy = openedBy,
+            PushedBackTo = targetStageName,
+            Status = ReviewFindingStatus.Open,
+        });
+    }
+
+    // The point-form block for the stage about to run: only its own open points, numbered.
+    private static string BuildNegotiationContext(ReleaseFeature feature, string stageName)
+    {
+        var open = PriorPointsTo(feature, stageName)
+            .Where(f => f.Status == ReviewFindingStatus.Open)
+            .OrderBy(f => f.Round)
+            .ThenBy(f => f.CreatedAt)
+            .ToList();
+        return NegotiationProtocol.BuildPointsBlock(open);
+    }
+
+    // The stage passed its checks, so every point it was sent is satisfied — close them.
+    private static async Task ResolveOpenPointsForStageAsync(
+        DevTeamDbContext db, ReleaseFeature feature, string stageName, CancellationToken ct)
+    {
+        var open = PriorPointsTo(feature, stageName)
+            .Where(f => f.Status == ReviewFindingStatus.Open)
+            .ToList();
+        if (open.Count == 0)
+            return;
+
+        foreach (var point in open)
+        {
+            point.Status = ReviewFindingStatus.Resolved;
+            point.ResolvedAt = DateTimeOffset.UtcNow;
+            point.UpdatedAt = DateTimeOffset.UtcNow;
+            point.ResolutionNote = "All checks for this stage passed.";
+        }
+        await db.SaveChangesAsync(ct);
+    }
+
+    // The stage failed, so record how it answered each point — the next push can then be more
+    // specific about the points it still disputes, and the user can see what was claimed.
+    private async Task CaptureNegotiationResponsesAsync(
+        DevTeamDbContext db, ReleaseFeature feature, string stageName, CancellationToken ct)
+    {
+        var open = PriorPointsTo(feature, stageName)
+            .Where(f => f.Status == ReviewFindingStatus.Open)
+            .ToList();
+        if (open.Count == 0)
+            return;
+
+        var run = feature.StageRuns
+            .Where(sr => sr.StageName == stageName)
+            .OrderByDescending(sr => sr.StartedAt)
+            .FirstOrDefault();
+        if (run?.AcpSessionId is null || !Guid.TryParse(run.AcpSessionId, out var sessionId))
+            return;
+
+        var text = await GetLatestAssistantTextAsync(db, sessionId, ct);
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        foreach (var response in NegotiationProtocol.ParseResponses(text, open))
+        {
+            response.Point.ResponseKind = response.Kind;
+            response.Point.ResponseText = Truncate(response.Detail, 600);
+            response.Point.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        await db.SaveChangesAsync(ct);
     }
 
     private static async Task<ReleaseFeature> LoadFeatureAsync(DevTeamDbContext db, Guid featureId, CancellationToken ct)

@@ -58,4 +58,35 @@ public class ScaffoldSpecsGateTests : IDisposable
         Assert.True(result.Passed);
         Assert.Equal(writtenAt, File.GetLastWriteTimeUtc(manifestPath));
     }
+
+    [Fact]
+    public async Task CodePathsInput_ScaffoldsAFreeFormManifest()
+    {
+        // An app that doesn't split into backend/frontend (a single WPF/console/library project)
+        // declares its own arbitrary code path list instead of the classic two-slot split.
+        var inputs = new Dictionary<string, string> { ["codePaths"] = "src/Features/<F>;src/Features/<F>.Tests" };
+        var gate = new ScaffoldSpecsGate();
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.ScaffoldSpecs, _workspace.Path, "feat-001", "business-analyst", inputs),
+            CancellationToken.None);
+
+        Assert.True(result.Passed);
+        var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace.Path, "feat-001"));
+        Assert.NotNull(manifest);
+        Assert.Equal(["src/Features/<F>", "src/Features/<F>.Tests"], manifest!.EffectiveCodePaths);
+    }
+
+    [Fact]
+    public async Task NoCodePathsInput_FallsBackToClassicBackAndFrontDefaults()
+    {
+        var gate = new ScaffoldSpecsGate();
+
+        var result = await gate.RunAsync(Request(), CancellationToken.None);
+
+        Assert.True(result.Passed);
+        var manifest = SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(_workspace.Path, "feat-001"));
+        Assert.NotNull(manifest);
+        Assert.Equal(["back-end/**/Features/<F>", "front-end/app/<F>"], manifest!.EffectiveCodePaths);
+    }
 }

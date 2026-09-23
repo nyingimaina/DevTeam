@@ -21,8 +21,8 @@ public sealed class SliceGuardGate : IGate
         var manifest = SliceManifestIO.TryRead(manifestPath);
         var sharedFiles = manifest?.Shared?.ToArray() ?? GateInputs.GetList(request.Inputs, "sharedFiles").ToArray();
         var templates = manifest is null
-            ? GateInputs.GetList(request.Inputs, "codePaths").ToArray()
-            : new[] { manifest.CodePathBack, manifest.CodePathFront };
+            ? GateInputs.GetList(request.Inputs, "codePaths")
+            : manifest.EffectiveCodePaths;
 
         var diff = await _runner.RunAsync(
             new ProcessRunRequest("git", "diff --name-only HEAD", request.WorkspacePath),

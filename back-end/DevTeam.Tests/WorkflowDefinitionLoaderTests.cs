@@ -43,7 +43,7 @@ public class WorkflowDefinitionLoaderTests
         var definition = LoadDefault();
 
         Assert.Equal(
-            ["business-analyst", "developer", "qa"],
+            ["business-analyst", "developer", "qa", "verification"],
             definition.Pipeline.Select(r => r.Name).ToArray());
 
         var ba = definition.Pipeline[0];
@@ -58,6 +58,14 @@ public class WorkflowDefinitionLoaderTests
         var qa = definition.Pipeline[2];
         Assert.Equal("release-approval", qa.Signoff);
         Assert.Equal("coverage_matrix", qa.Steps.Single(s => s.Kind == WorkflowStepKind.Builtin && s.Builtin == "coverage_matrix").Builtin);
+
+        // The final stage is deterministic and automatic: no signoff, no agent — just the
+        // strict readiness check that must pass before a feature can complete.
+        var verification = definition.Pipeline[3];
+        Assert.Null(verification.Signoff);
+        Assert.False(verification.UserInputRequired);
+        Assert.DoesNotContain(verification.Steps, s => s.Kind is WorkflowStepKind.Agent or WorkflowStepKind.Loop);
+        Assert.Contains(verification.Steps, s => s.Builtin == "final_checks");
     }
 
     [Fact]
@@ -329,7 +337,7 @@ public class WorkflowDefinitionLoaderTests
 
         Assert.Equal("custom", definition.Release.Versioning);
         Assert.Equal("semver", new WorkflowDefinitionLoader().LoadDefault().Release.Versioning);
-        Assert.Equal(3, definition.Pipeline.Count);
+        Assert.Equal(4, definition.Pipeline.Count);
     }
 
     [Fact]
@@ -472,6 +480,6 @@ public class WorkflowDefinitionLoaderTests
     [Fact]
     public void Load_EmptyOrWhitespace_FallsBackToDefaults()
     {
-        Assert.Equal(3, Load("").Pipeline.Count);
+        Assert.Equal(4, Load("").Pipeline.Count);
     }
 }

@@ -23,6 +23,16 @@ jest.mock("./SpecialistsView", () => ({
   default: () => <div data-testid="specialists-view-mock">Specialists Mock</div>,
 }));
 
+jest.mock("./SupportView", () => ({
+  __esModule: true,
+  default: () => <div data-testid="support-view-mock">Support Mock</div>,
+}));
+
+jest.mock("./ModelsView", () => ({
+  __esModule: true,
+  default: () => <div data-testid="models-view-mock">Models Mock</div>,
+}));
+
 describe("SettingsView", () => {
   it("shows the Profiles tab by default", () => {
     render(<SettingsView api={{} as BrokerApi} workspacePath="C:/work/proj" />);
@@ -54,5 +64,21 @@ describe("SettingsView", () => {
     expect(screen.getByText("Specialists")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Specialists"));
     expect(screen.getByTestId("specialists-view-mock")).toBeInTheDocument();
+  });
+
+  it("switches to the Support tab", () => {
+    render(<SettingsView api={{} as BrokerApi} workspacePath="C:/work/proj" />);
+
+    expect(screen.getByText("Support")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Support"));
+    expect(screen.getByTestId("support-view-mock")).toBeInTheDocument();
+  });
+
+  it("switches to the Models tab", () => {
+    render(<SettingsView api={{} as BrokerApi} workspacePath="C:/work/proj" />);
+
+    expect(screen.getByText("Models")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Models"));
+    expect(screen.getByTestId("models-view-mock")).toBeInTheDocument();
   });
 });

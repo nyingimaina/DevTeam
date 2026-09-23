@@ -155,4 +155,30 @@ public class JsonRpcConnectionTests : IDisposable
         Assert.Equal("first", (await first).GetProperty("who").GetString());
         Assert.Equal("second", (await second).GetProperty("who").GetString());
     }
+
+    [Fact]
+    public async Task ANotificationHandlerThatThrows_DoesNotKillTheIngestLoop()
+    {
+        var connection = new JsonRpcConnection(_harness.Process);
+        connection.Start();
+
+        var delivered = 0;
+        var both = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Subscribed first, so it sees a frame before the throwing handler aborts that frame's
+        // invocation list.
+        connection.NotificationReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref delivered) >= 2) both.TrySetResult();
+        };
+        connection.NotificationReceived += (_, _) => throw new InvalidOperationException("subscriber boom");
+
+        _harness.EmitSessionUpdate("s1", "{\"sessionUpdate\":\"usage_update\",\"used\":1}");
+        _harness.EmitSessionUpdate("s1", "{\"sessionUpdate\":\"usage_update\",\"used\":2}");
+
+        // Before the hardening, the first throw ended the loop: the second frame was never
+        // delivered, and every pending request then hung until its 30-minute timeout with no
+        // events at all — the silent hang this guards against.
+        await both.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, delivered);
+    }
 }

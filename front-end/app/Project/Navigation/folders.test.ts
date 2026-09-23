@@ -1,4 +1,4 @@
-import { featureProgress, folderSummary, relativeTime, sortFeatures } from "./releaseView";
+import { featureLastActivity, featureProgress, findActiveFeature, folderSummary, relativeTime, sortFeatures } from "./releaseView";
 import { featureStateLabel, folderKindLabel, releaseStateLabel } from "./terms";
 import { ReleaseDto, ReleaseFeatureDto, ReleaseStageRunDto } from "../../Chat/Data/BrokerTypes";
 
@@ -158,5 +158,39 @@ describe("relativeTime", () => {
     expect(relativeTime("2026-02-01T00:00:00Z", now)).toBe("just now");
     expect(relativeTime("not a date", now)).toBe("");
     expect(relativeTime(undefined, now)).toBe("");
+  });
+});
+
+describe("featureLastActivity", () => {
+  it("returns the newest of the feature's own update and its runs' times", () => {
+    const f = feat({ updatedAt: "2026-01-03T00:00:00Z", stageRuns: [run({ startedAt: "2026-01-05T10:00:00Z", finishedAt: "2026-01-06T00:00:00Z" })] });
+    expect(featureLastActivity(f)).toBe("2026-01-06T00:00:00Z");
+    expect(featureLastActivity(feat({ updatedAt: "2026-01-04T00:00:00Z", stageRuns: [run({ startedAt: "2026-01-02T00:00:00Z" })] }))).toBe("2026-01-04T00:00:00Z");
+  });
+
+  it("returns null when nothing has a usable time", () => {
+    expect(featureLastActivity(feat({ updatedAt: "not a date", stageRuns: [] }))).toBeNull();
+    expect(featureLastActivity(feat({ updatedAt: "", stageRuns: [] }))).toBeNull();
+  });
+});
+
+describe("findActiveFeature", () => {
+  it("finds the project's active feature even when it belongs to another release", () => {
+    const a = rel({ id: "a", currentFeatureId: null, features: [feat({ id: "a1", key: "one" })] });
+    const b = rel({ id: "b", currentFeatureId: "b1", features: [feat({ id: "b1", key: "two" })] });
+
+    const found = findActiveFeature([a, b]);
+
+    expect(found?.feature.key).toBe("two");
+    expect(found?.release.id).toBe("b");
+  });
+
+  it("returns undefined when nothing is active", () => {
+    expect(findActiveFeature([rel({ currentFeatureId: null, features: [feat()] })])).toBeUndefined();
+    expect(findActiveFeature([])).toBeUndefined();
+  });
+
+  it("ignores an id that isn't one of that release's own features", () => {
+    expect(findActiveFeature([rel({ currentFeatureId: "ghost", features: [feat({ id: "real" })] })])).toBeUndefined();
   });
 });

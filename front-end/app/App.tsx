@@ -1,18 +1,21 @@
 "use client";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import SidekickMenu, { ISidekickMenuItem } from "jattac.libs.web.zest-sidekick-menu";
 import BrokerApi from "./Chat/Data/BrokerApi";
-import ReleaseWizard from "./Project/Release/ReleaseWizard";
+import ProjectNavigator from "./Project/Navigation/ProjectNavigator";
 import GitView from "./Project/Git/GitView";
+import ChecksView from "./Project/Checks/ChecksView";
+import InsightsView from "./Project/Insights/InsightsView";
 import SettingsView from "./Project/Settings/SettingsView";
 import PathBrowser from "./Project/UI/PathBrowser";
 import WorkspaceCleanupNotice from "./UI/WorkspaceCleanupNotice";
 import ActiveTurnIndicator from "./UI/ActiveTurnIndicator";
 import { formatCleanupNoticeMessage, projectNameFromPath } from "./Project/workspaceCleanup";
-import { FaFolderOpen, FaListCheck, FaCodeBranch, FaGear } from "react-icons/fa6";
+import { installGlobalErrorHandlers } from "./UI/diagnostics";
+import { FaFolderOpen, FaListCheck, FaCodeBranch, FaShieldHalved, FaGear, FaChartLine } from "react-icons/fa6";
 import styles from "./App.module.css";
 
-type TabValue = "releases" | "git" | "settings";
+type TabValue = "releases" | "checks" | "insights" | "git" | "settings";
 
 const STORAGE_KEY = "devteam-project";
 
@@ -30,6 +33,12 @@ export default function App() {
   const [project, setProject] = useState<string | null>(readProject);
   const [activeTab, setActiveTab] = useState<TabValue>("releases");
   const [cleanupNotice, setCleanupNotice] = useState<string | null>(null);
+
+  // Record anything the UI itself trips over, so "it just broke" becomes something the Support
+  // tab can hand to a specialist. Idempotent.
+  useEffect(() => {
+    installGlobalErrorHandlers();
+  }, []);
 
   const runWorkspaceCleanupAsync = useCallback(async (path: string) => {
     try {
@@ -88,6 +97,20 @@ export default function App() {
       onClick: () => setActiveTab("releases"),
     },
     {
+      id: "checks",
+      label: "Checks",
+      icon: <FaShieldHalved />,
+      searchTerms: "checks quality tests build lint coverage",
+      onClick: () => setActiveTab("checks"),
+    },
+    {
+      id: "insights",
+      label: "Efficiency",
+      icon: <FaChartLine />,
+      searchTerms: "efficiency insights tokens cost time metrics performance",
+      onClick: () => setActiveTab("insights"),
+    },
+    {
       id: "git",
       label: "Git",
       icon: <FaCodeBranch />,
@@ -128,7 +151,13 @@ export default function App() {
       </header>
       <main className={styles.viewPort}>
         <div hidden={activeTab !== "releases"}>
-          <ReleaseWizard api={api} workspacePath={project} />
+          <ProjectNavigator api={api} workspacePath={project} active={activeTab === "releases"} />
+        </div>
+        <div hidden={activeTab !== "checks"} data-testid="checks-tab-panel">
+          <ChecksView api={api} workspacePath={project} />
+        </div>
+        <div hidden={activeTab !== "insights"} data-testid="insights-tab-panel">
+          <InsightsView api={api} workspacePath={project} />
         </div>
         <div hidden={activeTab !== "git"}>
           <GitView api={api} workspacePath={project} />

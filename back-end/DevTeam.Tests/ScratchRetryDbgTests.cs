@@ -66,7 +66,7 @@ public class ScratchRetryDbgTests : IDisposable
     [Fact]
     public async Task Reproduce_RetryStage_OnBlockedGate()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Fail("REQ-004 missing Given")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Fail("REQ-004 missing Given")]);
         var engine = new WorkflowEngine(
             CreateFactory(), _gateRunner, _coordinator, _broadcaster,
             _gitService, new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
@@ -86,7 +86,7 @@ public class ScratchRetryDbgTests : IDisposable
     [Fact]
     public async Task Debug_FreshRun_TrackedState()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Fail("REQ-004 missing Given")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Fail("REQ-004 missing Given")]);
         var engine = new WorkflowEngine(
             CreateFactory(), _gateRunner, _coordinator, _broadcaster,
             _gitService, new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,

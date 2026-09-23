@@ -25,6 +25,8 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<ReleaseSignoff> ReleaseSignoffs => Set<ReleaseSignoff>();
     public DbSet<ReleaseGuidanceNote> ReleaseGuidanceNotes => Set<ReleaseGuidanceNote>();
     public DbSet<ReleaseUsageLedger> ReleaseUsageLedgers => Set<ReleaseUsageLedger>();
+    public DbSet<TurnMetric> TurnMetrics => Set<TurnMetric>();
+    public DbSet<TurnMetricDaily> TurnMetricDailies => Set<TurnMetricDaily>();
     public DbSet<ReleaseFlowPosition> ReleaseFlowPositions => Set<ReleaseFlowPosition>();
     public DbSet<WorkspaceActiveCheckout> WorkspaceActiveCheckouts => Set<WorkspaceActiveCheckout>();
     public DbSet<MergeConflictResolution> MergeConflictResolutions => Set<MergeConflictResolution>();
@@ -32,8 +34,14 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<Profile> Profiles => Set<Profile>();
     public DbSet<ProfilePrompt> ProfilePrompts => Set<ProfilePrompt>();
     public DbSet<WorkspaceProfileSettings> WorkspaceProfileSettings => Set<WorkspaceProfileSettings>();
+    public DbSet<WorkspaceModelSettings> WorkspaceModelSettings => Set<WorkspaceModelSettings>();
+    public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+    public DbSet<ModelCandidate> ModelCandidates => Set<ModelCandidate>();
     public DbSet<SpecialistRole> SpecialistRoles => Set<SpecialistRole>();
     public DbSet<SpecialistConsultation> SpecialistConsultations => Set<SpecialistConsultation>();
+    public DbSet<ReadinessReportRow> ReadinessReports => Set<ReadinessReportRow>();
+    public DbSet<ReadinessCheckRow> ReadinessChecks => Set<ReadinessCheckRow>();
+    public DbSet<ReadinessAttestation> ReadinessAttestations => Set<ReadinessAttestation>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -123,6 +131,30 @@ public sealed class DevTeamDbContext : DbContext
         modelBuilder.Entity<WorkspaceProfileSettings>(settings =>
         {
             settings.HasKey(e => e.WorkspacePath);
+        });
+
+        modelBuilder.Entity<WorkspaceModelSettings>(settings =>
+        {
+            settings.HasKey(e => e.WorkspacePath);
+            settings.Property(e => e.ModelId).IsRequired().HasMaxLength(256);
+        });
+
+        modelBuilder.Entity<AppSetting>(setting =>
+        {
+            setting.HasKey(e => e.Name);
+            setting.Property(e => e.Name).HasMaxLength(128);
+            setting.Property(e => e.Value).HasColumnType("TEXT");
+        });
+
+        modelBuilder.Entity<ModelCandidate>(candidate =>
+        {
+            candidate.HasKey(e => e.Id);
+            candidate.Property(e => e.WorkspacePath).IsRequired().HasMaxLength(1024);
+            candidate.Property(e => e.ModelId).IsRequired().HasMaxLength(256);
+            candidate.Property(e => e.LastFailureKind).HasMaxLength(64);
+            candidate.Property(e => e.LastFailureReason).HasColumnType("TEXT");
+            // The list is always read whole, ordered by priority, for one workspace.
+            candidate.HasIndex(e => new { e.WorkspacePath, e.Priority });
         });
 
         modelBuilder.Entity<SpecialistRole>(specialist =>
@@ -295,6 +327,68 @@ public sealed class DevTeamDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.StageRunId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TurnMetric>(metric =>
+        {
+            metric.HasKey(e => e.Id);
+            metric.Property(e => e.StageName).HasMaxLength(128);
+            metric.Property(e => e.WorkspacePath).HasMaxLength(1024);
+            metric.Property(e => e.FeatureKey).HasMaxLength(256);
+            metric.Property(e => e.ModelId).HasMaxLength(256);
+            metric.Property(e => e.StopReason).HasMaxLength(64);
+            // A turn belongs to its stage run; deleting the run takes its metrics with it.
+            metric.HasOne(e => e.StageRun)
+                .WithMany()
+                .HasForeignKey(e => e.StageRunId)
+                .OnDelete(DeleteBehavior.Cascade);
+            metric.HasIndex(e => new { e.WorkspacePath, e.StartedAt });
+            metric.HasIndex(e => new { e.StageRunId, e.Kind });
+        });
+
+        modelBuilder.Entity<TurnMetricDaily>(daily =>
+        {
+            daily.HasKey(e => e.Id);
+            daily.Property(e => e.Day).HasMaxLength(16);
+            daily.Property(e => e.WorkspacePath).HasMaxLength(1024);
+            daily.Property(e => e.StageName).HasMaxLength(128);
+            daily.Property(e => e.ModelId).HasMaxLength(256);
+            daily.HasIndex(e => new { e.Day, e.WorkspacePath });
+        });
+
+        modelBuilder.Entity<ReadinessReportRow>(report =>
+        {
+            report.HasKey(e => e.Id);
+            report.Property(e => e.WorkspacePath).IsRequired().HasMaxLength(1024);
+            report.Property(e => e.Scope).IsRequired().HasMaxLength(32);
+            report.Property(e => e.ReleaseVersion).HasMaxLength(128);
+            report.HasIndex(e => new { e.ReleaseId, e.CreatedAt });
+            report.HasMany(e => e.Checks)
+                .WithOne(c => c.Report)
+                .HasForeignKey(c => c.ReportId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ReadinessCheckRow>(check =>
+        {
+            check.HasKey(e => e.Id);
+            check.Property(e => e.PhaseId).IsRequired().HasMaxLength(128);
+            check.Property(e => e.Title).IsRequired().HasMaxLength(256);
+            check.Property(e => e.Status).IsRequired().HasMaxLength(32);
+            check.Property(e => e.Reason).HasColumnType("TEXT");
+            check.Property(e => e.MetricsJson).HasColumnType("TEXT");
+            check.Property(e => e.RawOutput).HasColumnType("TEXT");
+        });
+
+        modelBuilder.Entity<ReadinessAttestation>(attestation =>
+        {
+            attestation.HasKey(e => e.Id);
+            attestation.Property(e => e.WorkspacePath).IsRequired().HasMaxLength(1024);
+            attestation.Property(e => e.SourceBranch).IsRequired().HasMaxLength(256);
+            attestation.Property(e => e.CommitSha).IsRequired().HasMaxLength(64);
+            // Lookup is "the latest attestation for this workspace+branch" on every protected
+            // merge, so index exactly that pair.
+            attestation.HasIndex(e => new { e.WorkspacePath, e.SourceBranch, e.CreatedAt });
         });
     }
 }

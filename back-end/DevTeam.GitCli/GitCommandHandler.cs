@@ -14,6 +14,7 @@ public class GitCommandHandler
             "merge-abort" => await MergeAbortAsync(request),
             "stage-all" => await StageAllAsync(request),
             "log" => await LogAsync(request),
+            "rev-parse" => await RevParseAsync(request),
             "ensure-branch" => await EnsureBranchAsync(request),
             "push" => await PushAsync(request),
             "delete-branch" => await DeleteBranchAsync(request),
@@ -190,6 +191,19 @@ public class GitCommandHandler
         var (exit, out_, _) = await RunGitAsync(workspacePath, "diff", "--name-only", "--diff-filter=U");
         if (exit != 0) return [];
         return out_.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    // Resolves a ref (branch name, tag, or "HEAD") to its full commit hash — used to pin a
+    // readiness attestation to the exact commit it verified.
+    private static async Task<GitResponse> RevParseAsync(GitRequest request)
+    {
+        if (request.WorkspacePath is null)
+            return new GitResponse(false, "workspacePath required");
+
+        var reference = string.IsNullOrWhiteSpace(request.BranchName) ? "HEAD" : request.BranchName;
+        var (exit, out_, err) = await RunGitAsync(request.WorkspacePath, "rev-parse", "--verify", reference);
+        if (exit != 0) return new GitResponse(false, $"git rev-parse failed: {err}");
+        return new GitResponse(true, "OK", CommitSha: out_.Trim());
     }
 
     private static async Task<GitResponse> LogAsync(GitRequest request)

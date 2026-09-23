@@ -21,11 +21,32 @@ public class PipelineEditorServiceTests
         {
             var editor = CreateService().Load(workspace);
 
-            Assert.Equal(["business-analyst", "developer", "qa"], editor.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["business-analyst", "developer", "qa", "verification"], editor.Roles.Select(r => r.Name).ToArray());
             var dev = editor.Roles.Single(r => r.Name == "developer");
             Assert.True(dev.WritesCode);
             Assert.Contains("agent:developer", dev.StepSummary);
             Assert.Contains("code_hygiene", dev.StepSummary);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DefaultPrompts_RequireRequirementIdsSoCoverageIsUnambiguous()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            var editor = CreateService().Load(workspace);
+
+            var ba = editor.Roles.Single(r => r.Name == "business-analyst");
+            var developer = editor.Roles.Single(r => r.Name == "developer");
+
+            Assert.Contains("REQ-", ba.SeedPrompt);
+            Assert.Contains("REQ", developer.SeedPrompt);
+            Assert.Contains("test name", developer.SeedPrompt, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -77,7 +98,7 @@ public class PipelineEditorServiceTests
 
             var updated = service.Load(workspace).Roles.Single(r => r.Name == "developer");
             Assert.Equal(
-                ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "reuse_gate", "slice_scope", "render_pr"],
+                ["code_map", "context_bundle", "agent:developer", "build_check", "verify_code", "code_hygiene", "app_launch", "reuse_gate", "project_structure", "slice_scope", "render_pr"],
                 updated.StepSummary);
         }
         finally

@@ -1,0 +1,64 @@
+.panel {
+  border: 1px solid var(--zest-color-border-subtle, #d8d8dd);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  background: var(--zest-color-surface, #ffffff);
+}
+
+.heading {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.point {
+  border-top: 1px solid var(--zest-color-border-subtle, #ececf0);
+  padding-top: 8px;
+}
+
+.summary {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.number {
+  font-weight: 600;
+  color: var(--zest-color-text-muted, #6b6b75);
+}
+
+.requirement {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--zest-color-surface-alt, #f2f2f7);
+}
+
+.expected,
+.meta,
+.response {
+  margin-top: 4px;
+  font-size: 0.85rem;
+  color: var(--zest-color-text-muted, #6b6b75);
+}
+
+.response {
+  font-style: italic;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

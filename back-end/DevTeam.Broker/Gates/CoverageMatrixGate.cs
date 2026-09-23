@@ -22,9 +22,8 @@ public sealed class CoverageMatrixGate : IGate
         matrix.Append("| --- | --- |").AppendLine();
         foreach (var requirement in requirements)
         {
-            var covered = TestCovers(referenceCorpus, requirement.Id) ||
-                TestCovers(referenceCorpus, Compact(requirement.Id)) ||
-                TestCovers(referenceCorpus, Sanitize(requirement.Title));
+            // Same matcher the progress meter uses, so the two can never disagree.
+            var covered = RequirementMatcher.MatchesRequirement(referenceCorpus, requirement);
             matrix.Append($"| {requirement.Id} | {(covered ? "covered" : "UNCOVERED")} |").AppendLine();
             if (!covered)
                 uncovered.Add(requirement.Id);
@@ -38,6 +37,11 @@ public sealed class CoverageMatrixGate : IGate
                 matrix.ToString().TrimEnd()));
 
         var evidence = new StringBuilder();
+        // State the fix, not just the symptom: the whole convention is that a test names the
+        // requirement it proves, and without this line the developer is left guessing.
+        evidence.Append("Every test must name the requirement it proves — put the requirement id in the test name ")
+            .Append("(e.g. REQ_").Append(RequirementMatcher.FirstNumber(requirements[0].Id)).Append("_AddCommand_ValidInputs). ")
+            .AppendLine("Then re-run the checks.");
         foreach (var req in uncovered)
             evidence.Append("fail: no test references ").Append(req).AppendLine();
         foreach (var req in requirements)
@@ -57,19 +61,4 @@ public sealed class CoverageMatrixGate : IGate
         corpus.Append(TestFiles.Text(GateInputs.GetOptional(request.Inputs, "testFilesJson")));
         return corpus.ToString();
     }
-
-    private static bool TestCovers(string referenceCorpus, string token)
-    {
-        if (string.IsNullOrWhiteSpace(token))
-            return false;
-        return referenceCorpus.Contains(token, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string Compact(string text)
-        => Sanitize(text).Replace("-", "", StringComparison.Ordinal)
-            .Replace("_", "", StringComparison.Ordinal)
-            .Replace(".", "", StringComparison.Ordinal);
-
-    private static string Sanitize(string title)
-        => title.Replace(" ", "", StringComparison.Ordinal).ToLowerInvariant();
 }

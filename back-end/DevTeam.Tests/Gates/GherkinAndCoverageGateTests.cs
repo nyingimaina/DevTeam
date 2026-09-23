@@ -132,4 +132,76 @@ public class GherkinAndCoverageGateTests
         Assert.Contains("REQ-001", result.EvidenceText);
         Assert.Contains("REQ-002", result.EvidenceText);
     }
+
+    // The standardized convention is "name the requirement in the test". These cases pin the
+    // spellings a developer is likely to use so the check accepts any of them.
+
+    [Fact]
+    public async Task Coverage_PassesWhenIdUsesUnderscoreSeparator()
+    {
+        var gate = new CoverageMatrixGate();
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = RequirementsJson,
+                ["testFilesJson"] = """[{"path":"CalculatorLib.Tests/AuthTests.cs","content":"REQ_001_Login_Succeeds and REQ_002_Logout_Succeeds"}]""",
+            }),
+            CancellationToken.None);
+
+        Assert.True(result.Passed, result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Coverage_PassesWhenIdDropsZeroPadding()
+    {
+        var gate = new CoverageMatrixGate();
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = RequirementsJson,
+                ["testFilesJson"] = """[{"path":"CalculatorLib.Tests/AuthTests.cs","content":"REQ_1_Login_Succeeds and REQ_2_Logout_Succeeds"}]""",
+            }),
+            CancellationToken.None);
+
+        Assert.True(result.Passed, result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Coverage_DoesNotCoverRequirementOneFromRequirementTen()
+    {
+        var gate = new CoverageMatrixGate();
+        var requirements = """[{"id":"REQ-1","title":"One","acceptanceCriteria":"Given a, When b, Then c"},{"id":"REQ-10","title":"Ten","acceptanceCriteria":"Given a, When b, Then c"}]""";
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = requirements,
+                ["testFilesJson"] = """[{"path":"T.cs","content":"REQ_10_Ten_Works"}]""",
+            }),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Matches(@"fail: no test references REQ-1\b", result.EvidenceText);
+        Assert.Contains("ok:   covered REQ-10", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Coverage_FailureTellsTheDeveloperHowToNameTests()
+    {
+        var gate = new CoverageMatrixGate();
+
+        var result = await gate.RunAsync(
+            Request(BuiltinRegistry.CoverageMatrix, new Dictionary<string, string>
+            {
+                ["requirementsJson"] = RequirementsJson,
+                ["testOutput"] = "5 passed",
+            }),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Contains("requirement id", result.EvidenceText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("REQ-001", result.EvidenceText);
+    }
 }

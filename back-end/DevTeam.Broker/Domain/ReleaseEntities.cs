@@ -50,6 +50,14 @@ public enum StageErrorKind
     Disconnected,
     ProviderRejected,
     TimedOut,
+    // The agent accepted the prompt but then went completely silent — see
+    // BrokerCoordinator's stall watchdog and AcpStalledException. Distinct from TimedOut (the
+    // overall request budget) because it fires much sooner and means "the stream stopped".
+    Stalled,
+    // The model provider refused the request (rate limit, unavailable endpoint, unknown model).
+    // Detected from the agent's own log, because opencode never reports it over ACP — without
+    // this the turn just hangs until the stall watchdog fires.
+    ProviderUnavailable,
 }
 
 public enum StagePhase
@@ -258,6 +266,13 @@ public sealed class ReleaseStageRun
     public string? LastErrorMessage { get; set; }
     public DateTimeOffset? LastErrorAt { get; set; }
 
+    // ── same-stage failure loop guard ──
+    // How many times in a row this stage has failed the *same* checks (see GateFailureLoopGuard).
+    // Past the cap we stop auto-retrying and ask the human, instead of bouncing forever.
+    public int ConsecutiveFailures { get; set; }
+    public string? LastFailureSignature { get; set; }
+    public bool AutoRetrySuppressed { get; set; }
+
     /// <summary>
     /// Eagerly-persisted progress marker (a serialized <see cref="StageCheckpoint"/>) written
     /// before/after every agent turn and gate step. Lets the startup crash-recoverer tell a
@@ -313,6 +328,38 @@ public sealed class ReviewFinding
     public string? ResolutionNote { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? ResolvedAt { get; set; }
+
+    // ── Negotiation ledger (a finding doubles as one "point" in a push-back round) ──
+    // Which round of the negotiation opened this point (1-based). Bounded by
+    // NegotiationProtocol.MaxRounds so a stage ping-pong can't run forever.
+    public int Round { get; set; } = 1;
+
+    // Who opened it: "system:gate-failure", "user", "challenge:<producer>-><antagonist>", …
+    public string? OpenedBy { get; set; }
+
+    // The stage the point was sent back to, so the receiving stage can be handed only its own
+    // open points (rather than every note the feature ever accumulated).
+    public string? PushedBackTo { get; set; }
+
+    // The concrete, observable thing that closes the point — the "what to check" half of the ask.
+    public string? Expected { get; set; }
+
+    // The receiving stage's answer for this point, captured from its completion message.
+    public string? ResponseText { get; set; }
+    public ReviewFindingResponse ResponseKind { get; set; } = ReviewFindingResponse.None;
+    public DateTimeOffset? UpdatedAt { get; set; }
+}
+
+/// <summary>How the receiving stage answered a negotiation point.</summary>
+public enum ReviewFindingResponse
+{
+    /// <summary>No answer captured yet (the stage hasn't run, or didn't address this point).</summary>
+    None,
+    Addressed,
+    /// <summary>The stage believes the point/check is wrong — routed to the user, never looped.</summary>
+    Disputed,
+    /// <summary>The stage cannot satisfy it — routed to the business analyst for re-scoping.</summary>
+    Blocked,
 }
 
 public sealed class ReleaseSignoff

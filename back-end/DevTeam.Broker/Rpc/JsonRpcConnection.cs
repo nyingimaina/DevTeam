@@ -145,13 +145,29 @@ public sealed class JsonRpcConnection : IDisposable
                 {
                     // Non-JSON line (e.g. stray stderr routed to stdout): ignore.
                 }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception)
+                {
+                    // ONE bad frame must never kill the ingest loop. If it did, every pending
+                    // request would hang until its request timeout and the caller would see a
+                    // silent, unexplained stall with no events at all — exactly the failure this
+                    // guards against.
+                    continue;
+                }
             }
-
-            FailPending(new AcpDisconnectedException("ACP process exited"));
         }
         catch (OperationCanceledException)
         {
             // Normal shutdown via Dispose.
+        }
+        finally
+        {
+            // ALWAYS fail whatever is still pending: an exited or broken connection must surface
+            // as a failed request immediately, never as a request that waits for its timeout.
+            FailPending(new AcpDisconnectedException("ACP connection closed"));
         }
     }
 

@@ -30,6 +30,31 @@ public static class SliceAllowlist
         return false;
     }
 
+    /// <summary>
+    /// True when <paramref name="changePath"/> falls inside the feature's own code slice. Unlike
+    /// <see cref="IsAllowed"/>, this deliberately ignores the artifacts dir and the shared-file
+    /// list: those may be *written*, but they are not "the feature slice" — structural checks
+    /// (e.g. "a slice must not carry its own build project") must not fire on the shared core.
+    /// </summary>
+    public static bool IsInSlice(string changePath, string featureKey, IReadOnlyList<string> codePathTemplates)
+    {
+        var normalized = Normalize(changePath);
+        if (normalized.Length == 0)
+            return false;
+
+        foreach (var template in codePathTemplates)
+        {
+            if (string.IsNullOrWhiteSpace(template))
+                continue;
+
+            var concrete = Normalize(template).Replace("<F>", featureKey, StringComparison.OrdinalIgnoreCase);
+            if (TemplatePattern(concrete).IsMatch(normalized))
+                return true;
+        }
+
+        return false;
+    }
+
     private static readonly Dictionary<string, Regex> PatternCache = new(StringComparer.OrdinalIgnoreCase);
 
     private static Regex TemplatePattern(string template)

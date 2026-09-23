@@ -3,6 +3,7 @@ using DevTeam.Broker.Gates;
 using DevTeam.Broker.Git;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
+using DevTeam.Tests.Context;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -57,6 +58,86 @@ public class MultiQuestionDetectorTests
     {
         Assert.Equal(0, MultiQuestionDetector.CountQuestions("The requirements are clear. Proceeding to DONE."));
     }
+
+    [Fact]
+    public void ExtractQuestions_FindsEachQuestionInOrder()
+    {
+        var questions = MultiQuestionDetector.ExtractQuestions(
+            "What should the feature do? Also, who is the end user?");
+
+        Assert.Equal(2, questions.Count);
+        Assert.Contains("What should the feature do", questions[0]);
+        Assert.Contains("who is the end user", questions[1]);
+    }
+
+    [Fact]
+    public void ExtractQuestions_StripsListMarkers()
+    {
+        var questions = MultiQuestionDetector.ExtractQuestions(
+            "1. How should 'add' be expressed? 2. What happens for invalid inputs?");
+
+        Assert.Equal("How should 'add' be expressed", questions[0]);
+        Assert.Equal("What happens for invalid inputs", questions[1]);
+    }
+
+    [Fact]
+    public void ExtractQuestions_IgnoresToolEchoLines()
+    {
+        var questions = MultiQuestionDetector.ExtractQuestions("tool: execute\nWhat is your question?");
+
+        Assert.Single(questions);
+        Assert.Equal("What is your question", questions[0]);
+    }
+
+    [Fact]
+    public void BuildCorrectionPrompt_QuotesTheOffendingQuestions()
+    {
+        var prompt = MultiQuestionDetector.BuildCorrectionPrompt(
+            "What should it do? And who is the end user?");
+
+        Assert.StartsWith(MultiQuestionDetector.CorrectionPromptPrefix, prompt);
+        Assert.Contains("1) What should it do", prompt);
+        Assert.Contains("2) ", prompt);
+        Assert.Contains("who is the end user", prompt);
+    }
+
+    [Fact]
+    public void BuildCorrectionPrompt_AsksForOnlyOneAndNotWhich()
+    {
+        var prompt = MultiQuestionDetector.BuildCorrectionPrompt("A? B?");
+
+        Assert.Contains("Ask only ONE question", prompt);
+        Assert.Contains("Do not ask which one", prompt);
+    }
+
+    [Fact]
+    public void BuildCorrectionPrompt_FallsBackToQuotingTheWholeMessage()
+    {
+        // A single question mark in a long line leaves nothing to enumerate — quote the message.
+        var prompt = MultiQuestionDetector.BuildCorrectionPrompt("Is this fine?");
+
+        Assert.Contains("Is this fine?", prompt);
+        Assert.Contains("Ask only ONE question", prompt);
+    }
+
+    [Fact]
+    public void BuildCorrectionPrompt_CapsTheNumberOfQuotedQuestions()
+    {
+        var many = string.Join(" ", Enumerable.Range(1, 12).Select(i => $"Question {i}?"));
+
+        var prompt = MultiQuestionDetector.BuildCorrectionPrompt(many);
+
+        Assert.Contains($"{MultiQuestionDetector.MaxQuotedQuestions}) Question {MultiQuestionDetector.MaxQuotedQuestions}", prompt);
+        Assert.DoesNotContain($"{MultiQuestionDetector.MaxQuotedQuestions + 1}) Question", prompt);
+    }
+
+    [Fact]
+    public void IsCorrectionPrompt_RecognisesABuiltPromptAndNothingElse()
+    {
+        Assert.True(MultiQuestionDetector.IsCorrectionPrompt(MultiQuestionDetector.BuildCorrectionPrompt("A? B?")));
+        Assert.False(MultiQuestionDetector.IsCorrectionPrompt("What should the login form do?"));
+        Assert.False(MultiQuestionDetector.IsCorrectionPrompt(null));
+    }
 }
 
 public class MultiQuestionEnforcementTests : IDisposable
@@ -88,8 +169,8 @@ public class MultiQuestionEnforcementTests : IDisposable
 
         await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
-        Assert.DoesNotContain(_coordinator.Prompts, p => p == MultiQuestionDetector.CorrectionPrompt);
-        Assert.Single(_coordinator.Prompts, p => p == "We need a login form");
+        Assert.DoesNotContain(_coordinator.Prompts, MultiQuestionDetector.IsCorrectionPrompt);
+        Assert.Single(_coordinator.Prompts, p => p.StartsWith("We need a login form", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -103,7 +184,7 @@ public class MultiQuestionEnforcementTests : IDisposable
 
         var result = await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
-        Assert.Single(_coordinator.Prompts, p => p == MultiQuestionDetector.CorrectionPrompt);
+        Assert.Single(_coordinator.Prompts, MultiQuestionDetector.IsCorrectionPrompt);
         Assert.Equal("end_turn", result.Response);
 
         using var db = CreateFactory().CreateDbContext();
@@ -119,6 +200,87 @@ public class MultiQuestionEnforcementTests : IDisposable
     }
 
     [Fact]
+    public async Task SendMessage_RecordsATurnMetricWithKindStageAndTokens()
+    {
+        using var workspace = new TempWorkspace();
+        _coordinator.UserTurnReply = "What should the login form do?";
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "It should log a user in", CancellationToken.None);
+
+        using var db = CreateFactory().CreateDbContext();
+        // Two Stage turns happen: StartStageAsync's opening prompt and this message. The opening
+        // prompt carries a composition breakdown; the message turn does not.
+        var stageTurns = db.TurnMetrics.Where(m => m.Kind == TurnKind.Stage).ToList();
+        Assert.Equal(2, stageTurns.Count);
+        Assert.All(stageTurns, metric => Assert.Equal("business-analyst", metric.StageName));
+        Assert.Contains(stageTurns, metric => !string.IsNullOrEmpty(metric.PromptBreakdownJson));
+    }
+
+    [Fact]
+    public async Task Interview_IsRecordedPerTurnAndReplayedToAFreshSession()
+    {
+        using var workspace = new TempWorkspace();
+        _coordinator.UserTurnReply = "What should the login form do?";
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "It should log a user in", CancellationToken.None);
+
+        var interviewPath = ArtifactPaths.InterviewPath(workspace.Path, "feat-001");
+        Assert.True(File.Exists(interviewPath));
+        var log = File.ReadAllText(interviewPath);
+        Assert.Contains("What should the login form do", log);
+        Assert.Contains("It should log a user in", log);
+
+        // Move the BA stage on, then start it again: the run is no longer Active, so a brand-new
+        // session is opened — it must be primed with the interview so far, not start over.
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+        _coordinator.Prompts.Clear();
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var prompt = _coordinator.Prompts.Last();
+        Assert.Contains("Interview so far", prompt);
+        Assert.Contains("It should log a user in", prompt);
+    }
+
+    [Fact]
+    public async Task SendMessage_CorrectionQuotesTheOffendingQuestionsBack()
+    {
+        _coordinator.UserTurnReply = "What should it do? And who is the end user?";
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
+
+        var correction = Assert.Single(_coordinator.Prompts, MultiQuestionDetector.IsCorrectionPrompt);
+        Assert.Contains("What should it do", correction);
+        Assert.Contains("who is the end user", correction);
+    }
+
+    [Fact]
+    public async Task SendMessage_EveryInteractiveTurnRestatesTheSingleQuestionRule()
+    {
+        _coordinator.UserTurnReply = "What should the login form do?";
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
+
+        var userTurn = Assert.Single(_coordinator.Prompts, p => p.StartsWith("We need a login form", StringComparison.Ordinal));
+        Assert.Contains("Ask exactly ONE question", userTurn);
+    }
+
+    [Fact]
     public async Task SendMessage_StubbornMultiQuestion_CapsCorrections()
     {
         _coordinator.UserTurnReply = "Do you want A? Or B? Or C?";
@@ -131,7 +293,7 @@ public class MultiQuestionEnforcementTests : IDisposable
         await engine.SendMessageEnforcingSingleQuestionAsync(featureId, "We need a login form", CancellationToken.None);
 
         Assert.Equal(MultiQuestionDetector.MaxCorrections,
-            _coordinator.Prompts.Count(p => p == MultiQuestionDetector.CorrectionPrompt));
+            _coordinator.Prompts.Count(MultiQuestionDetector.IsCorrectionPrompt));
     }
 
     [Fact]
@@ -201,9 +363,9 @@ internal sealed class PersistingFakeCoordinator : IWorkflowCoordinator
     public Task<string> SetModeAsync(Guid sessionId, string modeId, CancellationToken ct)
         => Task.FromResult(modeId);
 
-    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false)
+    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false, string? displayText = null)
     {
-        var isCorrection = text == MultiQuestionDetector.CorrectionPrompt;
+        var isCorrection = MultiQuestionDetector.IsCorrectionPrompt(text);
         Prompts.Add(text);
 
         var reply = isCorrection

@@ -33,7 +33,7 @@ public sealed class SliceScopeGate : IGate
         var coreFront = CorePaths.Front(manifest);
         var templates = (manifest is null
             ? GateInputs.GetList(request.Inputs, "codePaths")
-            : [manifest.CodePathBack, manifest.CodePathFront]).ToList();
+            : manifest.EffectiveCodePaths).ToList();
         templates.Add(coreBack);
         templates.Add(coreFront);
 

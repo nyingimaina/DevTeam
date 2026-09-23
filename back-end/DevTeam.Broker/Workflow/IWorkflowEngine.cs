@@ -47,4 +47,7 @@ public sealed record StepExecutionResult
     // The role that should act when this specific gate fails — see WorkflowStep.ResponsibleRole.
     // Null means "the role currently running owns this," i.e. today's implicit default.
     public string? ResponsibleRole { get; init; }
+
+    /// <summary>How long the check took, so a slow check is visible after the fact.</summary>
+    public long DurationMs { get; init; }
 }

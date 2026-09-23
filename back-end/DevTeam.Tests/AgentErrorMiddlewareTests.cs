@@ -74,6 +74,25 @@ public class AgentErrorMiddlewareTests
     }
 
     [Fact]
+    public async Task CancelledTurn_IsHandledGracefully_NotEscapedAsAnUnhandledException()
+    {
+        var (ctx, body) = await InvokeAsync(_ => throw new OperationCanceledException("A task was canceled."));
+
+        Assert.Equal(StatusCodes.Status409Conflict, ctx.Response.StatusCode);
+        Assert.Contains("cancel", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("   at ", body); // no stack trace
+        Assert.DoesNotContain("TaskCanceledException", body);
+    }
+
+    [Fact]
+    public async Task TaskCanceledException_IsAlsoHandledGracefully()
+    {
+        var (ctx, _) = await InvokeAsync(_ => throw new TaskCanceledException());
+
+        Assert.Equal(StatusCodes.Status409Conflict, ctx.Response.StatusCode);
+    }
+
+    [Fact]
     public async Task RequestsThatSucceed_PassThroughUntouched()
     {
         var (ctx, body) = await InvokeAsync(async c => { c.Response.StatusCode = 200; await c.Response.WriteAsync("ok"); });

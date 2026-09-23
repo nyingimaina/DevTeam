@@ -127,11 +127,34 @@ export interface StoppedProcessDto {
   name: string;
 }
 
+// One thing the agent did, held in memory for the active turn only (see ActiveTurnTracker).
+export interface TurnActivityEntryDto {
+  at: string;
+  // "tool" | "text" | "thought" | "status"
+  kind: string;
+  label: string;
+  detail?: string | null;
+  status?: string | null;
+}
+
 export interface ActiveTurnInfo {
   sessionId: string;
   acpSessionId: string;
   preview: string;
   startedAt: string;
+  // True when the prompt was composed by DevTeam rather than typed by a person — the preview
+  // is then boilerplate ("You are the developer for feature…"), so it is not a useful label.
+  isPriming?: boolean;
+  // The DevTeamSession id, which is what ReleaseStageRun.acpSessionId actually stores. Use
+  // THIS to correlate the active turn to a stage run — never acpSessionId (the real ACP id).
+  // Optional: older brokers omit it, so the UI falls back to sessionId.
+  stageRunSessionId?: string;
+  // When the agent last produced anything — the honest "is it still working?" signal.
+  lastEventAt?: string | null;
+  // Most recent first-class activity, oldest first. In memory only; empty after a refresh.
+  activity?: TurnActivityEntryDto[] | null;
+  // Prompts queued for the broker's single turn slot, this one included.
+  queuedTurns?: number;
 }
 
 // ─── release types ─────────────────────────────────────────────────────────
@@ -197,6 +220,10 @@ export interface ReleaseStageRunDto {
   lastErrorKind: string;
   lastErrorMessage?: string | null;
   lastErrorAt?: string | null;
+  /** How many times in a row this stage has failed the same checks. */
+  consecutiveFailures?: number;
+  /** True once the same check has failed too many times — stop auto-retrying and ask a person. */
+  autoRetrySuppressed?: boolean;
 }
 
 export interface SpecialistConsultationRecordDto {
@@ -222,6 +249,10 @@ export interface PipelineStageDto {
   signoff?: string | null;
   expectedArtifacts: string[];
   steps: string[];
+  // Plain-language label for each entry in `steps`, same order — what the UI shows. `steps`
+  // stays the stable identifier used for testids/diagnostics. Optional so the UI degrades to
+  // the raw id rather than breaking if the broker predates this field.
+  stepLabels?: string[];
 }
 
 export interface StageArtifactDto {
@@ -264,6 +295,86 @@ export interface RunGatesRepairResultDto {
   outcome: "Passed" | "NeedsYou";
   autoFixAttempts: number;
   problems: GateProblemDto[];
+}
+
+// ─── final checks (readiness) ──────────────────────────────────────────
+// The numbers a run produced — used for the cards and the trend lines.
+export interface ReadinessMetricsDto {
+  testsPassed?: number | null;
+  testsFailed?: number | null;
+  testsSkipped?: number | null;
+  lineCoverage?: number | null;
+  branchCoverage?: number | null;
+  functionCoverage?: number | null;
+}
+
+export interface ReadinessCheckDto {
+  phaseId: string;
+  title: string;
+  status: "Passed" | "Failed" | "Skipped";
+  reason: string;
+  durationMs: number;
+  metrics: ReadinessMetricsDto;
+  rawOutput?: string | null;
+}
+
+export interface ReadinessReportDto {
+  id: string;
+  releaseId?: string | null;
+  featureId?: string | null;
+  scope: string;
+  passed: boolean;
+  startedAt: string;
+  durationMs: number;
+  releaseVersion?: string | null;
+  checks: ReadinessCheckDto[];
+  failedCount: number;
+  skippedCount: number;
+  // Plain language, computed by the broker — safe to show a person as-is.
+  blockerSummary: string;
+}
+
+// One entry in the Checks library: what a check is, why it matters, and how to fix it.
+export interface CheckDefinitionDto {
+  id: string;
+  title: string;
+  category: string;
+  whyItMatters: string;
+  howToFix: string;
+  required: boolean;
+  scope: string;
+  technical: string;
+}
+
+// ─── diagnostics (support hand-off) ────────────────────────────────────────
+export interface DiagnosticsSettingsDto {
+  // True while detailed logging is being captured for a support investigation.
+  verboseLogging: boolean;
+  // Where the log files live on this machine — shown to the user so they can also look.
+  logsDirectory: string;
+}
+
+// One entry in a project's model list. Cost/Smartness are read-only curated estimates, null for
+// a model we have no estimate for (shown as "unknown").
+export interface ModelCandidateDto {
+  id: string;
+  modelId: string;
+  priority: number;
+  enabled: boolean;
+  userAdded: boolean;
+  cooldownUntil?: string | null;
+  lastFailureKind?: string | null;
+  lastFailureReason?: string | null;
+  cost?: number | null;
+  smartness?: number | null;
+  note?: string | null;
+}
+
+export interface NotificationSettingsDto {
+  stageComplete: boolean;
+  needsAttention: boolean;
+  approvalNeeded: boolean;
+  sound: boolean;
 }
 
 export interface ReleaseSignoffDto {
@@ -428,4 +539,106 @@ export interface StagePromptResult {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+}
+
+export type CodeContextState = "None" | "UpToDate" | "Behind" | "Refreshing" | "Unavailable";
+
+export interface CodeContextStatusDto {
+  state: CodeContextState;
+  changesBehind?: number | null;
+  builtAt?: string | null;
+  warnings: string[];
+}
+
+export interface MetricsTotalsDto {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedReadTokens: number;
+  durationMs: number;
+  costAmount?: number | null;
+}
+
+export interface StageMetricsDto {
+  stageName: string;
+  turns: number;
+  attempts: number;
+  totalTokens: number;
+  retryTokens: number;
+  challengeTokens: number;
+  durationMs: number;
+  gateFailures: number;
+}
+
+export interface KindMetricsDto {
+  kind: string;
+  turns: number;
+  totalTokens: number;
+  durationMs: number;
+}
+
+export interface ModelMetricsDto {
+  modelId: string;
+  turns: number;
+  totalTokens: number;
+  cachedReadTokens: number;
+  durationMs: number;
+}
+
+export interface PromptSectionMetricsDto {
+  section: string;
+  totalChars: number;
+  avgChars: number;
+  percentOfPrompt: number;
+}
+
+export interface MetricsFindingDto {
+  id: string;
+  severity: string;
+  title: string;
+  evidence: Record<string, unknown>;
+  suggestedAction: string;
+}
+
+export interface MetricsSummaryDto {
+  schemaVersion: number;
+  generatedAtUtc: string;
+  scope: { workspacePath?: string | null; featureId?: string | null; releaseId?: string | null; days: number };
+  totals: MetricsTotalsDto;
+  perStage: StageMetricsDto[];
+  perKind: KindMetricsDto[];
+  perModel: ModelMetricsDto[];
+  promptSections: PromptSectionMetricsDto[];
+  findings: MetricsFindingDto[];
+  notes: string[];
+}
+
+export interface ProgressCountDto {
+  done: number;
+  total: number;
+}
+
+export interface RequirementProgressDto {
+  requirements: number;
+  code: ProgressCountDto;
+  tests: ProgressCountDto;
+}
+
+export type NegotiationPointStatus = "Open" | "Resolved" | "Escalated";
+export type NegotiationResponseKind = "None" | "Addressed" | "Disputed" | "Blocked";
+
+export interface NegotiationPointDto {
+  id: string;
+  target: string;
+  summary: string;
+  expected?: string | null;
+  round: number;
+  openedBy?: string | null;
+  pushedBackTo?: string | null;
+  status: NegotiationPointStatus;
+  responseKind: NegotiationResponseKind;
+  responseText?: string | null;
+  requirementRef?: string | null;
+  createdAt: string;
 }

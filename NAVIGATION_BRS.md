@@ -21,9 +21,9 @@
 | 3 Make stage components importable (added `export`, no code moved) | ✅ done |
 | 4 `useHashRoute` + `Breadcrumb` (+ `crumbsFor`) | ✅ done |
 | 5 `FeatureView` (live / paused / done / not-started / not-found; read-only; resume) | ✅ done |
-| 6 `ReleaseFolder` + `NewFeatureTile` | ⏳ next |
-| 7 `ProjectHome` + mount in `App.tsx` | ⏳ |
-| 8 Attention badges UI, shipped section, polish, a11y | ⏳ |
+| 6 `ReleaseFolder` + `NewFeatureTile` | ✅ done |
+| 7 `ProjectHome` + mount in `App.tsx` | ✅ done |
+| 8 Attention badges UI, shipped section, polish, a11y | ✅ done |
 
 ---
 

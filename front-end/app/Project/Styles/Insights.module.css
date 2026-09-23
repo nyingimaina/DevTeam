@@ -1,0 +1,129 @@
+.view {
+  padding: 1rem 1.25rem;
+  max-width: 1000px;
+}
+
+.heading {
+  margin: 0 0 0.25rem;
+}
+
+.subheading {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 1rem;
+}
+
+.totals {
+  color: var(--text-muted, #6b6b75);
+  margin: 0;
+}
+
+.empty {
+  padding: 2rem;
+  color: var(--text-muted, #6b6b75);
+}
+
+.ok {
+  color: var(--text-muted, #6b6b75);
+}
+
+.findings {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.finding {
+  border: 1px solid var(--surface-hover-strong, #e2e2e6);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.severity {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 6px;
+  margin-right: 0.5rem;
+}
+
+.high {
+  background: #ffe0e0;
+  color: #a11;
+}
+
+.medium {
+  background: #fff3d6;
+  color: #8a5a00;
+}
+
+.low {
+  background: #eef1f5;
+  color: #556;
+}
+
+.findingTitle {
+  font-weight: 600;
+}
+
+.action {
+  margin-top: 0.3rem;
+  color: var(--text-muted, #6b6b75);
+  font-size: 0.9rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--surface-hover-strong, #eee);
+}
+
+.sections {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.section {
+  display: grid;
+  grid-template-columns: 7rem 1fr 3rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sectionLabel {
+  font-size: 0.85rem;
+}
+
+.bar {
+  height: 8px;
+  background: var(--surface-hover-strong, #eee);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  background: var(--accent, #3b82f6);
+}
+
+.sectionPct {
+  text-align: right;
+  font-size: 0.85rem;
+  color: var(--text-muted, #6b6b75);
+}

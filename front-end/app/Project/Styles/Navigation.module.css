@@ -52,3 +52,219 @@
 .notFound {
   padding: 1rem;
 }
+
+/* ProjectHome — level 0 */
+
+.homeHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+
+.homeTitle {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.homeActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.homeCreateForm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.homeLoading {
+  padding: 1rem 0;
+  opacity: 0.6;
+}
+
+.homeEmpty {
+  padding: 1rem 0;
+}
+
+.homeError {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid #dc2626;
+  border-radius: 4px;
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.shipped {
+  margin-top: 1.5rem;
+}
+
+.shippedToggle {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Cards: open releases at home, feature cards in a folder */
+
+.cardGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.homeFolder,
+.featureCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.05);
+  text-decoration: none;
+  color: inherit;
+}
+
+.homeFolder:hover,
+.featureCard:hover {
+  border-color: rgba(127, 127, 127, 0.5);
+}
+
+.homeFolderKind {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.homeFolderTitle {
+  font-weight: 600;
+}
+
+.homeFolderState,
+.homeFolderProgress,
+.featureState,
+.featureCardProgress,
+.featureCardActivity {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.homeFolderActivity,
+.featureCardActivity {
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+
+.attentionBadge {
+  align-self: flex-start;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: #fff;
+  background: #d97706;
+}
+
+/* ReleaseFolder — level 1 */
+
+.folderHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+
+.folderTitle {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.folderState {
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+}
+
+.folderSummary {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.folderEmpty {
+  padding: 0.5rem 0;
+  opacity: 0.7;
+}
+
+.featureCardName {
+  font-weight: 600;
+}
+
+.featureActive {
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  color: #fff;
+  background: #16a34a;
+}
+
+/* NewFeatureTile */
+
+.newTile {
+  margin: 0 0 1rem;
+}
+
+.newTileFields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.newTileInput {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+.newTileInput:focus {
+  outline: 2px solid rgba(63, 131, 248, 0.6);
+  outline-offset: 1px;
+}
+
+.newTileWarning {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.newTileActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.errorInline {
+  margin: 0 0 0.5rem;
+  color: #dc2626;
+}

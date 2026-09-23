@@ -35,15 +35,28 @@ public sealed class ScaffoldSpecsGate : IGate
         }
 
         var title = GateInputs.Get(request.Inputs, "title", featureKey);
-        var manifest = new SliceManifest(
-            featureKey,
-            title,
-            GateInputs.Get(request.Inputs, "codePathBack", "back-end/**/Features/<F>"),
-            GateInputs.Get(request.Inputs, "codePathFront", "front-end/app/<F>"),
-            GateInputs.GetList(request.Inputs, "sharedFiles"),
-            GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"),
-            GateInputs.Get(request.Inputs, "corePathBack", CorePaths.DefaultBack),
-            GateInputs.Get(request.Inputs, "corePathFront", CorePaths.DefaultFront));
+        // An app that doesn't split into backend/frontend (single WPF/console/library project) —
+        // or a business-analyst conversation that agreed on a different hierarchy — supplies its
+        // own free-form list instead of the classic two-slot split.
+        var codePaths = GateInputs.GetList(request.Inputs, "codePaths");
+        var manifest = codePaths.Count > 0
+            ? new SliceManifest(
+                featureKey,
+                title,
+                codePaths,
+                GateInputs.GetList(request.Inputs, "sharedFiles"),
+                GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"),
+                GateInputs.Get(request.Inputs, "corePathBack", CorePaths.DefaultBack),
+                GateInputs.Get(request.Inputs, "corePathFront", CorePaths.DefaultFront))
+            : new SliceManifest(
+                featureKey,
+                title,
+                GateInputs.Get(request.Inputs, "codePathBack", "back-end/**/Features/<F>"),
+                GateInputs.Get(request.Inputs, "codePathFront", "front-end/app/<F>"),
+                GateInputs.GetList(request.Inputs, "sharedFiles"),
+                GateInputs.Get(request.Inputs, "testCommand", "dotnet test DevTeam.slnx"),
+                GateInputs.Get(request.Inputs, "corePathBack", CorePaths.DefaultBack),
+                GateInputs.Get(request.Inputs, "corePathFront", CorePaths.DefaultFront));
 
         cancellationToken.ThrowIfCancellationRequested();
         SliceManifestIO.Write(manifestPath, manifest);

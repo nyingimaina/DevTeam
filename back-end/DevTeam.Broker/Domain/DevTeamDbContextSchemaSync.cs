@@ -55,10 +55,28 @@ public static class DevTeamDbContextSchemaSync
         foreach (var (name, definition) in ExtractColumnDefinitions(createTableStatement))
         {
             if (existingColumns.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
-            db.Database.ExecuteSqlRaw($"ALTER TABLE \"{tableName}\" ADD COLUMN {definition}");
+            db.Database.ExecuteSqlRaw($"ALTER TABLE \"{tableName}\" ADD COLUMN {AlterableDefinition(definition)}");
         }
     }
 #pragma warning restore EF1002
+
+    // SQLite refuses `ALTER TABLE ... ADD COLUMN` for a NOT NULL column that has no DEFAULT, because
+    // the rows already in the table would have nothing to put there. EF's CREATE TABLE DDL onlyg
+    // carries the NOT NULL constraint (fine for a fresh table), so give the new column a
+    // type-appropriate default when it needs one. New rows still set a real value — this only
+    // backfills the rows that already existed.
+    private static string AlterableDefinition(string definition)
+    {
+        if (!definition.Contains("NOT NULL", StringComparison.OrdinalIgnoreCase)
+            || definition.Contains("DEFAULT", StringComparison.OrdinalIgnoreCase))
+            return definition;
+
+        var upper = definition.ToUpperInvariant();
+        var fallback = upper.Contains("BLOB") ? "X''"
+            : upper.Contains("INT") || upper.Contains("REAL") || upper.Contains("NUMERIC") || upper.Contains("BOOL") ? "0"
+            : "''";
+        return definition + " DEFAULT " + fallback;
+    }
 
     private static IEnumerable<(string Name, string Definition)> ExtractColumnDefinitions(string createTableStatement)
     {

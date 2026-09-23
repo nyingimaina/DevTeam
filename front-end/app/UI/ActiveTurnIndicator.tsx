@@ -49,9 +49,14 @@ export default function ActiveTurnIndicator({ api }: IActiveTurnIndicatorProps) 
 
   if (!turn) return null;
 
+  // A composed prompt (isPriming) reads as boilerplate ("You are the developer for feature…"),
+  // so it is not a useful label — say what it is instead. A message the person actually typed
+  // is worth showing back to them verbatim.
+  const label = turn.isPriming ? "An agent step is running" : turn.preview;
+
   return (
     <div className={styles.indicator} role="status">
-      <span className={styles.preview} title={turn.preview}>{turn.preview}</span>
+      <span className={styles.preview} title={turn.preview}>{label}</span>
       <span className={styles.elapsed}>{formatElapsed(turn.startedAt)}</span>
       <button type="button" className={styles.cancel} onClick={() => void handleCancel()} disabled={cancelling}>
         {cancelling ? "Cancelling…" : "Cancel"}

@@ -1,0 +1,183 @@
+.view {
+  padding: 0.5rem 0.25rem 2rem;
+  max-width: 860px;
+}
+
+.title {
+  font-size: 1.05rem;
+  color: var(--text-heading);
+  margin-bottom: 0.3rem;
+}
+
+.intro {
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+}
+
+.error {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  margin-bottom: 0.8rem;
+}
+
+.coolingNotice {
+  background: rgba(202, 138, 4, 0.12);
+  border-left: 3px solid #ca8a04;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  margin-bottom: 0.8rem;
+  color: var(--text-body);
+  font-size: 0.85rem;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.list {
+  list-style: none;
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 1.1rem;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.rank {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+}
+
+.modelId {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--text-body);
+  word-break: break-all;
+}
+
+.meta {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+}
+
+.enabled {
+  color: #16a34a;
+}
+
+.disabled {
+  color: var(--text-muted);
+}
+
+.cooling {
+  color: #ca8a04;
+}
+
+.stats {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  margin-top: 0.2rem;
+}
+
+.unknown {
+  font-style: italic;
+}
+
+.actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.iconButton {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--text-body);
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.secondary {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  color: var(--text-body);
+  font-size: 0.8rem;
+}
+
+.secondary:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.iconButton:disabled,
+.secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.addSection {
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+
+.addLabel {
+  display: block;
+  color: var(--text-body);
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.addRow {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  padding: 0.4rem 0.6rem;
+  color: var(--text-body);
+}
+
+.primary {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 6px;
+  padding: 0.45rem 0.85rem;
+  font-weight: 600;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

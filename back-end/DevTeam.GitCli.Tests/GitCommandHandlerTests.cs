@@ -48,6 +48,27 @@ public class GitCommandHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task RevParse_ReturnsTheHeadCommitHash()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+
+        var result = await _handler.HandleAsync(new GitRequest("rev-parse", _tempDir, BranchName: "HEAD"));
+
+        Assert.True(result.Success);
+        Assert.Matches("^[0-9a-f]{40}$", result.CommitSha!);
+    }
+
+    [Fact]
+    public async Task RevParse_UnknownRef_Fails()
+    {
+        await _handler.HandleAsync(new GitRequest("init", _tempDir));
+
+        var result = await _handler.HandleAsync(new GitRequest("rev-parse", _tempDir, BranchName: "no-such-ref"));
+
+        Assert.False(result.Success);
+    }
+
+    [Fact]
     public async Task Init_OnExistingRepo_ReturnsOk()
     {
         await _handler.HandleAsync(new GitRequest("init", _tempDir));

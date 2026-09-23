@@ -67,6 +67,9 @@ describe("errorKindLabel", () => {
     expect(errorKindLabel("Disconnected")).toMatch(/disconnect|process/i);
     expect(errorKindLabel("ProviderRejected")).toMatch(/provider|rejected/i);
     expect(errorKindLabel("TimedOut")).toMatch(/time/i);
+    expect(errorKindLabel("Stalled")).toMatch(/stopped responding/i);
+    expect(errorKindLabel("ProviderUnavailable")).toMatch(/AI service refused/i);
+    expect(errorKindLabel("ProviderUnavailable")).toMatch(/different AI model/i);
   });
 
   it("returns empty string for None or unknown", () => {

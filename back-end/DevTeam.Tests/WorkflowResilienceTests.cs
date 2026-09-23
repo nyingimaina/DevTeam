@@ -52,12 +52,13 @@ public class WorkflowResilienceTests : IDisposable
     private static GateResult Pass(string evidence) => new(true, "OK", evidence);
     private static GateResult Fail(string evidence) => new(false, "failed", evidence);
 
-    // scaffold_specs, context_bundle (start-stage), then gherkin FAIL, render (pass), then a
-    // re-run of gherkin+render PASS — the classic "gates failed, artifact fixed, gates re-pass" BA story.
+    // scaffold_specs, core_scaffold, repo_hygiene, code_map, context_bundle (start-stage), then
+    // gherkin FAIL, render (pass), then a re-run of gherkin+render PASS — the classic "gates
+    // failed, artifact fixed, gates re-pass" BA story.
     private void SeedBaGateSequence_FailThenPass()
     {
         _gateRunner.Results.AddRange([
-            Pass("scaffold"), Pass("context"),
+            Pass("scaffold"), Pass("core"), Pass("hygiene"), Pass("map"), Pass("context"),
             Fail("REQ-004 missing Given"), Pass("handoff"),
             Pass("gherkin fixed"), Pass("handoff"),
         ]);
@@ -104,13 +105,15 @@ public class WorkflowResilienceTests : IDisposable
         var run = result.StageRuns.Single(sr => sr.Id == runId);
         Assert.Equal(ReleaseStageStatus.BlockedSignoff, run.Status);
         Assert.Equal(1, run.Attempt);
-        Assert.Equal(2, run.QuestionCount);
+        // Exactly one human message was sent (DriveBaToBlockedGateAsync); the opening prompt
+        // isn't itself a message.
+        Assert.Equal(1, run.QuestionCount);
     }
 
     [Fact]
     public async Task RunGates_OnEscalatedRun_RerunsSameRun()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Pass("gherkin")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Pass("gherkin")]);
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
@@ -130,7 +133,7 @@ public class WorkflowResilienceTests : IDisposable
     [Fact]
     public async Task RunGates_WhenAnotherRunIsGatesRunning_ThrowsAlreadyRunning()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Pass("gherkin")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Pass("gherkin")]);
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
@@ -154,9 +157,12 @@ public class WorkflowResilienceTests : IDisposable
 
         var run = result.StageRuns.Single(sr => sr.Id == runId);
         Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.ScaffoldSpecs));
+        Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.CoreScaffold));
         Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.ContextBundle));
-        Assert.Equal(2, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.GherkinValidator));
-        Assert.Equal(2, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.RenderHandoff));
+        // The re-run sweeps the previous attempt's exit checks and records fresh ones, so each
+        // exit check appears exactly once — never an accumulating history on the same run row.
+        Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.GherkinValidator));
+        Assert.Equal(1, run.GateChecks.Count(gc => gc.Name == BuiltinRegistry.RenderHandoff));
         Assert.All(run.GateChecks, gc => Assert.True(gc.Passed));
     }
 
@@ -180,7 +186,7 @@ public class WorkflowResilienceTests : IDisposable
     [Fact]
     public async Task RunGates_WritesStepLedgerCheckpointIncludingFailures()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Fail("REQ-004 missing Given")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("hygiene"), Pass("map"), Pass("context"), Fail("REQ-004 missing Given")]);
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
@@ -202,7 +208,7 @@ public class WorkflowResilienceTests : IDisposable
     [Fact]
     public async Task RetryStage_OnBlockedGate_SupersedesOldRunAndCreatesFreshActiveAttempt()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Fail("REQ-004 missing Given")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("hygiene"), Pass("map"), Pass("context"), Fail("REQ-004 missing Given")]);
         var (engine, featureId, _) = await DriveBaToBlockedGateAsync();
         var promptsBefore = _coordinator.Prompts.Count;
 
@@ -224,7 +230,7 @@ public class WorkflowResilienceTests : IDisposable
     [Fact]
     public async Task RetryStage_OnGatesRunning_SupersedesAndCreatesFreshActiveAttempt()
     {
-        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("context"), Pass("gherkin")]);
+        _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Pass("gherkin")]);
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
@@ -257,13 +263,14 @@ public class WorkflowResilienceTests : IDisposable
             gated.StageRuns.Single(sr => sr.StageName == "business-analyst").Status);
         var afterSignoff = await engine.SignoffAsync(featureId, "business-analyst", "pm", null, CancellationToken.None);
         Assert.Equal(1, afterSignoff.FlowPosition!.CurrentStageIndex);
-        Assert.True(afterSignoff.Signoffs.Single(s => s.StageName == Signoffs.RequirementsApproval).Approved);
+        // A signoff row is keyed by the stage it gates, not by the signoff id.
+        Assert.True(afterSignoff.Signoffs.Single(s => s.StageName == "business-analyst").Approved);
 
         var result = await engine.RetryStageAsync(featureId, targetStageName: "business-analyst", CancellationToken.None);
 
         Assert.Equal(0, result.FlowPosition!.CurrentStageIndex);
         Assert.Equal("business-analyst", result.FlowPosition.CurrentStageName);
-        Assert.False(result.Signoffs.Single(s => s.StageName == Signoffs.RequirementsApproval).Approved);
+        Assert.False(result.Signoffs.Single(s => s.StageName == "business-analyst").Approved);
         var runs = result.StageRuns.Where(sr => sr.StageName == "business-analyst").ToList();
         Assert.Equal(2, runs.Count);
         Assert.Contains(runs, r => r.Status == ReleaseStageStatus.Stale);
@@ -275,7 +282,7 @@ public class WorkflowResilienceTests : IDisposable
     [Fact]
     public async Task RetryStage_WhenAllStagesDone_RewindsToLastStage()
     {
-        var pipeline = new WorkflowDefinitionLoader().Load(@"C:\work\proj");
+        var pipeline = new WorkflowDefinitionLoader().LoadDefault();
         var lastRole = pipeline.Pipeline[^1];
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
@@ -286,9 +293,12 @@ public class WorkflowResilienceTests : IDisposable
             var feature = db.ReleaseFeatures.Include(f => f.FlowPosition).Single(f => f.Id == featureId);
             feature.FlowPosition!.CurrentStageIndex = pipeline.Pipeline.Count;
             feature.FlowPosition.CurrentStageName = "done";
-            feature.StageRuns.Add(new ReleaseStageRun
+            // Add through the DbSet, not the navigation: a fresh run with a non-default Guid key
+            // discovered via a navigation reads as Modified and trips the concurrency guard
+            // (see WorkflowEngine.RetryStageAsync).
+            db.ReleaseStageRuns.Add(new ReleaseStageRun
             {
-                Feature = feature,
+                ReleaseFeatureId = featureId,
                 StageName = lastRole.Name,
                 Status = ReleaseStageStatus.Complete,
                 Phase = StagePhase.Signoff,

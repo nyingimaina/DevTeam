@@ -20,6 +20,8 @@ public interface IGitService
     Task<GitResponse> BranchAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> CheckoutAsync(string workspacePath, string branchName, CancellationToken ct = default);
     Task<GitResponse> LogAsync(string workspacePath, CancellationToken ct = default);
+    // Resolves a ref (branch name, tag, or "HEAD") to its full commit hash.
+    Task<GitResponse> HeadCommitAsync(string workspacePath, string reference, CancellationToken ct = default);
     Task<GitResponse> PushAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default);
     Task<GitResponse> DeleteBranchAsync(string workspacePath, string branchName, string? authToken, CancellationToken ct = default);
     Task<GitResponse> HasRemoteAsync(string workspacePath, CancellationToken ct = default);
@@ -109,6 +111,9 @@ public sealed class GitService : IGitService, IDisposable
 
     public async Task<GitResponse> StashDropAsync(string workspacePath, string tag, CancellationToken ct = default)
         => await SendAsync(new GitRequest("stash-drop", workspacePath, Message: tag), ct);
+
+    public async Task<GitResponse> HeadCommitAsync(string workspacePath, string reference, CancellationToken ct = default)
+        => await SendAsync(new GitRequest("rev-parse", workspacePath, BranchName: reference), ct);
 
     private async Task<GitResponse> SendAsync(GitRequest request, CancellationToken ct)
     {
@@ -232,7 +237,8 @@ public record GitResponse(
     string? RemoteUrl = null,
     string[]? ChangedFiles = null,
     string[]? StashEntries = null,
-    string[]? ConflictedFiles = null);
+    string[]? ConflictedFiles = null,
+    string? CommitSha = null);
 
 public record GitCommit(
     string Hash,

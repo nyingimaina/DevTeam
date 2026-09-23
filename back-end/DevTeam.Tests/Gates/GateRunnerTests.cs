@@ -1,20 +1,23 @@
 using DevTeam.Broker.Gates;
 
 using DevTeam.Broker.Workflow;
+using DevTeam.Tests.Gates.Readiness;
 
 namespace DevTeam.Tests.Gates;
 
 public class GateRunnerTests
 {
     private static GateRunner CreateRunner()
-        => new(BuiltinGateRegistry.Create(new FakeProcessRunner(_ =>
-            new ProcessRunResult(0, string.Empty, string.Empty, false, TimeSpan.Zero))));
+        => new(BuiltinGateRegistry.Create(
+            new FakeProcessRunner(_ => new ProcessRunResult(0, string.Empty, string.Empty, false, TimeSpan.Zero)),
+            new FakeReadinessChecker()));
 
     [Fact]
     public void Registry_CoversEveryKnownBuiltinExactlyOnce()
     {
-        var gates = BuiltinGateRegistry.Create(new FakeProcessRunner(_ =>
-            new ProcessRunResult(0, string.Empty, string.Empty, false, TimeSpan.Zero)));
+        var gates = BuiltinGateRegistry.Create(
+            new FakeProcessRunner(_ => new ProcessRunResult(0, string.Empty, string.Empty, false, TimeSpan.Zero)),
+            new FakeReadinessChecker());
 
         var gateNames = gates.Select(g => g.Name).ToHashSet();
         Assert.Equal(BuiltinRegistry.All, gateNames);

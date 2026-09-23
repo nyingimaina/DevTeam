@@ -2,6 +2,7 @@ const STAGE_LABELS: Record<string, string> = {
   "business-analyst": "Business Analyst",
   developer: "Developer",
   qa: "QA",
+  verification: "Final checks",
 };
 
 // The BA's output is a named document (Business Requirements Specification) that
@@ -42,12 +43,15 @@ const ERROR_KIND_LABELS: Record<string, string> = {
   Disconnected: "The agent process disconnected unexpectedly.",
   ProviderRejected: "The agent's model provider rejected the request — check its configuration.",
   TimedOut: "The agent didn't respond in time.",
+  Stalled: "The agent stopped responding — it produced nothing for minutes.",
+  ProviderUnavailable: "The AI service refused the request — it may be rate-limiting this model or briefly unavailable. Try again, or pick a different AI model.",
 };
 
 const WHATS_NEXT: Record<string, string> = {
   "business-analyst": "Answer the agent's prompts one at a time. Type DONE when the requirements are settled.",
   developer: "No chat needed — watch the agent work the workspace. It runs the gates itself when done.",
   qa: "Runs automatically. Reviews findings appear here once the QA agent finishes.",
+  verification: "Runs automatically. Checks the project builds, its tests pass, and the house rules are met.",
 };
 
 export function stageLabel(name: string): string {

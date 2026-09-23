@@ -3,7 +3,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using DevTeam.Broker;
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Gates;
+using DevTeam.Broker.Gates.Readiness;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Notifications;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using DevTeam.Broker.Workflow;
@@ -779,7 +782,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
         var pipeline = await client.GetFromJsonAsync<PipelineStageDto[]>($"/api/features/{release!.CurrentFeatureId}/pipeline", JsonOptions);
         Assert.NotNull(pipeline);
-        Assert.Equal(3, pipeline!.Length);
+        Assert.Equal(4, pipeline!.Length);
         Assert.Equal("business-analyst", pipeline[0].Name);
         Assert.True(pipeline[0].UserInputRequired);
         Assert.Equal("requirements-approval", pipeline[0].Signoff);
@@ -789,6 +792,10 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         Assert.Equal("qa", pipeline[2].Name);
         Assert.False(pipeline[2].UserInputRequired);
         Assert.Equal("release-approval", pipeline[2].Signoff);
+        // The final, automatic stage carries no signoff and needs no user input.
+        Assert.Equal("verification", pipeline[3].Name);
+        Assert.False(pipeline[3].UserInputRequired);
+        Assert.Null(pipeline[3].Signoff);
     }
 
     [Fact]
@@ -1010,6 +1017,62 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         Assert.Equal(HttpStatusCode.NotFound, noRelease.StatusCode);
     }
 
+    /// <summary>
+    /// Unlike push-back (only allowed to an earlier stage), retry-stage can re-open the CURRENT
+    /// stage — the escape hatch for a stuck/orphaned agent session (e.g. its ACP session became
+    /// stale after a broker restart) where nothing has failed a gate, so there is nothing to push
+    /// back from, but the live attempt will never produce another message.
+    /// </summary>
+    [Fact]
+    public async Task RetryStage_OnCurrentStage_SupersedesTheStuckAttemptWithAFreshOne()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-retry-001", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+        Assert.NotNull(release);
+        var featureId = release!.CurrentFeatureId!.Value;
+
+        var started = await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { });
+        started.EnsureSuccessStatusCode();
+        var firstRun = await started.Content.ReadFromJsonAsync<ReleaseStageRun>(JsonOptions);
+        Assert.NotNull(firstRun);
+        Assert.Equal(1, firstRun!.Attempt);
+
+        var retried = await client.PostAsJsonAsync($"/api/features/{featureId}/retry-stage", new { });
+        retried.EnsureSuccessStatusCode();
+        var afterRetry = await retried.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+        Assert.NotNull(afterRetry);
+
+        var feature = afterRetry!.Features.Single(f => f.Id == featureId);
+        Assert.Equal("business-analyst", feature.FlowPosition!.CurrentStageName);
+        var runs = feature.StageRuns.Where(sr => sr.StageName == "business-analyst").OrderBy(sr => sr.Attempt).ToList();
+        Assert.Equal(2, runs.Count);
+        Assert.Equal(ReleaseStageStatus.Stale, runs[0].Status);
+        Assert.Equal(2, runs[1].Attempt);
+        Assert.Equal(ReleaseStageStatus.Active, runs[1].Status);
+    }
+
+    [Fact]
+    public async Task RetryStage_Validation_ReturnsExpectedStatusCodes()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-retry-002", workspacePath = @"C:\work\api-test" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+        Assert.NotNull(release);
+        var featureId = release!.CurrentFeatureId;
+
+        var unknown = await client.PostAsJsonAsync($"/api/features/{featureId}/retry-stage",
+            new { targetStageName = "nobody" });
+        Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
+
+        var noRelease = await client.PostAsJsonAsync($"/api/features/{Guid.NewGuid()}/retry-stage", new { });
+        Assert.Equal(HttpStatusCode.NotFound, noRelease.StatusCode);
+    }
+
     /// <summary>Profile tests share one DB across the whole test class (see AppFactory) — clear
     /// existing rows first so "first profile becomes default"-style assertions are deterministic
     /// regardless of what other tests in this class created earlier.</summary>
@@ -1144,9 +1207,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         {
             var loaded = await client.GetFromJsonAsync<PipelineEditorDto>(
                 $"/api/workspace/pipeline?workspacePath={Uri.EscapeDataString(workspace)}", JsonOptions);
-            Assert.Equal(["business-analyst", "developer", "qa"], loaded!.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["business-analyst", "developer", "qa", "verification"], loaded!.Roles.Select(r => r.Name).ToArray());
 
-            var reordered = new[] { loaded.Roles[2], loaded.Roles[1], loaded.Roles[0] };
+            var reordered = loaded.Roles.AsEnumerable().Reverse().ToArray();
             var putResponse = await client.PutAsJsonAsync("/api/workspace/pipeline", new
             {
                 workspacePath = workspace,
@@ -1155,11 +1218,11 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
             putResponse.EnsureSuccessStatusCode();
 
             var afterPut = await putResponse.Content.ReadFromJsonAsync<PipelineEditorDto>(JsonOptions);
-            Assert.Equal(["qa", "developer", "business-analyst"], afterPut!.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["verification", "qa", "developer", "business-analyst"], afterPut!.Roles.Select(r => r.Name).ToArray());
 
             var reGet = await client.GetFromJsonAsync<PipelineEditorDto>(
                 $"/api/workspace/pipeline?workspacePath={Uri.EscapeDataString(workspace)}", JsonOptions);
-            Assert.Equal(["qa", "developer", "business-analyst"], reGet!.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["verification", "qa", "developer", "business-analyst"], reGet!.Roles.Select(r => r.Name).ToArray());
         }
         finally
         {
@@ -1263,6 +1326,19 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         public FakeAgentSpoke AgentSpoke { get; } = new();
         public FakeProcessLauncher ProcessLauncher { get; } = new();
 
+        /// <summary>
+        /// The strict checks are replaced with a controllable stub so API tests never shell out
+        /// to dotnet/npx; tests set <see cref="ControllableReadinessChecker.Passed"/> to drive
+        /// the ship gate.
+        /// </summary>
+        public ControllableReadinessChecker ReadinessChecker { get; } = new();
+
+        /// <summary>
+        /// Desktop notifications are stubbed so tests never spawn a real toast helper; the
+        /// Support tab's "send a test notification" is asserted against this.
+        /// </summary>
+        public ControllableNotifier Notifier { get; } = new();
+
         public AppFactory()
         {
             using var db = new DevTeamDbContext(new DbContextOptionsBuilder<DevTeamDbContext>()
@@ -1291,7 +1367,48 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
                 services.RemoveAll<IProcessLauncher>();
                 services.AddSingleton<IProcessLauncher>(ProcessLauncher);
+
+                services.RemoveAll<IReadinessChecker>();
+                services.AddSingleton<IReadinessChecker>(ReadinessChecker);
+
+                services.RemoveAll<IPlatformNotifier>();
+                services.AddSingleton<IPlatformNotifier>(Notifier);
             });
+        }
+    }
+
+    /// <summary>Captures notifications instead of raising real toasts — see AppFactory.</summary>
+    public sealed class ControllableNotifier : IPlatformNotifier
+    {
+        public List<NotificationRequest> Requests { get; } = [];
+
+        public Task NotifyAsync(NotificationRequest request, CancellationToken ct)
+        {
+            Requests.Add(request);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>A readiness checker whose verdict the test controls — see AppFactory.</summary>
+    public sealed class ControllableReadinessChecker : IReadinessChecker
+    {
+        public bool Passed { get; set; } = true;
+
+        public int CallCount { get; private set; }
+
+        public Task<ReadinessReport> CheckAsync(
+            string workspacePath, ReadinessScope scope, string? featureKey, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            var checks = new List<ReadinessPhaseResult>
+            {
+                new("backend-build", "The backend project builds",
+                    Passed ? ReadinessCheckStatus.Passed : ReadinessCheckStatus.Failed,
+                    Passed ? "Passed." : "Stopped with an error (exit code 1).",
+                    12, ReadinessMetrics.Empty, "sample output"),
+            };
+            return Task.FromResult(new ReadinessReport(
+                workspacePath, scope, featureKey, Passed, DateTimeOffset.UtcNow, 12, checks));
         }
     }
 

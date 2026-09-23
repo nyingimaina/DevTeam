@@ -1,7 +1,14 @@
+using DevTeam.Broker.Context;
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Diagnostics;
+using DevTeam.Broker.Metrics;
+using DevTeam.Broker.Gates.Readiness;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Models;
+using DevTeam.Broker.Notifications;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
+using DevTeam.Shared;
 using Microsoft.EntityFrameworkCore;
 
 namespace DevTeam.Broker;
@@ -62,8 +69,21 @@ public static class ApiEndpoints
             if (string.IsNullOrWhiteSpace(request.SourceBranch))
                 return Results.BadRequest("SourceBranch is required.");
 
+            var target = request.TargetBranch ?? "develop";
+            if (ProtectedBranches.Contains(target))
+            {
+                // Protected branches are only mergeable by a branch that passed the strict
+                // checks and hasn't moved since — this is what makes the gate unbypassable
+                // rather than advisory.
+                var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
+                if (!await gate.HasValidAttestationAsync(request.WorkspacePath, request.SourceBranch, ctx.RequestAborted))
+                    return Results.Conflict(
+                        $"'{ProtectedBranches.Display}' is protected: '{request.SourceBranch}' must pass the final checks " +
+                        "(with no new commits afterwards) before it can be merged.");
+            }
+
             var git = ctx.RequestServices.GetRequiredService<IGitService>();
-            var result = await git.MergeAsync(request.WorkspacePath, request.SourceBranch, request.TargetBranch ?? "develop", ctx.RequestAborted);
+            var result = await git.MergeAsync(request.WorkspacePath, request.SourceBranch, target, ctx.RequestAborted);
             return result.Success ? Results.Ok(result) : Results.BadRequest(result.Message);
         });
 
@@ -493,6 +513,22 @@ public static class ApiEndpoints
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
+        // Unlike push-back (only allowed to an earlier stage), this can re-open the CURRENT
+        // stage — the escape hatch when a stage's live attempt is stuck (e.g. its agent session
+        // went stale after a broker restart) but no gate has failed, so there is nothing to push
+        // back from.
+        app.MapPost("/api/features/{featureId:guid}/retry-stage", async (Guid featureId, RetryStageRequest request, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.RetryStageAsync(featureId, request.TargetStageName, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         app.MapGet("/api/features/{featureId:guid}/pipeline", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
@@ -642,13 +678,58 @@ public static class ApiEndpoints
         app.MapPost("/api/releases/{releaseId:guid}/finalize", async (Guid releaseId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
             try
             {
+                // Hard ship gate: the strict checks must pass — pinned to this exact commit —
+                // before the release branch may be merged into a protected branch.
+                var report = await gate.CheckReleaseAsync(releaseId, ctx.RequestAborted);
+                if (!report.Passed)
+                    return Results.Conflict(report.BlockerSummary);
+
                 var release = await engine.FinalizeReleaseAsync(releaseId, ctx.RequestAborted);
                 return Results.Ok(release);
             }
             catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
+        // Runs the strict checks for a release without shipping it — lets the user see the
+        // result (and the Checks library populate) before they commit to finalizing.
+        app.MapPost("/api/releases/{releaseId:guid}/readiness", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
+            try
+            {
+                return Results.Ok(await gate.CheckReleaseAsync(releaseId, ctx.RequestAborted));
+            }
+            catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
+        });
+
+        app.MapGet("/api/releases/{releaseId:guid}/readiness", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
+            var latest = await gate.GetLatestAsync(releaseId, ctx.RequestAborted);
+            return latest is null ? Results.NotFound("No final checks have run for this release yet.") : Results.Ok(latest);
+        });
+
+        // The Checks library: what DevTeam will check in this workspace, described in plain
+        // language (title / why it matters / how to fix), plus the technical command for the
+        // "show details" disclosure.
+        app.MapGet("/api/checks", (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var profile = ReadinessProfileLoader.Load(workspacePath);
+            return Results.Ok(CheckCatalog.Describe(profile.Phases));
+        });
+
+        // Oldest-first history of a release's checks — the source for the trend line.
+        app.MapGet("/api/releases/{releaseId:guid}/readiness/history", async (Guid releaseId, HttpContext ctx) =>
+        {
+            var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
+            return Results.Ok(await gate.GetHistoryAsync(releaseId, ctx.RequestAborted));
         });
 
         // ─── hotfix endpoints (Part 7F) ─────────────────────────────────────
@@ -838,5 +919,280 @@ public static class ApiEndpoints
             var cancelled = await coordinator.CancelCurrentTurnAsync(ctx.RequestAborted);
             return cancelled ? Results.Ok() : Results.NotFound();
         });
+
+        // ─── diagnostics (for a support hand-off) ──────────────────────────────
+        // A novice turns on detailed logging, reproduces the problem, then collects one file
+        // for a specialist. Everything here is deliberately plain and needs no technical skill.
+        app.MapGet("/api/diagnostics/settings", (HttpContext ctx) =>
+        {
+            var settings = ctx.RequestServices.GetRequiredService<DiagnosticsSettings>();
+            var identity = ctx.RequestServices.GetRequiredService<RuntimeIdentity>();
+            return Results.Ok(new DiagnosticsSettingsDto(settings.VerboseLogging, identity.LogsDirectory));
+        });
+
+        app.MapPost("/api/diagnostics/settings", async (DiagnosticsSettingsRequest request, HttpContext ctx) =>
+        {
+            var settings = ctx.RequestServices.GetRequiredService<DiagnosticsSettings>();
+            await settings.SetVerboseLoggingAsync(request.VerboseLogging, ctx.RequestAborted);
+            var identity = ctx.RequestServices.GetRequiredService<RuntimeIdentity>();
+            return Results.Ok(new DiagnosticsSettingsDto(settings.VerboseLogging, identity.LogsDirectory));
+        });
+
+        app.MapPost("/api/diagnostics/bundle", async (DiagnosticsBundleRequest? request, HttpContext ctx) =>
+        {
+            var service = ctx.RequestServices.GetRequiredService<DiagnosticsBundleService>();
+            var bytes = await service.BuildAsync(request, ctx.RequestAborted);
+            var name = $"devteam-diagnostics-{DateTimeOffset.Now:yyyyMMdd-HHmmss}.zip";
+            return Results.File(bytes, "application/zip", name);
+        });
+
+        app.MapPost("/api/diagnostics/reveal-logs", (HttpContext ctx) =>
+        {
+            var identity = ctx.RequestServices.GetRequiredService<RuntimeIdentity>();
+            ctx.RequestServices.GetRequiredService<IFileSystemService>().RevealInExplorer(identity.LogsDirectory);
+            return Results.Ok();
+        });
+
+        // ─── metrics (what DevTeam cost, so it can be made cheaper) ────────────
+        app.MapGet("/api/metrics/summary", async (string? workspacePath, Guid? featureId, Guid? releaseId, int? days, HttpContext ctx) =>
+        {
+            var service = ctx.RequestServices.GetRequiredService<MetricsService>();
+            var scope = new MetricsScope(workspacePath, featureId, releaseId, days ?? 30);
+            return Results.Ok(await service.SummarizeAsync(scope, ctx.RequestAborted));
+        });
+
+        app.MapGet("/api/metrics/turns", async (string? workspacePath, Guid? featureId, Guid? releaseId, int? days, int? limit, HttpContext ctx) =>
+        {
+            var service = ctx.RequestServices.GetRequiredService<MetricsService>();
+            var scope = new MetricsScope(workspacePath, featureId, releaseId, days ?? 30);
+            return Results.Ok(await service.TurnsAsync(scope, limit ?? 200, ctx.RequestAborted));
+        });
+
+        // The LLM/human-facing report: ranked findings + aggregates. `format=markdown` for one read.
+        app.MapGet("/api/metrics/diagnose", async (string? workspacePath, Guid? featureId, Guid? releaseId, int? days, string? format, HttpContext ctx) =>
+        {
+            var service = ctx.RequestServices.GetRequiredService<MetricsService>();
+            var scope = new MetricsScope(workspacePath, featureId, releaseId, days ?? 30);
+            var summary = await service.SummarizeAsync(scope, ctx.RequestAborted);
+            return string.Equals(format, "markdown", StringComparison.OrdinalIgnoreCase)
+                ? Results.Text(MetricsMarkdown.Render(summary), "text/markdown")
+                : Results.Ok(summary);
+        });
+
+        // ─── requirement progress (how much of the BRS is done) ────────────────
+        app.MapGet("/api/features/{featureId:guid}/progress", async (Guid featureId, HttpContext ctx) =>
+        {
+            var db = await ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>()
+                .CreateDbContextAsync(ctx.RequestAborted);
+            var feature = await db.ReleaseFeatures
+                .Include(f => f.Release)
+                .FirstOrDefaultAsync(f => f.Id == featureId, ctx.RequestAborted);
+            if (feature is null)
+                return Results.NotFound();
+
+            var progress = RequirementProgressCalculator.Compute(feature.Release.WorkspacePath, feature.Key);
+            return Results.Ok(new RequirementProgressDto(
+                progress.Requirements,
+                new ProgressCountDto(progress.Code.Done, progress.Code.Total),
+                new ProgressCountDto(progress.Tests.Done, progress.Tests.Total)));
+        });
+
+        // ─── negotiation (the numbered points stages exchange) ─────────────────
+        app.MapGet("/api/features/{featureId:guid}/negotiation", async (Guid featureId, HttpContext ctx) =>
+        {
+            var db = await ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>()
+                .CreateDbContextAsync(ctx.RequestAborted);
+            var points = await db.ReviewFindings
+                .Where(f => f.StageRun.ReleaseFeatureId == featureId)
+                .ToListAsync(ctx.RequestAborted);
+
+            // Open points first (what still needs action), then by round.
+            var ordered = points
+                .OrderBy(f => f.Status == ReviewFindingStatus.Open ? 0 : 1)
+                .ThenBy(f => f.Round)
+                .ThenBy(f => f.CreatedAt)
+                .Select(ToNegotiationPointDto)
+                .ToArray();
+            return Results.Ok(ordered);
+        });
+
+        app.MapPost("/api/features/{featureId:guid}/negotiation/{findingId:guid}/resolve", async (Guid featureId, Guid findingId, HttpContext ctx) =>
+        {
+            var db = await ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>()
+                .CreateDbContextAsync(ctx.RequestAborted);
+            var point = await db.ReviewFindings
+                .FirstOrDefaultAsync(f => f.Id == findingId && f.StageRun.ReleaseFeatureId == featureId, ctx.RequestAborted);
+            if (point is null)
+                return Results.NotFound();
+
+            point.Status = ReviewFindingStatus.Resolved;
+            point.ResolvedAt = DateTimeOffset.UtcNow;
+            point.UpdatedAt = DateTimeOffset.UtcNow;
+            point.ResolutionNote = "Closed by the user.";
+            await db.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToNegotiationPointDto(point));
+        });
+
+        app.MapPost("/api/features/{featureId:guid}/negotiation/{findingId:guid}/escalate", async (Guid featureId, Guid findingId, HttpContext ctx) =>
+        {
+            var db = await ctx.RequestServices.GetRequiredService<IDbContextFactory<DevTeamDbContext>>()
+                .CreateDbContextAsync(ctx.RequestAborted);
+            var point = await db.ReviewFindings
+                .FirstOrDefaultAsync(f => f.Id == findingId && f.StageRun.ReleaseFeatureId == featureId, ctx.RequestAborted);
+            if (point is null)
+                return Results.NotFound();
+
+            point.Status = ReviewFindingStatus.Escalated;
+            point.UpdatedAt = DateTimeOffset.UtcNow;
+            point.ResolutionNote = "Escalated by the user.";
+            await db.SaveChangesAsync(ctx.RequestAborted);
+            return Results.Ok(ToNegotiationPointDto(point));
+        });
+
+        // ─── code overview (plain status for the project screen) ───────────────
+        app.MapGet("/api/workspaces/code-context", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var service = ctx.RequestServices.GetRequiredService<IRepoContextService>();
+            var status = await service.GetStatusAsync(workspacePath, ctx.RequestAborted);
+            return Results.Ok(new CodeContextStatusDto(
+                status.State.ToString(), status.ChangesBehind, status.BuiltAt, status.Warnings));
+        });
+
+        app.MapPost("/api/workspaces/code-context/refresh", (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            ctx.RequestServices.GetRequiredService<IRepoContextService>().EnqueueRefresh(workspacePath, "manual");
+            return Results.Accepted();
+        });
+
+        // ─── model candidates (the failover list) ──────────────────────────────
+        app.MapGet("/api/models/candidates", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var service = ctx.RequestServices.GetRequiredService<IModelCandidateService>();
+            var candidates = await service.ListSeededAsync(workspacePath, ctx.RequestAborted);
+            return Results.Ok(candidates.Select(ToCandidateDto).ToArray());
+        });
+
+        app.MapPost("/api/models/candidates", async (AddModelCandidateRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath) || string.IsNullOrWhiteSpace(request.ModelId))
+                return Results.BadRequest("WorkspacePath and ModelId are required.");
+
+            var service = ctx.RequestServices.GetRequiredService<IModelCandidateService>();
+            try
+            {
+                var added = await service.AddAsync(request.WorkspacePath, request.ModelId, ctx.RequestAborted);
+                return Results.Ok(ToCandidateDto(added));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+
+        app.MapDelete("/api/models/candidates/{id:guid}", async (Guid id, HttpContext ctx) =>
+        {
+            var service = ctx.RequestServices.GetRequiredService<IModelCandidateService>();
+            await service.RemoveAsync(id, ctx.RequestAborted);
+            return Results.NoContent();
+        });
+
+        app.MapPost("/api/models/candidates/reorder", async (ReorderModelCandidatesRequest request, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.WorkspacePath))
+                return Results.BadRequest("WorkspacePath is required.");
+
+            var service = ctx.RequestServices.GetRequiredService<IModelCandidateService>();
+            await service.ReorderAsync(request.WorkspacePath, request.OrderedIds ?? [], ctx.RequestAborted);
+            return Results.Ok((await service.ListAsync(request.WorkspacePath, ctx.RequestAborted)).Select(ToCandidateDto).ToArray());
+        });
+
+        app.MapPost("/api/models/candidates/{id:guid}/enabled", async (Guid id, SetModelCandidateEnabledRequest request, HttpContext ctx) =>
+        {
+            var service = ctx.RequestServices.GetRequiredService<IModelCandidateService>();
+            await service.SetEnabledAsync(id, request.Enabled, ctx.RequestAborted);
+            return Results.Ok();
+        });
+
+        // Everything the agent says it can run, for the "add a model" picker.
+        app.MapGet("/api/models/available", async (string workspacePath, HttpContext ctx) =>
+        {
+            if (string.IsNullOrWhiteSpace(workspacePath))
+                return Results.BadRequest("workspacePath is required.");
+
+            var catalog = ctx.RequestServices.GetRequiredService<ModelCatalogService>();
+            return Results.Ok(await catalog.GetAvailableModelsAsync(workspacePath, ctx.RequestAborted));
+        });
+
+        // ─── desktop notifications ─────────────────────────────────────────────
+        app.MapGet("/api/notifications/settings", (HttpContext ctx) =>
+        {
+            var settings = ctx.RequestServices.GetRequiredService<NotificationSettings>();
+            return Results.Ok(new NotificationSettingsDto(
+                settings.StageComplete, settings.NeedsAttention, settings.ApprovalNeeded, settings.Sound));
+        });
+
+        app.MapPost("/api/notifications/settings", async (NotificationSettingsRequest request, HttpContext ctx) =>
+        {
+            var settings = ctx.RequestServices.GetRequiredService<NotificationSettings>();
+            await settings.SetAsync(
+                request.StageComplete, request.NeedsAttention, request.ApprovalNeeded, request.Sound, ctx.RequestAborted);
+            return Results.Ok(new NotificationSettingsDto(
+                settings.StageComplete, settings.NeedsAttention, settings.ApprovalNeeded, settings.Sound));
+        });
+
+        // Lets someone confirm notifications actually reach them — the app is headless, so
+        // "did that work?" is otherwise unanswerable without waiting for a real event.
+        app.MapPost("/api/notifications/test", async (HttpContext ctx) =>
+        {
+            var notifier = ctx.RequestServices.GetRequiredService<IPlatformNotifier>();
+            await notifier.NotifyAsync(
+                new NotificationRequest(
+                    "DevTeam",
+                    "Notifications are working — you'll be told when a step finishes or needs you.",
+                    NotificationUrgency.Info),
+                ctx.RequestAborted);
+            return Results.Ok();
+        });
     }
+
+    private static ModelCandidateDto ToCandidateDto(ModelCandidate candidate)
+    {
+        var rating = ModelCatalog.RatingFor(candidate.ModelId);
+        return new ModelCandidateDto(
+            candidate.Id,
+            candidate.ModelId,
+            candidate.Priority,
+            candidate.Enabled,
+            candidate.UserAdded,
+            candidate.CooldownUntil,
+            candidate.LastFailureKind,
+            candidate.LastFailureReason,
+            rating?.Cost,
+            rating?.Smartness,
+            rating?.Note);
+    }
+
+    private static NegotiationPointDto ToNegotiationPointDto(ReviewFinding point)
+        => new(
+            point.Id,
+            point.Target,
+            point.Summary,
+            point.Expected,
+            point.Round,
+            point.OpenedBy,
+            point.PushedBackTo,
+            point.Status.ToString(),
+            point.ResponseKind.ToString(),
+            point.ResponseText,
+            point.RequirementRef,
+            point.CreatedAt);
 }

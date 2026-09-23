@@ -35,3 +35,42 @@ public sealed class AcpTimeoutException : TimeoutException
     {
     }
 }
+
+/// <summary>
+/// Raised when the agent accepted a prompt but then produced no output at all for long enough
+/// that a healthy turn could not still be running (see BrokerCoordinator's stall watchdog).
+/// Distinct from <see cref="AcpTimeoutException"/>: that is the overall request budget, while
+/// this fires far sooner and means "the stream went silent", which is what a user experiences
+/// as a hang.
+/// </summary>
+public sealed class AcpStalledException : TimeoutException
+{
+    public AcpStalledException(TimeSpan silentFor)
+        : base($"The agent produced no output for {silentFor.TotalMinutes:0.#} minutes")
+    {
+    }
+}
+
+/// <summary>
+/// Raised when the model provider itself refused the request — a rate limit, an unavailable
+/// endpoint, an unknown model. Carries a sentence the user can act on, because the whole point is
+/// to stop saying "the agent stopped responding" when the real answer is "the AI service is busy".
+/// </summary>
+public sealed class ProviderUnavailableException : Exception
+{
+    public ProviderUnavailableException(string plainReason, string? modelId, bool isRateLimit)
+        : base(plainReason)
+    {
+        PlainReason = plainReason;
+        ModelId = modelId;
+        IsRateLimit = isRateLimit;
+    }
+
+    public string PlainReason { get; }
+
+    /// <summary>The model that was in effect when it failed, when we know it.</summary>
+    public string? ModelId { get; }
+
+    /// <summary>Rate limits clear on their own, so this one is worth retrying rather than escalating.</summary>
+    public bool IsRateLimit { get; }
+}

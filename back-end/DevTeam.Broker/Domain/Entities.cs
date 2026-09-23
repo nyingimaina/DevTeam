@@ -9,6 +9,13 @@ public sealed class DevTeamSession
     public string AcpSessionId { get; set; } = string.Empty;
     public string? Title { get; set; }
     public string? ModelId { get; set; }
+    /// <summary>
+    /// The model this session was *asked* to use. Kept beside <see cref="ModelId"/> because the
+    /// agent can refuse a model (or the id can be wrong), in which case ModelId is what is
+    /// actually in effect and this is what was wanted — the UI shows the difference instead of
+    /// pretending the request succeeded.
+    /// </summary>
+    public string? RequestedModelId { get; set; }
     public string? ModeId { get; set; }
     /// <summary>
     /// JSON array of workspace-relative directory prefixes this session's agent may write

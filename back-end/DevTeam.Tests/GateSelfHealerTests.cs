@@ -43,10 +43,14 @@ public class GateSelfHealerTests : IDisposable
         new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
         new ModelCatalogService(_coordinator), new FakeGitCredentialStore(), new ActiveTurnTracker());
 
-    // Leading builtins (scaffold, context) consume two results at start-stage, then each
-    // exit pass consumes two (gherkin_validator, render_handoff) for the default BA role.
+    // Leading builtins (scaffold, core scaffold, repo hygiene, code map, context) consume five
+    // results at start-stage, then each exit pass consumes two (gherkin_validator, render_handoff)
+    // for the default BA role.
     private void ScriptGherkinResults(params bool[] gherkinPassesPerRun)
     {
+        _gateRunner.Results.Add(Pass());
+        _gateRunner.Results.Add(Pass());
+        _gateRunner.Results.Add(Pass());
         _gateRunner.Results.Add(Pass());
         _gateRunner.Results.Add(Pass());
         foreach (var passes in gherkinPassesPerRun)
@@ -184,13 +188,18 @@ public class GateFriendlyTextTests
 
     [Theory]
     [InlineData(BuiltinRegistry.ScaffoldSpecs)]
+    [InlineData(BuiltinRegistry.CoreScaffold)]
+    [InlineData(BuiltinRegistry.RepoHygiene)]
     [InlineData(BuiltinRegistry.ContextBundle)]
+    [InlineData(BuiltinRegistry.CodeMap)]
     [InlineData(BuiltinRegistry.GherkinValidator)]
     [InlineData(BuiltinRegistry.VerifyCode)]
     [InlineData(BuiltinRegistry.CodeHygiene)]
+    [InlineData(BuiltinRegistry.AppLaunch)]
     [InlineData(BuiltinRegistry.SliceGuard)]
     [InlineData(BuiltinRegistry.SliceScope)]
     [InlineData(BuiltinRegistry.ReuseGate)]
+    [InlineData(BuiltinRegistry.ProjectStructure)]
     [InlineData(BuiltinRegistry.RenderPr)]
     [InlineData(BuiltinRegistry.RenderHandoff)]
     [InlineData(BuiltinRegistry.CoverageMatrix)]

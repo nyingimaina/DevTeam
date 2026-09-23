@@ -15,7 +15,7 @@ public sealed class OpencodeAcpProcess : IAcpProcess
     private readonly object _writeLock = new();
     private int _disposed;
 
-    public OpencodeAcpProcess(string executable, IReadOnlyList<string> args)
+    public OpencodeAcpProcess(string executable, IReadOnlyList<string> args, Action<string>? onStderr = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -40,6 +40,31 @@ public sealed class OpencodeAcpProcess : IAcpProcess
             NewLine = "\n",
             AutoFlush = true,
         };
+
+        // ALWAYS drain stderr, even when nobody wants the text: a redirected-but-unread pipe
+        // fills up (4-64KB) and the child then blocks writing to it — which looks exactly like
+        // the agent going silent forever. This is a correctness fix, not just diagnostics.
+        _ = Task.Run(() => DrainStandardErrorAsync(onStderr));
+    }
+
+    private async Task DrainStandardErrorAsync(Action<string>? onStderr)
+    {
+        try
+        {
+            while (true)
+            {
+                var line = await _process.StandardError.ReadLineAsync();
+                if (line is null)
+                    return;
+
+                if (onStderr is not null && !string.IsNullOrWhiteSpace(line))
+                    onStderr(line);
+            }
+        }
+        catch (Exception)
+        {
+            // The process exiting mid-read is normal; nothing to report.
+        }
     }
 
     public int ProcessId => _process.Id;

@@ -169,3 +169,24 @@ export function relativeTime(iso: string | null | undefined, now: Date = new Dat
   if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
   return new Date(then).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
+
+/** The one feature checked out in this project, wherever it lives — it is only reported on its own release. */
+export function findActiveFeature(releases: ReleaseDto[]): { release: ReleaseDto; feature: ReleaseFeatureDto } | undefined {
+  for (const release of releases) {
+    if (!release.currentFeatureId) continue;
+    const feature = release.features.find((f) => f.id === release.currentFeatureId);
+    if (feature) return { release, feature };
+  }
+  return undefined;
+}
+
+/** The newest timestamp across a feature and its runs — the card's "last moved" value. */
+export function featureLastActivity(feature: ReleaseFeatureDto): string | null {
+  const stamps: string[] = [feature.updatedAt];
+  for (const r of feature.stageRuns ?? []) {
+    if (r.finishedAt) stamps.push(r.finishedAt);
+    if (r.startedAt) stamps.push(r.startedAt);
+  }
+  const valid = stamps.filter((s) => s && !Number.isNaN(Date.parse(s)));
+  return valid.length === 0 ? null : valid.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+}

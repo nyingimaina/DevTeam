@@ -1,0 +1,303 @@
+.view {
+  padding: 1rem 1.25rem 3rem;
+  max-width: 960px;
+  margin: 0 auto;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.header {
+  margin-bottom: 1rem;
+}
+
+.title {
+  font-size: 1.35rem;
+  color: var(--text-heading);
+  margin-bottom: 0.15rem;
+}
+
+.intro {
+  color: var(--text-muted);
+}
+
+.section {
+  margin-bottom: 1.5rem;
+}
+
+.sectionTitle {
+  font-size: 0.95rem;
+  color: var(--text-heading);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.6rem;
+}
+
+.error {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.loading,
+.muted {
+  color: var(--text-muted);
+  padding: 0.5rem 0;
+}
+
+/* ── verdict ─────────────────────────────────────────────────────────── */
+.verdict {
+  border-radius: 10px;
+  padding: 1rem 1.15rem;
+  border-left: 5px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.verdictOk {
+  border-left-color: #16a34a;
+}
+
+.verdictBad {
+  border-left-color: #dc2626;
+}
+
+.verdictLabel {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-heading);
+}
+
+.verdictSub {
+  color: var(--text-muted);
+  white-space: pre-line;
+  margin-top: 0.2rem;
+}
+
+.running {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-muted);
+  margin-bottom: 0.6rem;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+.runButton {
+  margin-top: 0.75rem;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 8px;
+  padding: 0.5rem 0.95rem;
+  font-weight: 600;
+}
+
+.runButton:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.runButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ── charts ──────────────────────────────────────────────────────────── */
+.charts {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: 1fr;
+  margin-bottom: 0.85rem;
+}
+
+@media (min-width: 720px) {
+  .charts {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.chartCard {
+  background: var(--bg-surface);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+}
+
+.chartTitle {
+  font-weight: 600;
+  color: var(--text-heading);
+  margin-bottom: 0.4rem;
+}
+
+.chartBody {
+  height: 190px;
+}
+
+.legend {
+  list-style: none;
+  display: flex;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.legendDot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 0.3rem;
+}
+
+/* ── result cards ────────────────────────────────────────────────────── */
+.results {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.resultCard {
+  background: var(--bg-surface);
+  border-radius: 10px;
+  border-left: 4px solid var(--border);
+  padding: 0.7rem 0.9rem;
+}
+
+.resultCard.toneOk {
+  border-left-color: #16a34a;
+}
+
+.resultCard.toneBad {
+  border-left-color: #dc2626;
+}
+
+.resultCard.toneWarn {
+  border-left-color: #ca8a04;
+}
+
+.resultHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.resultTitle {
+  font-weight: 600;
+  color: var(--text-heading);
+}
+
+.resultStatus {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.resultReason {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: pre-line;
+  margin-top: 0.15rem;
+}
+
+.resultMetrics {
+  display: flex;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--text-body);
+  margin-top: 0.3rem;
+}
+
+/* ── catalog ─────────────────────────────────────────────────────────── */
+.catalog {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 720px) {
+  .catalog {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.catalogCard {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+}
+
+.catalogTitle {
+  font-weight: 600;
+  color: var(--text-heading);
+}
+
+.catalogCategory {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  margin-bottom: 0.3rem;
+}
+
+.catalogWhy {
+  color: var(--text-body);
+  font-size: 0.85rem;
+}
+
+.catalogHow {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-top: 0.25rem;
+}
+
+.catalogHowLabel {
+  font-weight: 600;
+}
+
+.details {
+  margin-top: 0.4rem;
+}
+
+.details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.pre {
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  margin-top: 0.35rem;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}

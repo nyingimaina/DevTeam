@@ -87,7 +87,9 @@ public record GitResponse(
     [property: JsonPropertyName("stashEntries")] string[]? StashEntries = null,
     // Populated on a merge or stash-apply failure that left conflict markers in the working
     // tree (git diff --name-only --diff-filter=U) — never populated on other kinds of failure.
-    [property: JsonPropertyName("conflictedFiles")] string[]? ConflictedFiles = null);
+    [property: JsonPropertyName("conflictedFiles")] string[]? ConflictedFiles = null,
+    // The resolved commit hash for a "rev-parse" request — see GitCommandHandler.RevParseAsync.
+    [property: JsonPropertyName("commitSha")] string? CommitSha = null);
 
 public record GitCommit(
     [property: JsonPropertyName("hash")] string Hash,

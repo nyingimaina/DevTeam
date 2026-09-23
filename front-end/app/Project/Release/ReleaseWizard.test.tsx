@@ -470,6 +470,71 @@ describe("ReleaseWizard", () => {
     });
   });
 
+  it("re-focuses the chat input once the assistant's turn ends, so the user can reply without clicking back in", async () => {
+    const run = makeRun({ id: "sr-live" });
+    mockApi.getStageMessagesAsync
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: "m1", role: "user", bodyText: "Start the analysis.", createdAt: "2026-01-01T00:00:00Z", parts: [], isPriming: false },
+        { id: "m2", role: "assistant", bodyText: "Done.", createdAt: "2026-01-01T00:00:01Z", parts: [], isPriming: false },
+      ]);
+    mockApi.sendStageMessageAsync.mockResolvedValue({ response: "ok", inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+    const user = await openDetail(makeRelease({ stageRuns: [run] }));
+
+    const input = screen.getByTestId("release-chat-input");
+    await user.type(input, "Start the analysis.");
+    input.blur();
+    await user.click(screen.getByTestId("release-send-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Done.")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(input);
+    });
+  });
+
+  it("shows quick-reply buttons when the agent's latest message ends with a short option list", async () => {
+    const run = makeRun({ id: "sr-live" });
+    mockApi.getStageMessagesAsync.mockResolvedValue([
+      {
+        id: "m1",
+        role: "assistant",
+        bodyText: "Which numeric model should the BRS mandate?\n1. double\n2. decimal\n3. integer-only",
+        createdAt: "2026-01-01T00:00:00Z",
+        parts: [],
+        isPriming: false,
+      },
+    ]);
+    mockApi.sendStageMessageAsync.mockResolvedValue({ response: "ok", inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+    const user = await openDetail(makeRelease({ stageRuns: [run] }));
+
+    const button = await screen.findByRole("button", { name: "double" });
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(mockApi.sendStageMessageAsync).toHaveBeenCalledWith("f1", "double");
+    });
+  });
+
+  it("does not show quick-reply buttons once the user has already answered (latest message is theirs)", async () => {
+    const run = makeRun({ id: "sr-live" });
+    mockApi.getStageMessagesAsync.mockResolvedValue([
+      {
+        id: "m1",
+        role: "assistant",
+        bodyText: "Which numeric model?\n1. double\n2. decimal",
+        createdAt: "2026-01-01T00:00:00Z",
+        parts: [],
+        isPriming: false,
+      },
+      { id: "m2", role: "user", bodyText: "double", createdAt: "2026-01-01T00:00:01Z", parts: [], isPriming: false },
+    ]);
+    await openDetail(makeRelease({ stageRuns: [run] }));
+
+    expect(screen.queryByRole("group", { name: "Quick replies" })).not.toBeInTheDocument();
+  });
+
   it("auto-runs gates when the agent's latest message has a standalone DONE line", async () => {
     const release = makeRelease({ stageRuns: [makeRun({ id: "sr-live" })] });
     mockApi.getStageMessagesAsync
@@ -780,8 +845,9 @@ describe("ReleaseWizard", () => {
       stageRuns: [run],
     });
     mockApi.getCurrentTurnAsync.mockResolvedValue({
-      sessionId: "s1",
-      acpSessionId: "acp-dev-1",
+      sessionId: "acp-dev-1",
+      acpSessionId: "real-acp-id-for-dev",
+      stageRunSessionId: "acp-dev-1",
       preview: "implement the calculator",
       startedAt: new Date(Date.now() - 90_000).toISOString(),
     });
@@ -789,9 +855,179 @@ describe("ReleaseWizard", () => {
 
     const log = screen.getByTestId("release-stage-log");
     await waitFor(() => {
-      expect(within(log).getByText(/running/i)).toBeInTheDocument();
+      // Anchored: the waiting line also contains the word "running", so a loose match would
+      // pass even when this stage is not the one executing.
+      expect(within(log).getByText(/^running —/)).toBeInTheDocument();
     });
     expect(within(log).getByText(/1m30s/)).toBeInTheDocument();
+  });
+
+  it("shows how far through the steps a stage has got", async () => {
+    const run = makeRun({
+      id: "sr-dev",
+      stageName: "developer",
+      status: "Active",
+      gateChecks: [
+        { id: "g1", stageRunId: "sr-dev", name: "context_bundle", passed: true, isEntryGate: false },
+      ],
+    });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+    await openDetail(release);
+
+    const bar = await screen.findByTestId("release-progress");
+    // The developer stage has 7 steps; one has been reached.
+    expect(bar).toHaveAttribute("aria-valuenow", "1");
+    expect(bar).toHaveAttribute("aria-valuemax", "7");
+  });
+
+  it("tells the user how long this stage normally takes, from its own history", async () => {
+    const active = makeRun({
+      id: "sr-active",
+      stageName: "developer",
+      status: "Active",
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      finishedAt: null,
+    });
+    const previous = makeRun({
+      id: "sr-prev",
+      stageName: "developer",
+      status: "Complete",
+      startedAt: "2026-01-01T00:00:00Z",
+      finishedAt: "2026-01-01T00:15:00Z",
+    });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [active, previous],
+    });
+    await openDetail(release);
+
+    expect(await screen.findByTestId("release-eta")).toHaveTextContent(/normally takes about 15 minutes/);
+  });
+
+  it("shows a live activity feed of what the agent is doing, with thoughts opt-in", async () => {
+    const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing", acpSessionId: "acp-dev-1" });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+    mockApi.getCurrentTurnAsync.mockResolvedValue({
+      sessionId: "acp-dev-1",
+      acpSessionId: "real-acp",
+      stageRunSessionId: "acp-dev-1",
+      preview: "You are the developer for feature...",
+      startedAt: new Date(Date.now() - 30_000).toISOString(),
+      lastEventAt: new Date().toISOString(),
+      activity: [
+        { at: new Date(Date.now() - 5000).toISOString(), kind: "tool", label: "Read foo.cs", status: "completed" },
+        { at: new Date(Date.now() - 3000).toISOString(), kind: "thought", label: "private reasoning" },
+        { at: new Date(Date.now() - 1000).toISOString(), kind: "text", label: "I will fix the failing test" },
+      ],
+    });
+    await openDetail(release);
+
+    const feed = await screen.findByTestId("release-activity");
+    expect(within(feed).getByText("Read foo.cs")).toBeInTheDocument();
+    expect(within(feed).getByText("I will fix the failing test")).toBeInTheDocument();
+    // Private thinking is hidden until the user asks for it.
+    expect(within(feed).queryByText("private reasoning")).not.toBeInTheDocument();
+
+    await userEvent.click(within(feed).getByTestId("release-show-thoughts"));
+
+    expect(within(feed).getByText("private reasoning")).toBeInTheDocument();
+  });
+
+  it("says the agent looks stuck when it never produced anything, and offers the escape hatch", async () => {
+    const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing", acpSessionId: "acp-dev-1" });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+    mockApi.getCurrentTurnAsync.mockResolvedValue({
+      sessionId: "acp-dev-1",
+      acpSessionId: "real-acp",
+      stageRunSessionId: "acp-dev-1",
+      preview: "composed",
+      startedAt: new Date(Date.now() - 300_000).toISOString(),
+      lastEventAt: new Date(Date.now() - 120_000).toISOString(),
+      // Only the "started working" entry: nothing has actually happened.
+      activity: [{ at: new Date(Date.now() - 120_000).toISOString(), kind: "status", label: "The agent started working" }],
+    });
+    await openDetail(release);
+
+    const quiet = await screen.findByTestId("release-quiet");
+    expect(quiet).toHaveTextContent(/hasn't produced anything for 2 minutes/);
+    expect(quiet).toHaveTextContent(/looks stuck/);
+
+    // The user can stop it right here, without hunting for the global indicator.
+    await userEvent.click(await screen.findByTestId("release-cancel-turn-btn"));
+    expect(mockApi.cancelCurrentTurnAsync).toHaveBeenCalled();
+  });
+
+  it("keeps the escape hatch usable while the run itself is in flight", async () => {
+    const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing", acpSessionId: "acp-dev-1" });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+    // A run in progress means the run-stage request is still pending, so the screen is "busy"
+    // for the whole run. The stop button used to be disabled by that very flag — i.e. it was
+    // dead exactly when a user needed it.
+    let finishRun: (value: ReleaseDto) => void = () => {};
+    mockApi.runStageAsync.mockImplementation(
+      () => new Promise<ReleaseDto>((resolve) => {
+        finishRun = resolve;
+      }),
+    );
+    mockApi.getCurrentTurnAsync.mockResolvedValue({
+      sessionId: "acp-dev-1",
+      acpSessionId: "real-acp",
+      stageRunSessionId: "acp-dev-1",
+      preview: "composed",
+      startedAt: new Date().toISOString(),
+      lastEventAt: new Date().toISOString(),
+      activity: [{ at: new Date().toISOString(), kind: "status", label: "The agent started working" }],
+    });
+
+    const user = await openDetail(release);
+    await user.click(screen.getByTestId("release-run-stage-btn"));
+
+    const stop = await screen.findByTestId("release-cancel-turn-btn");
+    expect(stop).toBeEnabled();
+
+    await user.click(stop);
+    expect(mockApi.cancelCurrentTurnAsync).toHaveBeenCalled();
+
+    await act(async () => {
+      finishRun(release);
+    });
+  });
+
+  it("reads as thinking, not stuck, when the agent went quiet after doing real work", async () => {
+    const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing", acpSessionId: "acp-dev-1" });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+    mockApi.getCurrentTurnAsync.mockResolvedValue({
+      sessionId: "acp-dev-1",
+      acpSessionId: "real-acp",
+      stageRunSessionId: "acp-dev-1",
+      preview: "composed",
+      startedAt: new Date(Date.now() - 300_000).toISOString(),
+      lastEventAt: new Date(Date.now() - 120_000).toISOString(),
+      activity: [
+        { at: new Date(Date.now() - 200_000).toISOString(), kind: "status", label: "The agent started working" },
+        { at: new Date(Date.now() - 120_000).toISOString(), kind: "tool", label: "Read foo.cs" },
+      ],
+    });
+    await openDetail(release);
+
+    const quiet = await screen.findByTestId("release-quiet");
+    expect(quiet).toHaveTextContent(/quiet for 2 minutes/);
+    expect(quiet).not.toHaveTextContent(/looks stuck/);
   });
 
   it("shows a waiting status when the active turn belongs to a different session", async () => {
@@ -802,7 +1038,8 @@ describe("ReleaseWizard", () => {
     });
     mockApi.getCurrentTurnAsync.mockResolvedValue({
       sessionId: "s-other",
-      acpSessionId: "acp-other-release",
+      acpSessionId: "real-acp-id-for-other",
+      stageRunSessionId: "s-other",
       preview: "working on a different release",
       startedAt: new Date().toISOString(),
     });
@@ -810,9 +1047,10 @@ describe("ReleaseWizard", () => {
 
     const log = screen.getByTestId("release-stage-log");
     await waitFor(() => {
-      expect(within(log).getByText(/waiting/i)).toBeInTheDocument();
+      expect(within(log).getByText(/waiting for the agent to finish another step/i)).toBeInTheDocument();
     });
-    expect(within(log).getByText(/broker is busy/i)).toBeInTheDocument();
+    // It says the run will resume on its own — never a dead-end "the broker is busy".
+    expect(within(log).getByText(/starts automatically/i)).toBeInTheDocument();
   });
   describe("a release whose stored status is Ready but which has a new feature in progress", () => {
     // Regression: finishing "adding" leaves the release stored as Ready; adding "subtraction"
@@ -1015,6 +1253,31 @@ describe("ReleaseWizard", () => {
     });
   });
 
+  it("shows plain-language step labels instead of the raw step ids", async () => {
+    const labelled: PipelineStageDto[] = PIPELINE.map((stage) => ({
+      ...stage,
+      stepLabels: stage.steps.map((s) => `Readable ${s.replace(/_/g, " ")}`),
+    }));
+    const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active" });
+    const release = makeRelease({
+      flowPosition: { id: "fp1", releaseFeatureId: "f1", currentStageIndex: 1, currentStageName: "developer" },
+      stageRuns: [run],
+    });
+
+    const user = userEvent.setup();
+    mockApi.listReleasesAsync.mockResolvedValue([release]);
+    mockApi.getPipelineAsync.mockResolvedValue(labelled);
+    mockApi.getReleaseAsync.mockResolvedValue(release);
+    render(<ReleaseWizard api={mockApi as unknown as BrokerApi} workspacePath={"C:\\work\\proj"} />);
+    await waitFor(() => expect(screen.getByText("Release login-form")).toBeInTheDocument());
+    await user.click(screen.getByTestId(`release-item-${release.id}`));
+
+    // The raw id stays only as the stable testid hook; the person reads the label.
+    const item = await screen.findByTestId("release-step-context_bundle");
+    expect(item.textContent).toContain("Readable context bundle");
+    expect(item.textContent).not.toContain("context_bundle");
+  });
+
   it("shows a stall hint when the stage is Active but no turn is actually running", async () => {
     const run = makeRun({ id: "sr-dev", stageName: "developer", status: "Active", phase: "Producing", acpSessionId: "acp-dev-1" });
     const release = makeRelease({
@@ -1026,7 +1289,7 @@ describe("ReleaseWizard", () => {
 
     const log = screen.getByTestId("release-stage-log");
     await waitFor(() => {
-      expect(within(log).getByText(/may need a retry/i)).toBeInTheDocument();
+      expect(within(log).getByText(/hasn't reported in yet/i)).toBeInTheDocument();
     });
   });
 

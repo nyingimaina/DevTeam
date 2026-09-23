@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Models;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
@@ -185,6 +186,8 @@ public class BrokerCoordinatorTests : IDisposable
             Assert.Equal(@"C:\work\proj", doc.RootElement.GetProperty("cwd").GetString());
         _harness.Reply(newSessionId, "{\"sessionId\":\"ses_def\",\"configOptions\":[]}");
 
+        await ReplyToReappliedModelAndModeAsync();
+
         var (retryMethod, retryId, retryParams) = await _harness.ReadRequestAsync();
         Assert.Equal("session/prompt", retryMethod);
         using (var doc = JsonDocument.Parse(retryParams))
@@ -254,6 +257,339 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task SetModel_RemembersTheChoiceForTheWorkspace()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.SetModelAsync(session.SessionId, "anthropic/claude-x", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(idRaw, "{}");
+        await pending;
+
+        await using var db = CreateFactory().CreateDbContext();
+        var settings = await db.WorkspaceModelSettings.SingleAsync();
+        Assert.Equal("anthropic/claude-x", settings.ModelId);
+        Assert.Equal(@"C:\work\proj", settings.WorkspacePath);
+    }
+
+    [Fact]
+    public async Task SetModel_UpdatesTheRememberedChoice_OnASecondChange()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var first = coordinator.SetModelAsync(session.SessionId, "anthropic/claude-x", CancellationToken.None);
+        var (_, firstId, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(firstId, "{}");
+        await first;
+
+        var second = coordinator.SetModelAsync(session.SessionId, "openai/gpt-y", CancellationToken.None);
+        var (_, secondId, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(secondId, "{}");
+        await second;
+
+        await using var db = CreateFactory().CreateDbContext();
+        Assert.Equal("openai/gpt-y", (await db.WorkspaceModelSettings.SingleAsync()).ModelId);
+    }
+
+    [Fact]
+    public async Task Prompt_WhenTheAgentGoesSilent_IsTreatedAsStalled_InsteadOfWaitingForTheTimeout()
+    {
+        // Regression: a prompt the agent accepted but never answered produced no events at all
+        // and waited out the full 30-minute budget — which the user experiences as a hang
+        // (observed in the field: 22 minutes of silence, only ended by pressing Cancel).
+        await using var coordinator = CreateCoordinator(stallAfter: TimeSpan.FromMilliseconds(250));
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "go", CancellationToken.None);
+        await _harness.ReadRequestAsync(); // the agent never replies
+
+        await Assert.ThrowsAsync<AcpStalledException>(() => pending);
+        // The slot is freed, so the stage can be retried immediately.
+        Assert.Null(_turnTracker.Current);
+    }
+
+    [Fact]
+    public async Task Prompt_WithOngoingActivity_IsNotTreatedAsStalled()
+    {
+        await using var coordinator = CreateCoordinator(stallAfter: TimeSpan.FromSeconds(1));
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "go", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+
+        // Keep the heartbeat fresh for longer than the stall budget.
+        for (var i = 0; i < 4; i++)
+        {
+            await Task.Delay(300);
+            _harness.EmitSessionUpdate("ses_abc", "{\"sessionUpdate\":\"usage_update\",\"used\":1}");
+        }
+
+        Assert.False(pending.IsCompleted, "an active turn must not be killed as stalled");
+
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2}}");
+        await pending;
+    }
+
+    [Fact]
+    public async Task Prompt_RecordsPlainLanguageActivityWhileTheTurnRuns()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "do the thing", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"t1\",\"title\":\"Read foo.cs\",\"kind\":\"read\",\"status\":\"running\"}");
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"m1\",\"content\":{\"type\":\"text\",\"text\":\"I will read the file\"}}");
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"agent_thought_chunk\",\"messageId\":\"m1\",\"content\":{\"type\":\"text\",\"text\":\"Considering the options\"}}");
+
+        // The read loop handles frames asynchronously — wait for them to land in the feed.
+        await WaitUntilAsync(() => (_turnTracker.Current?.Activity?.Count ?? 0) >= 4);
+
+        var activity = _turnTracker.Current!.Activity!;
+        Assert.Contains(activity, a => a.Kind == TurnActivityKind.Tool && a.Label == "Read foo.cs");
+        Assert.Contains(activity, a => a.Kind == TurnActivityKind.Text && a.Label.Contains("I will read the file"));
+        Assert.Contains(activity, a => a.Kind == TurnActivityKind.Thought && a.Label.Contains("Considering the options"));
+        Assert.NotNull(_turnTracker.Current.LastEventAt);
+
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
+        await pending;
+    }
+
+    [Fact]
+    public async Task Prompt_KeepsTheFinalToolCallStatus_FromToolCallUpdates()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "do the thing", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"t1\",\"title\":\"Run the tests\",\"kind\":\"bash\",\"status\":\"running\"}");
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"t1\",\"title\":\"Run the tests\",\"kind\":\"bash\",\"status\":\"completed\",\"rawOutput\":\"42 passed\"}");
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":1,\"totalTokens\":11}}");
+        await pending;
+
+        await using var db = CreateFactory().CreateDbContext();
+        var part = await db.Parts.SingleAsync(p => p.ToolCallId == "t1");
+        // The update used to be broadcast only, so the stored call kept the *initial* (empty)
+        // output forever. Upserting by id is what makes this the final result.
+        Assert.Equal("42 passed", part.OutputJson!.Value.GetString());
+    }
+
+    [Fact]
+    public async Task NewSession_AppliesTheRequestedModelToTheAgent()
+    {
+        // Regression: the requested model used to be written to our row and never sent to the
+        // agent, so opencode kept running its own model while the UI claimed otherwise.
+        await using var coordinator = CreateCoordinator();
+
+        var pending = coordinator.NewSessionAsync(@"C:\work\proj", "anthropic/claude-x", null, CancellationToken.None);
+        var (initMethod, initId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("initialize", initMethod);
+        _harness.Reply(initId, InitializeResultJson);
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, NewSessionResultJson);
+
+        // The frame that never used to be sent at all.
+        var (setModelMethod, setModelId, setModelParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", setModelMethod);
+        Assert.Contains("anthropic/claude-x", setModelParams);
+        _harness.Reply(setModelId, "{}");
+
+        var session = await pending;
+        Assert.Equal("anthropic/claude-x", session.ModelId);
+        Assert.Equal("anthropic/claude-x", session.RequestedModelId);
+    }
+
+    [Fact]
+    public async Task NewSession_WhenTheAgentRefusesTheModel_RecordsWhatIsActuallyInEffect()
+    {
+        await using var coordinator = CreateCoordinator();
+
+        var pending = coordinator.NewSessionAsync(@"C:\work\proj", "nope/not-a-model", null, CancellationToken.None);
+        var (_, initId, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(initId, InitializeResultJson);
+        var (_, newSessionId, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(newSessionId, NewSessionResultJson);
+        var (_, setModelId, _) = await _harness.ReadRequestAsync();
+        _harness.ReplyError(setModelId, -32602, "Unknown model");
+
+        var session = await pending;
+
+        // Ask for one thing, record what is really running — and keep working.
+        Assert.Equal("nope/not-a-model", session.RequestedModelId);
+        Assert.Equal("opencode/big-pickle", session.ModelId);
+    }
+
+    [Fact]
+    public async Task RecreatedSession_ReappliesTheModelTheSessionWasUsing()
+    {
+        // A new ACP session starts on the agent's own model; without re-applying, a broker
+        // restart would silently change the model mid-release.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await SetStoredModelAsync(session.SessionId, "anthropic/claude-x");
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, promptId, _) = await _harness.ReadRequestAsync();
+        _harness.ReplyError(promptId, -32602, "Invalid params: session not found: ses_abc");
+
+        var (recreateMethod, recreateId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", recreateMethod);
+        _harness.Reply(recreateId, NewSessionResultJson);
+
+        var (setModelMethod, setModelId, setModelParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", setModelMethod);
+        Assert.Contains("anthropic/claude-x", setModelParams);
+        _harness.Reply(setModelId, "{}");
+
+        var (setModeMethod, setModeId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_mode", setModeMethod);
+        _harness.Reply(setModeId, "{}");
+
+        var (retryMethod, retryId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", retryMethod);
+        _harness.Reply(retryId, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2}}");
+        await pending;
+    }
+
+    [Fact]
+    public async Task ConfigOptionUpdate_UpdatesTheStoredModel()
+    {
+        // opencode reports its own model changes; dropping them let our record drift from reality.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"config_option_update\",\"configOptions\":[{\"id\":\"model\",\"currentValue\":\"other/model\"}]}");
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2}}");
+        await pending;
+
+        await WaitUntilAsync(() =>
+            coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None).GetAwaiter().GetResult()?.ModelId == "other/model");
+
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("other/model", detail!.ModelId);
+    }
+
+    // Recreating a lost ACP session re-applies the model and mode that session was using before
+    // the caller retries, so those two frames must be answered first.
+    private async Task ReplyToReappliedModelAndModeAsync()
+    {
+        var (modelMethod, modelId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", modelMethod);
+        _harness.Reply(modelId, "{}");
+
+        var (modeMethod, modeId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_mode", modeMethod);
+        _harness.Reply(modeId, "{}");
+    }
+
+    private async Task SetStoredModelAsync(Guid sessionId, string modelId)
+    {
+        await using var db = CreateFactory().CreateDbContext();
+        var session = await db.Sessions.SingleAsync(s => s.Id == sessionId);
+        session.ModelId = modelId;
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task Prompt_WhenTheModelIsRefused_SwitchesToTheNextModelAndRetries()
+    {
+        // The promise of keeping a list: a rate-limited model is skipped and the same prompt is
+        // tried on the next one, instead of the turn dying.
+        var watcher = new CapturingWatcher();
+        var candidates = new ModelCandidateService(CreateFactory());
+        await using var coordinator = CreateCoordinator(
+            providerFailureWatcher: watcher, modelCandidates: candidates);
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        await _harness.ReadRequestAsync(); // the first attempt
+
+        watcher.Fire(new ProviderFailure(ProviderFailureKind.RateLimited, "The AI service is rate-limiting this model.", TimeSpan.FromMinutes(3)));
+
+        var (switchMethod, switchId, switchParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", switchMethod);
+        Assert.Contains("opencode-go/kimi-k3", switchParams); // the seeded second entry
+        _harness.Reply(switchId, "{}");
+
+        var (retryMethod, retryId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", retryMethod);
+        _harness.Reply(retryId, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":1,\"outputTokens\":1,\"totalTokens\":2}}");
+
+        var result = await pending;
+        Assert.Equal("end_turn", result.StopReason);
+
+        // The refused model is cooled down, so the next turn goes straight to the working one.
+        var after = await candidates.ListAsync(@"C:\work\proj", CancellationToken.None);
+        Assert.NotNull(after[0].CooldownUntil);
+        Assert.Equal("RateLimited", after[0].LastFailureKind);
+    }
+
+    [Fact]
+    public async Task Prompt_WhenEveryModelIsRefused_StillFailsWithTheProvidersReason()
+    {
+        var watcher = new CapturingWatcher();
+        var candidates = new ModelCandidateService(CreateFactory());
+
+        // Every candidate already unusable: nothing left to switch to, so the turn must fail with
+        // the provider's reason rather than silently retrying forever.
+        foreach (var candidate in await candidates.ListSeededAsync(@"C:\work\proj", CancellationToken.None))
+            await candidates.SetEnabledAsync(candidate.Id, false, CancellationToken.None);
+
+        await using var coordinator = CreateCoordinator(
+            providerFailureWatcher: watcher, modelCandidates: candidates);
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        await _harness.ReadRequestAsync();
+
+        watcher.Fire(new ProviderFailure(ProviderFailureKind.ModelInvalid, "This model isn't available.", TimeSpan.FromMinutes(30)));
+
+        var error = await Assert.ThrowsAsync<ProviderUnavailableException>(() => pending);
+        Assert.Contains("isn't available", error.PlainReason);
+    }
+
+    private sealed class CapturingWatcher : IProviderFailureWatcher
+    {
+        private Action<ProviderFailure>? _current;
+
+        public IDisposable Watch(string acpSessionId, Action<ProviderFailure> onFailure)
+        {
+            _current = onFailure;
+            return new Noop();
+        }
+
+        public void Fire(ProviderFailure failure) => _current?.Invoke(failure);
+
+        private sealed class Noop : IDisposable
+        {
+            public void Dispose()
+            {
+            }
+        }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var i = 0; i < 100 && !condition(); i++)
+            await Task.Delay(20);
+        Assert.True(condition(), "condition was not met in time");
+    }
+
+    [Fact]
     public async Task CancelCurrentTurn_WithNothingRunning_ReturnsFalse()
     {
         await using var coordinator = CreateCoordinator();
@@ -304,6 +640,10 @@ public class BrokerCoordinatorTests : IDisposable
         Assert.Equal("session/new", newSessionMethod);
         _harness.Reply(newSessionId, "{\"sessionId\":\"ses_def\",\"configOptions\":[]}");
 
+        // Recreating re-applies the model and mode the session was using…
+        await ReplyToReappliedModelAndModeAsync();
+
+        // …and only then is the originally requested switch retried against the new session.
         var (retryMethod, retryId, retryParams) = await _harness.ReadRequestAsync();
         Assert.Equal("session/set_model", retryMethod);
         using (var doc = JsonDocument.Parse(retryParams))
@@ -333,6 +673,20 @@ public class BrokerCoordinatorTests : IDisposable
         var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
         Assert.Equal("session/new", newSessionMethod);
         _harness.Reply(newSessionId, "{\"sessionId\":\"ses_def\",\"configOptions\":[]}");
+
+        // Recreating re-applies what the session was actually using, so the fresh ACP session
+        // doesn't silently revert to the agent's own model/mode.
+        var (reapplyModelMethod, reapplyModelId, reapplyModelParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", reapplyModelMethod);
+        Assert.Contains("opencode/big-pickle", reapplyModelParams);
+        _harness.Reply(reapplyModelId, "{}");
+
+        var (reapplyModeMethod, reapplyModeId, reapplyModeParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_mode", reapplyModeMethod);
+        // SetModeAsync records the requested mode before calling the agent, so the recreation
+        // re-applies that same (pending) value — what the session will be left using.
+        Assert.Contains("plan", reapplyModeParams);
+        _harness.Reply(reapplyModeId, "{}");
 
         var (retryMethod, retryId, retryParams) = await _harness.ReadRequestAsync();
         Assert.Equal("session/set_mode", retryMethod);
@@ -376,10 +730,15 @@ public class BrokerCoordinatorTests : IDisposable
 
     private readonly ActiveTurnTracker _turnTracker = new();
 
-    private BrokerCoordinator CreateCoordinator()
+    private BrokerCoordinator CreateCoordinator(
+        TimeSpan? stallAfter = null,
+        IProviderFailureWatcher? providerFailureWatcher = null,
+        IModelCandidateService? modelCandidates = null)
     {
         var spoke = new OpencodeAcpSpoke(_harness.Process);
-        return new BrokerCoordinator(spoke, CreateFactory(), _broadcaster, NullLogger<BrokerCoordinator>.Instance, _turnTracker);
+        return new BrokerCoordinator(
+            spoke, CreateFactory(), _broadcaster, NullLogger<BrokerCoordinator>.Instance, _turnTracker,
+            stallAfter, providerFailureWatcher, modelCandidates);
     }
 
     private IDbContextFactory<DevTeamDbContext> CreateFactory()

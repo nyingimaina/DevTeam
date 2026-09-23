@@ -61,6 +61,24 @@ public class DevTeamDbContextSchemaSyncTests : IDisposable
     }
 
     [Fact]
+    public void EnsureAllTablesCreated_AddsNotNullColumnsWithADefaultToAnOlderDatabase()
+    {
+        // Regression: SQLite refuses `ADD COLUMN ... NOT NULL` with no DEFAULT on an existing
+        // table, which crashed startup for any database created before the loop-guard columns.
+        _db.Database.EnsureCreated();
+        _db.Database.ExecuteSqlRaw("ALTER TABLE \"ReleaseStageRuns\" DROP COLUMN \"ConsecutiveFailures\";");
+        _db.Database.ExecuteSqlRaw("ALTER TABLE \"ReleaseStageRuns\" DROP COLUMN \"AutoRetrySuppressed\";");
+
+        DevTeamDbContextSchemaSync.EnsureAllTablesCreated(_db);
+
+        var columns = _db.Database
+            .SqlQueryRaw<string>("SELECT name FROM pragma_table_info('ReleaseStageRuns')")
+            .ToList();
+        Assert.Contains("ConsecutiveFailures", columns);
+        Assert.Contains("AutoRetrySuppressed", columns);
+    }
+
+    [Fact]
     public async Task EnsureAllTablesCreated_NewlyCreatedTableAcceptsWrites()
     {
         SimulateDatabasePredatingProfiles();

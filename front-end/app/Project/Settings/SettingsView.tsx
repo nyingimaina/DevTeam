@@ -5,9 +5,11 @@ import BrokerApi from "../../Chat/Data/BrokerApi";
 import ProfilesView from "./ProfilesView";
 import PipelineView from "./PipelineView";
 import SpecialistsView from "./SpecialistsView";
+import SupportView from "./SupportView";
+import ModelsView from "./ModelsView";
 import styles from "../Styles/SettingsView.module.css";
 
-type SettingsTabValue = "profiles" | "pipeline" | "specialists";
+type SettingsTabValue = "profiles" | "pipeline" | "specialists" | "models" | "support";
 
 interface ISettingsViewProps {
   api: BrokerApi;
@@ -25,6 +27,8 @@ export default function SettingsView({ api, workspacePath }: ISettingsViewProps)
           { label: "Profiles", value: "profiles" },
           { label: "Pipeline", value: "pipeline" },
           { label: "Specialists", value: "specialists" },
+          { label: "Models", value: "models" },
+          { label: "Support", value: "support" },
         ]}
         activeValue={activeTab}
         onChange={(v) => setActiveTab(v as SettingsTabValue)}
@@ -37,6 +41,12 @@ export default function SettingsView({ api, workspacePath }: ISettingsViewProps)
       </div>
       <div hidden={activeTab !== "specialists"}>
         <SpecialistsView api={api} />
+      </div>
+      <div hidden={activeTab !== "models"} data-testid="settings-models-tab-panel">
+        <ModelsView api={api} workspacePath={workspacePath} />
+      </div>
+      <div hidden={activeTab !== "support"} data-testid="settings-support-tab-panel">
+        <SupportView api={api} />
       </div>
     </div>
   );

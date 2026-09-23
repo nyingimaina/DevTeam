@@ -1,6 +1,9 @@
 import {
   ActiveTurnInfo,
   AgentViewModel,
+  CheckDefinitionDto,
+  CodeContextStatusDto,
+  DiagnosticsSettingsDto,
   FileSystemEntryDto,
   FileSystemRootDto,
   FileSystemStatDto,
@@ -9,12 +12,18 @@ import {
   GitStatusDto,
   HealthResponse,
   MessageDto,
+  ModelCandidateDto,
   ModelSwitchResultDto,
+  NotificationSettingsDto,
+  MetricsSummaryDto,
   ModelOption,
+  NegotiationPointDto,
+  RequirementProgressDto,
   PipelineEditorDto,
   PipelineEditorRoleDto,
   PipelineStageDto,
   ProfileDto,
+  ReadinessReportDto,
   SpecialistRoleDto,
   ReleaseDto,
   RunGatesRepairResultDto,
@@ -26,6 +35,7 @@ import {
   StoppedProcessDto,
   WorkspaceProfileDto,
 } from "./BrokerTypes";
+import { recentErrors, recordError } from "../../UI/diagnostics";
 
 export default class BrokerApi {
   private async requestAsync<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -34,8 +44,26 @@ export default class BrokerApi {
       ...options,
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`Broker ${options.method ?? "GET"} ${url} failed with ${response.status}: ${body}`);
+      const body = (await response.text().catch(() => "")).trim();
+      // Record it for the support bundle: the UI's failures travel with the server's logs, and
+      // the request reference is what ties this click to a specific line in those logs.
+      recordError({
+        source: "api",
+        message: body || `HTTP ${response.status}`,
+        url: `${options.method ?? "GET"} ${url}`,
+        status: response.status,
+        requestId: response.headers.get("X-Request-Id") ?? undefined,
+      });
+      // The broker writes plain-language error bodies meant for the person using the app
+      // (e.g. "The run was cancelled."), so surface those directly instead of wrapping them in
+      // a technical "Broker POST /api/... failed with 409" line. Fall back to the technical
+      // form only when there's nothing readable (e.g. a JSON problem blob).
+      if (body && !body.startsWith("{") && !body.startsWith("[")) {
+        throw new Error(body);
+      }
+      throw new Error(
+        `Broker ${options.method ?? "GET"} ${url} failed with ${response.status}${body ? `: ${body}` : ""}`,
+      );
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
@@ -112,6 +140,94 @@ export default class BrokerApi {
     return response.ok;
   }
 
+  // ─── diagnostics (support hand-off) ────────────────────────────────────
+
+  getDiagnosticsSettingsAsync(): Promise<DiagnosticsSettingsDto> {
+    return this.requestAsync<DiagnosticsSettingsDto>("/api/diagnostics/settings");
+  }
+
+  setVerboseLoggingAsync(verboseLogging: boolean): Promise<DiagnosticsSettingsDto> {
+    return this.requestAsync<DiagnosticsSettingsDto>("/api/diagnostics/settings", {
+      method: "POST",
+      body: JSON.stringify({ verboseLogging }),
+    });
+  }
+
+  // Sends the UI's own recent errors along with the request, so the returned file has both halves
+  // of the incident: what the screen showed, and what the broker logged.
+  async collectDiagnosticsAsync(): Promise<Blob> {
+    const response = await fetch("/api/diagnostics/bundle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frontendErrors: recentErrors() }),
+    });
+    if (!response.ok) {
+      throw new Error(`Could not collect the diagnostics file (HTTP ${response.status}).`);
+    }
+    return await response.blob();
+  }
+
+  revealLogsAsync(): Promise<void> {
+    return this.requestAsync<void>("/api/diagnostics/reveal-logs", { method: "POST" });
+  }
+
+  // ─── model candidates (the failover list) ──────────────────────────────
+
+  listModelCandidatesAsync(workspacePath: string): Promise<ModelCandidateDto[]> {
+    return this.requestAsync<ModelCandidateDto[]>(
+      `/api/models/candidates?workspacePath=${encodeURIComponent(workspacePath)}`,
+    );
+  }
+
+  addModelCandidateAsync(workspacePath: string, modelId: string): Promise<ModelCandidateDto> {
+    return this.requestAsync<ModelCandidateDto>("/api/models/candidates", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, modelId }),
+    });
+  }
+
+  removeModelCandidateAsync(id: string): Promise<void> {
+    return this.requestAsync<void>(`/api/models/candidates/${id}`, { method: "DELETE" });
+  }
+
+  reorderModelCandidatesAsync(workspacePath: string, orderedIds: string[]): Promise<ModelCandidateDto[]> {
+    return this.requestAsync<ModelCandidateDto[]>("/api/models/candidates/reorder", {
+      method: "POST",
+      body: JSON.stringify({ workspacePath, orderedIds }),
+    });
+  }
+
+  setModelCandidateEnabledAsync(id: string, enabled: boolean): Promise<void> {
+    return this.requestAsync<void>(`/api/models/candidates/${id}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  // Everything the agent says it can run, for the "add a model" picker.
+  listAvailableModelsAsync(workspacePath: string): Promise<ModelOption[]> {
+    return this.requestAsync<ModelOption[]>(
+      `/api/models/available?workspacePath=${encodeURIComponent(workspacePath)}`,
+    );
+  }
+
+  // ─── desktop notifications ─────────────────────────────────────────────
+
+  getNotificationSettingsAsync(): Promise<NotificationSettingsDto> {
+    return this.requestAsync<NotificationSettingsDto>("/api/notifications/settings");
+  }
+
+  setNotificationSettingsAsync(settings: Partial<NotificationSettingsDto>): Promise<NotificationSettingsDto> {
+    return this.requestAsync<NotificationSettingsDto>("/api/notifications/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    });
+  }
+
+  sendTestNotificationAsync(): Promise<void> {
+    return this.requestAsync<void>("/api/notifications/test", { method: "POST" });
+  }
+
   // ─── release endpoints ────────────────────────────────────────────────
 
   createReleaseAsync(featureKey: string, workspacePath: string): Promise<ReleaseDto> {
@@ -177,6 +293,28 @@ export default class BrokerApi {
     return this.requestAsync<ReleaseDto>(`/api/hotfixes/${hotfixId}/finalize`, {
       method: "POST",
     });
+  }
+
+  // ─── final checks (readiness) ──────────────────────────────────────────
+
+  // The library of strict checks that apply to this project, in plain language.
+  getChecksAsync(workspacePath: string): Promise<CheckDefinitionDto[]> {
+    return this.requestAsync<CheckDefinitionDto[]>(`/api/checks?workspacePath=${encodeURIComponent(workspacePath)}`);
+  }
+
+  // Runs the strict checks for a release without shipping it.
+  runReadinessAsync(releaseId: string): Promise<ReadinessReportDto> {
+    return this.requestAsync<ReadinessReportDto>(`/api/releases/${releaseId}/readiness`, {
+      method: "POST",
+    });
+  }
+
+  getReadinessAsync(releaseId: string): Promise<ReadinessReportDto> {
+    return this.requestAsync<ReadinessReportDto>(`/api/releases/${releaseId}/readiness`);
+  }
+
+  getReadinessHistoryAsync(releaseId: string): Promise<ReadinessReportDto[]> {
+    return this.requestAsync<ReadinessReportDto[]>(`/api/releases/${releaseId}/readiness/history`);
   }
 
   // ─── git endpoints ────────────────────────────────────────────────────
@@ -389,5 +527,46 @@ export default class BrokerApi {
       method: "POST",
       body: JSON.stringify({ targetStageName, instructions }),
     });
+  }
+
+  getRequirementProgressAsync(featureId: string): Promise<RequirementProgressDto> {
+    return this.requestAsync<RequirementProgressDto>(`/api/features/${featureId}/progress`);
+  }
+
+  getMetricsSummaryAsync(workspacePath: string, days = 30): Promise<MetricsSummaryDto> {
+    return this.requestAsync<MetricsSummaryDto>(
+      `/api/metrics/summary?workspacePath=${encodeURIComponent(workspacePath)}&days=${days}`,
+    );
+  }
+
+  getNegotiationAsync(featureId: string): Promise<NegotiationPointDto[]> {
+    return this.requestAsync<NegotiationPointDto[]>(`/api/features/${featureId}/negotiation`);
+  }
+
+  resolveNegotiationPointAsync(featureId: string, findingId: string): Promise<NegotiationPointDto> {
+    return this.requestAsync<NegotiationPointDto>(
+      `/api/features/${featureId}/negotiation/${findingId}/resolve`,
+      { method: "POST" },
+    );
+  }
+
+  escalateNegotiationPointAsync(featureId: string, findingId: string): Promise<NegotiationPointDto> {
+    return this.requestAsync<NegotiationPointDto>(
+      `/api/features/${featureId}/negotiation/${findingId}/escalate`,
+      { method: "POST" },
+    );
+  }
+
+  getCodeContextAsync(workspacePath: string): Promise<CodeContextStatusDto> {
+    return this.requestAsync<CodeContextStatusDto>(
+      `/api/workspaces/code-context?workspacePath=${encodeURIComponent(workspacePath)}`,
+    );
+  }
+
+  refreshCodeContextAsync(workspacePath: string): Promise<void> {
+    return this.requestAsync<void>(
+      `/api/workspaces/code-context/refresh?workspacePath=${encodeURIComponent(workspacePath)}`,
+      { method: "POST" },
+    );
   }
 }

@@ -939,3 +939,147 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* ── live activity feed (what the agent is doing right now) ─────────────── */
+.activityFeed {
+  margin: 0.4rem 0 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.activityHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.activityHeading {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.activityToggle {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.activityRow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.25rem 0.6rem;
+  border-bottom: 1px solid var(--surface-hover);
+  font-size: 0.8rem;
+}
+
+.activityRow:last-child {
+  border-bottom: none;
+}
+
+.activityRowThought {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.activityKind {
+  flex: 0 0 4.2rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.activityLabel {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.activityStatus {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.activityAt {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── step progress bar ─────────────────────────────────────────────────── */
+.stageProgress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-hover-strong);
+  overflow: hidden;
+  margin: 0.5rem 0 0.6rem;
+}
+.requirementProgress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.25rem 0 0.5rem;
+}
+.requirementProgressRow {
+  display: grid;
+  grid-template-columns: 3.5rem 1fr 4rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+.requirementProgressRow .stageProgress {
+  margin: 0;
+}
+.requirementProgressLabel {
+  font-size: 0.8rem;
+  color: var(--text-muted, #6b6b75);
+}
+.requirementProgressCount {
+  font-size: 0.8rem;
+  color: var(--text-muted, #6b6b75);
+  text-align: right;
+}
+
+.stageProgressFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stageProgressFill {
+    transition: none;
+  }
+}
+
+/* Escape hatch: stop the turn that is currently running for this stage. */
+.stopButton {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  background: transparent;
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  font-weight: 600;
+}
+
+.stopButton:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+
+.stopButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

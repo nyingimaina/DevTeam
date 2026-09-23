@@ -1,7 +1,13 @@
 using System.Reflection;
+using DevTeam.Broker.Context;
+using DevTeam.Broker.Diagnostics;
 using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
+using DevTeam.Broker.Gates.Readiness;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Metrics;
+using DevTeam.Broker.Models;
+using DevTeam.Broker.Notifications;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
@@ -9,6 +15,8 @@ using DevTeam.Broker.Workflow;
 using DevTeam.Shared;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 using System.Text.Json.Serialization;
 
 namespace DevTeam.Broker;
@@ -26,6 +34,12 @@ public partial class Program
         var builder = WebApplication.CreateBuilder(args);
         builder.WebHost.ConfigureKestrel(options => options.ListenLocalhost(identity.Port));
 
+        // The level is switchable at runtime so a novice can turn on full detail, reproduce a
+        // problem, hand the logs to a specialist, and turn it off again — without a rebuild or a
+        // config edit. Normal operation stays at Information; "verbose" is Verbose (includes EF
+        // SQL and framework diagnostics), which is what actually reconstructs a failure.
+        var levelSwitch = new LoggingLevelSwitch(LogEventLevel.Information);
+
         // Persisted, structured logging — the built-in console logger scrolls away and
         // nothing survives a restart. Also fills a real gap: a request that throws only
         // ever showed a bare status code to the client, with the actual exception visible
@@ -33,9 +47,34 @@ public partial class Program
         // the exception itself before rethrowing).
         builder.Host.UseSerilog((context, services, config) => config
             .ReadFrom.Services(services)
+            .MinimumLevel.ControlledBy(levelSwitch)
+            // Request logging is noisy and adds nothing a support bundle needs.
+            .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
+            .Enrich.FromLogContext()
             .WriteTo.Console()
             .WriteTo.File(Path.Combine(identity.LogsDirectory, "devteam-.log"),
-                rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14));
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 14,
+                // Bounded: verbose mode is chatty (every SQL statement) and must never be able
+                // to fill the disk during an investigation.
+                fileSizeLimitBytes: 25 * 1024 * 1024,
+                rollOnFileSizeLimit: true));
+
+        builder.Services.AddSingleton(levelSwitch);
+        builder.Services.AddSingleton<DiagnosticsSettings>();
+        builder.Services.AddSingleton<DiagnosticsBundleService>();
+        builder.Services.AddSingleton<IModelCandidateService, ModelCandidateService>();
+        // Reads the agent's own log, the only place a provider refusal is reported.
+        builder.Services.AddSingleton<IProviderFailureWatcher>(
+            _ => new OpenCodeLogWatcher(OpenCodeLogWatcher.DefaultLogPath));
+        builder.Services.AddSingleton<NotificationSettings>();
+        builder.Services.AddSingleton<IUserNotifier, UserNotifier>();
+        // The app has no UI of its own, so the desktop is how it reaches someone who walked away.
+        // One adapter per platform; Linux/macOS are stubs for now.
+        if (OperatingSystem.IsWindows())
+            builder.Services.AddSingleton<IPlatformNotifier, WindowsToastNotifier>();
+        else
+            builder.Services.AddSingleton<IPlatformNotifier, LoggingNotifier>();
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
@@ -44,7 +83,10 @@ public partial class Program
             var exe = identity.OpenCodePath
                 ?? throw new InvalidOperationException(
                     "opencode executable not found. Install opencode or set the path.");
-            return new OpencodeAcpProcess(exe, ["acp"]);
+            var logger = sp.GetRequiredService<ILogger<Program>>();
+            // Stderr is drained by the process wrapper regardless; forwarding it here means the
+            // agent's own complaints ("stream error: rate limit exceeded") land in our log too.
+            return new OpencodeAcpProcess(exe, ["acp"], line => logger.LogDebug("opencode: {Line}", line));
         });
         builder.Services.AddSingleton<IPermissionPolicy, WorkspaceScopedPermissionPolicy>();
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
@@ -62,10 +104,35 @@ public partial class Program
         builder.Services.AddSingleton<IGitCredentialStore, DpapiGitCredentialStore>();
 #pragma warning restore CA1416
         builder.Services.AddSingleton<IProcessRunner, SystemProcessRunner>();
+        builder.Services.AddSingleton<IReadinessEnvironment, ReadinessEnvironment>();
+        builder.Services.AddSingleton<IReadinessChecker, ReadinessChecker>();
+        builder.Services.AddSingleton<IShipReadinessGate, ShipReadinessGate>();
+
+        // Code overview (Repomix). Configuration first, then the fakeable Repomix/git seams, then
+        // the coalescing queue + singleton service + its background worker.
+        var repoContextOptions = new RepoContextOptions();
+        builder.Configuration.GetSection("RepoContext").Bind(repoContextOptions);
+        builder.Services.AddSingleton(repoContextOptions);
+        builder.Services.AddSingleton<RepoContextQueue>();
+        builder.Services.AddSingleton<IRepomixRunner>(sp => new RepomixRunner(
+            sp.GetRequiredService<IProcessRunner>(), repoContextOptions.RepomixCommand,
+            sp.GetService<ILogger<RepomixRunner>>()));
+        builder.Services.AddSingleton<IGitProbe>(sp => new GitProbe(
+            sp.GetRequiredService<IProcessRunner>(), sp.GetService<ILogger<GitProbe>>()));
+        builder.Services.AddSingleton<IRepoContextService>(sp => new RepoContextService(
+            repoContextOptions,
+            sp.GetRequiredService<RepoContextQueue>(),
+            sp.GetRequiredService<IRepomixRunner>(),
+            sp.GetRequiredService<IGitProbe>(),
+            sp.GetService<ILogger<RepoContextService>>()));
+        builder.Services.AddHostedService<RepoContextWorker>();
+        builder.Services.AddHostedService<MetricsRetentionService>();
+
         builder.Services.AddSingleton<IGate[]>(sp =>
         {
             var runner = sp.GetRequiredService<IProcessRunner>();
-            return BuiltinGateRegistry.Create(runner);
+            var readiness = sp.GetRequiredService<IReadinessChecker>();
+            return BuiltinGateRegistry.Create(runner, readiness, sp.GetRequiredService<IRepoContextService>());
         });
         builder.Services.AddSingleton<IGateRunner, GateRunner>();
         builder.Services.AddSingleton<WorkflowDefinitionLoader>();
@@ -77,6 +144,9 @@ public partial class Program
             sp.GetRequiredService<IModelSwitchBackend>(),
             sp.GetRequiredService<ILogger<StageModelSwitcher>>()));
         builder.Services.AddSingleton<IGitService, GitService>();
+
+        // Turn metrics: a per-turn ledger, an on-demand rollup/diagnosis, and a retention pass.
+        builder.Services.AddSingleton<MetricsService>();
         builder.Services.AddDbContextFactory<DevTeamDbContext>(options =>
             options.UseSqlite($"Data Source={identity.DatabasePath}"));
         builder.Services.AddSignalR();
@@ -95,6 +165,12 @@ public partial class Program
             db.Database.EnsureCreated();
             DevTeamDbContextSchemaSync.EnsureAllTablesCreated(db);
         }
+
+        // Restore the operator's logging preference before serving anything.
+        app.Services.GetRequiredService<DiagnosticsSettings>().LoadAsync(CancellationToken.None)
+            .GetAwaiter().GetResult();
+        app.Services.GetRequiredService<NotificationSettings>().LoadAsync(CancellationToken.None)
+            .GetAwaiter().GetResult();
 
         app.UseSerilogRequestLogging();
         app.UseRequestDiagnostics();

@@ -25,6 +25,14 @@ public static class ArtifactPaths
     public static string HandoffPath(string workspacePath, string featureKey)
         => Path.Combine(FeatureDir(workspacePath, featureKey), "handoff.md");
 
+    // The engine-written, crash-proof record of the interactive Q&A: each answered question is
+    // appended here as it happens, so a restart mid-interview can resume instead of re-asking
+    // everything from question one.
+    public const string InterviewFileName = "interview.md";
+
+    public static string InterviewPath(string workspacePath, string featureKey)
+        => Path.Combine(FeatureDir(workspacePath, featureKey), InterviewFileName);
+
     public static string ReleaseYamlPath(string workspacePath)
         => Path.Combine(workspacePath, "devteam", "release.yaml");
 

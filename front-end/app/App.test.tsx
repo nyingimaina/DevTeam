@@ -19,12 +19,12 @@ jest.mock("./Chat/Data/BrokerApi", () => {
   };
 });
 
-jest.mock("./Project/Release/ReleaseWizard", () => {
-  function ReleaseWizardMock({ testIdPrefix, workspacePath }: { testIdPrefix?: string; workspacePath?: string }) {
+jest.mock("./Project/Navigation/ProjectNavigator", () => {
+  function ProjectNavigatorMock({ workspacePath }: { workspacePath?: string }) {
     const [count, setCount] = React.useState(0);
     return (
-      <div data-testid={testIdPrefix ?? "release-wizard"}>
-        ReleaseWizard Mock — {workspacePath}
+      <div data-testid="project-navigator">
+        ProjectNavigator Mock — {workspacePath}
         <button onClick={() => setCount((c) => c + 1)}>Increment Release Count</button>
         <span data-testid="release-count">{count}</span>
       </div>
@@ -32,7 +32,7 @@ jest.mock("./Project/Release/ReleaseWizard", () => {
   }
   return {
     __esModule: true,
-    default: ReleaseWizardMock,
+    default: ProjectNavigatorMock,
   };
 });
 
@@ -95,14 +95,14 @@ describe("App", () => {
   it("shows PathBrowser when no project is open", () => {
     render(<App />);
     expect(screen.getByTestId("path-browser")).toBeInTheDocument();
-    expect(screen.queryByTestId("release-wizard")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-navigator")).not.toBeInTheDocument();
   });
 
   it("opens project when folder is picked", () => {
     render(<App />);
     fireEvent.click(screen.getByText("Pick"));
-    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
-    expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\my-project");
+    expect(screen.getByTestId("project-navigator")).toBeInTheDocument();
+    expect(screen.getByText(/ProjectNavigator Mock/)).toHaveTextContent("C:\\work\\my-project");
     expect(screen.queryByTestId("path-browser")).not.toBeInTheDocument();
   });
 
@@ -115,8 +115,8 @@ describe("App", () => {
   it("restores project from localStorage", () => {
     localStorage.setItem("devteam-project", "C:\\work\\saved");
     render(<App />);
-    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
-    expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\saved");
+    expect(screen.getByTestId("project-navigator")).toBeInTheDocument();
+    expect(screen.getByText(/ProjectNavigator Mock/)).toHaveTextContent("C:\\work\\saved");
     expect(screen.queryByTestId("path-browser")).not.toBeInTheDocument();
   });
 
@@ -129,7 +129,7 @@ describe("App", () => {
   it("clicking folder name clears project", () => {
     render(<App />);
     fireEvent.click(screen.getByText("Pick"));
-    expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+    expect(screen.getByTestId("project-navigator")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("my-project"));
     expect(screen.getByTestId("path-browser")).toBeInTheDocument();
@@ -150,7 +150,7 @@ describe("App", () => {
     expect(screen.getByText(/Git Mock/)).toHaveTextContent("C:\\work\\my-project");
 
     fireEvent.click(screen.getByText("Releases"));
-    expect(screen.getByText(/ReleaseWizard Mock/)).toHaveTextContent("C:\\work\\my-project");
+    expect(screen.getByText(/ProjectNavigator Mock/)).toHaveTextContent("C:\\work\\my-project");
   });
 
   it("keeps a previously opened tab's state alive when switching away and back", () => {
@@ -161,7 +161,7 @@ describe("App", () => {
     expect(screen.getByTestId("release-count")).toHaveTextContent("1");
 
     fireEvent.click(screen.getByText("Git"));
-    expect(screen.queryByTestId("release-wizard")).not.toBeVisible();
+    expect(screen.queryByTestId("project-navigator")).not.toBeVisible();
 
     fireEvent.click(screen.getByText("Releases"));
     expect(screen.getByTestId("release-count")).toHaveTextContent("1");
@@ -172,7 +172,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Pick"));
     fireEvent.click(screen.getByText("Git"));
     expect(screen.getByTestId("git-mock")).toBeVisible();
-    expect(screen.queryByTestId("release-wizard")).not.toBeVisible();
+    expect(screen.queryByTestId("project-navigator")).not.toBeVisible();
   });
 
   it("sweeps the newly opened path for stray processes", async () => {
@@ -225,7 +225,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByText("Settings"));
     expect(screen.getByTestId("settings-mock")).toBeVisible();
-    expect(screen.queryByTestId("release-wizard")).not.toBeVisible();
+    expect(screen.queryByTestId("project-navigator")).not.toBeVisible();
     expect(screen.getByText(/Settings Mock/)).toHaveTextContent("C:\\work\\my-project");
   });
 
@@ -243,7 +243,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText("Pick"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("release-wizard")).toBeInTheDocument();
+      expect(screen.getByTestId("project-navigator")).toBeInTheDocument();
     });
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });

@@ -55,6 +55,100 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task RunStage_WhenTheTurnIsCancelled_LeavesTheStageResumableInsteadOfEscalated()
+    {
+        // Regression: cancelling a run used to mark the stage "Agent error — needs retry"
+        // (Timeout classification) and escape as an unhandled TaskCanceledException.
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        _coordinator.ExceptionsToThrow.Enqueue(new OperationCanceledException("A task was canceled."));
+
+        var afterCancel = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var run = afterCancel.StageRuns.Single(sr => sr.StageName == "developer");
+        Assert.Equal(ReleaseStageStatus.Active, run.Status);
+        Assert.Equal(StageErrorKind.None, run.LastErrorKind);
+        Assert.Equal(StagePhase.GuidedQA, run.Phase);
+        Assert.Contains("Cancelled", run.Summary);
+
+        // The stage can simply be run again — nothing was left stuck or escalated.
+        var afterRetry = await engine.RunStageAsync(featureId, CancellationToken.None);
+        Assert.Equal(ReleaseStageStatus.BlockedSignoff,
+            afterRetry.StageRuns.Single(sr => sr.StageName == "developer").Status);
+    }
+
+    [Fact]
+    public async Task RunStage_WhenTheProviderRefuses_EscalatesWithTheProvidersOwnReason()
+    {
+        // The whole point: the user is told the AI service refused, not that the agent "stopped
+        // responding" — and the request still returns normally instead of as a 500.
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        _coordinator.ExceptionsToThrow.Enqueue(
+            new ProviderUnavailableException("The AI service is rate-limiting this model.", "opencode/big-pickle", isRateLimit: true));
+
+        var result = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var run = result.StageRuns.Single(sr => sr.StageName == "developer");
+        Assert.Equal(ReleaseStageStatus.Escalated, run.Status);
+        Assert.Equal(StageErrorKind.ProviderUnavailable, run.LastErrorKind);
+        Assert.Contains("rate-limiting", run.Summary);
+    }
+
+    [Fact]
+    public async Task RunStage_WhenTheAgentStalls_EscalatesWithAStalledReason()
+    {
+        // A stall is a failure the user can act on ("the agent stopped responding"), not a
+        // generic timeout — so it gets its own error kind and a retry affordance.
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        _coordinator.ExceptionsToThrow.Enqueue(new AcpStalledException(TimeSpan.FromMinutes(5)));
+
+        var result = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var run = result.StageRuns.Single(sr => sr.StageName == "developer");
+        Assert.Equal(ReleaseStageStatus.Escalated, run.Status);
+        Assert.Equal(StageErrorKind.Stalled, run.LastErrorKind);
+    }
+
+    [Fact]
+    public async Task RunStage_ReRunOnTheSameActiveRun_ReplacesItsStepRowsInsteadOfDuplicating()
+    {
+        // Regression: a re-invoked run (after a cancel, or a second Run click while it is still
+        // Active) appended a second row for every step, so the checklist and log showed each
+        // step twice.
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        _coordinator.ExceptionsToThrow.Enqueue(new OperationCanceledException());
+        var afterCancel = await engine.RunStageAsync(featureId, CancellationToken.None);
+        Assert.Equal(ReleaseStageStatus.Active,
+            afterCancel.StageRuns.Single(sr => sr.StageName == "developer").Status);
+
+        var afterRetry = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var retried = afterRetry.StageRuns.Single(sr => sr.StageName == "developer");
+        Assert.Equal(1, retried.GateChecks.Count(gc => gc.Name == "context_bundle"));
+    }
+
+    [Fact]
+    public async Task StartStage_WhenTheTurnIsCancelled_DoesNotEscalateTheStage()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        _coordinator.ExceptionsToThrow.Enqueue(new OperationCanceledException());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => engine.StartStageAsync(featureId, CancellationToken.None));
+
+        var run = (await engine.GetReleaseAsync(release.Id, CancellationToken.None))
+            .StageRuns.Single(sr => sr.StageName == "business-analyst");
+        Assert.NotEqual(ReleaseStageStatus.Escalated, run.Status);
+        Assert.Equal(StageErrorKind.None, run.LastErrorKind);
+    }
+
+    [Fact]
     public async Task StartStage_PromptTellsAgentHandoffIsAutomatic()
     {
         // Regression: without this, a role's agent has no self-knowledge of DevTeam's
@@ -90,6 +184,103 @@ public class WorkflowEngineTests : IDisposable
 
         var baPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
         Assert.DoesNotContain("no one is watching this stage", baPrompt);
+    }
+
+    [Fact]
+    public async Task StartStage_AfterRetryStageOnTheCurrentStage_OpensAFreshSession()
+    {
+        // RetryStageAsync (the escape hatch for a stuck/orphaned session — e.g. its ACP session
+        // went stale after a broker restart) supersedes the live attempt and inserts a brand-new
+        // row with Status = Active but no session yet. StartStageAsync's "already active, nothing
+        // to do" short-circuit used to match that row on Status alone, so it returned the
+        // sessionless row as-is and never opened a new session — the retry silently did nothing.
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        Assert.Equal(1, fake.NewSessionCallCount);
+
+        await engine.RetryStageAsync(featureId, "business-analyst", CancellationToken.None);
+        var retried = (await engine.GetReleaseAsync(release.Id, CancellationToken.None))
+            .StageRuns.Where(sr => sr.StageName == "business-analyst").OrderByDescending(sr => sr.Attempt).First();
+        Assert.Equal(2, retried.Attempt);
+        Assert.Null(retried.AcpSessionId);
+
+        var resumed = await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(2, fake.NewSessionCallCount);
+        Assert.NotNull(resumed.AcpSessionId);
+        Assert.Equal(2, resumed.Attempt);
+    }
+
+    [Fact]
+    public async Task StartStage_ProviderRefusalAfterCallerDisconnects_StillRecordsTheFailure()
+    {
+        // The prompt itself runs on a separate agent-only cancellation source, decoupled from
+        // the caller's token, specifically so an HTTP client giving up doesn't kill the agent
+        // turn. But recording the failure afterwards reused that same caller token — so once
+        // the client had disconnected (a normal thing for a turn that runs for minutes) by the
+        // time the provider-refusal exception was caught, the failure-recording DB write itself
+        // got cancelled and silently lost: the stage run was left "Active"/LastErrorKind=None
+        // forever, with no way to tell it had failed short of reading raw broker logs.
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.ExceptionsToThrow.Enqueue(
+            new ProviderUnavailableException("The AI service is rate-limiting this model.", modelId: null, isRateLimit: true));
+
+        using var cts = new CancellationTokenSource();
+        fake.OnPrompt = (_, _) => cts.Cancel(); // simulate the HTTP client disconnecting mid-turn
+
+        // The real refusal must propagate — not get masked by an OperationCanceledException from
+        // the now-cancelled ct, which is exactly what happened before the fix.
+        await Assert.ThrowsAsync<ProviderUnavailableException>(
+            () => engine.StartStageAsync(featureId, cts.Token));
+
+        var run = (await engine.GetReleaseAsync(release.Id, CancellationToken.None))
+            .StageRuns.Single(sr => sr.StageName == "business-analyst");
+        Assert.Equal(StageErrorKind.ProviderUnavailable, run.LastErrorKind);
+        Assert.Equal("The AI service is rate-limiting this model.", run.LastErrorMessage);
+        Assert.Equal(ReleaseStageStatus.Escalated, run.Status);
+    }
+
+    [Fact]
+    public async Task StartStage_PromptAsksAboutAppTypeAndFileHierarchyInsteadOfAssumingBackendFrontend()
+    {
+        // Forcing every app into a backend/frontend split — even a single WPF/console/library
+        // project that has no "frontend" at all — produces awkward scaffolds the developer then
+        // has to rework later (see the calculator-wpf dogfood session: a WPF app's manifest still
+        // carried an unused front-end/app/<F> slot). The BA should ask up front instead.
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var openingPrompt = fake.Prompts.Single(p => p.StartsWith("You are the business-analyst"));
+        Assert.Contains("app type", openingPrompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("file and folder hierarchy", openingPrompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("manifest.yaml", openingPrompt);
+        Assert.Contains("codePaths", openingPrompt);
+    }
+
+    [Fact]
+    public async Task RunStage_DeveloperPrompt_DoesNotHardcodeBackendFrontendWording()
+    {
+        var engine = CreateEngine();
+        var (release, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var developerPrompt = fake.Prompts.First(p => p.StartsWith("You are the developer"));
+        Assert.DoesNotContain("backend `", developerPrompt);
+        Assert.DoesNotContain("frontend `", developerPrompt);
+        Assert.Contains("manifest.yaml", developerPrompt);
     }
 
     [Fact]
@@ -576,10 +767,14 @@ public class WorkflowEngineTests : IDisposable
         // boundaries (start/end of the whole step loop), so a concurrent poll (the frontend's
         // live step checklist) couldn't observe progress until the entire attempt finished.
         _gateRunner.Results.AddRange([
+            new GateResult(true, "OK", "code map ok"),
             new GateResult(true, "OK", "context bundle ok"),
+            new GateResult(true, "OK", "build check ok"),
             new GateResult(true, "OK", "verify ok"),
             new GateResult(true, "OK", "hygiene ok"),
+            new GateResult(true, "OK", "launch ok"),
             new GateResult(true, "OK", "reuse ok"),
+            new GateResult(true, "OK", "project structure ok"),
             new GateResult(true, "OK", "slice ok"),
             new GateResult(true, "OK", "pr ok"),
         ]);
@@ -597,10 +792,11 @@ public class WorkflowEngineTests : IDisposable
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
 
-        // 6 builtin steps run (context_bundle, verify_code, code_hygiene, reuse_gate, slice_scope,
-        // render_pr); each one's result must already be visible via a fresh context by the time
-        // the next one's RunAsync fires — i.e. counts strictly increase, not [0,0,0,0,0,0].
-        Assert.Equal([0, 1, 2, 3, 4, 5], savedCountsBeforeEachCall);
+        // 10 builtin steps run (code_map, context_bundle, build_check, verify_code, code_hygiene,
+        // app_launch, reuse_gate, project_structure, slice_scope, render_pr); each one's result
+        // must already be visible via a fresh context by the time the next one's RunAsync fires
+        // — i.e. counts strictly increase, not [0,0,0,0,0,0,0,0,0,0].
+        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], savedCountsBeforeEachCall);
     }
 
     [Fact]
@@ -624,6 +820,26 @@ public class WorkflowEngineTests : IDisposable
             .Where(p => p.StartsWith("You are the developer")).ToArray();
         Assert.NotEmpty(devPrompts);
         Assert.Contains("DONE", devPrompts[^1]);
+    }
+
+    [Fact]
+    public async Task RunGates_OnARecheckAfterTheStageAlreadyPassed_StillReRunsVerifyCode()
+    {
+        // Regression: a gates-only recheck (what run-gates-and-repair calls after asking the
+        // agent to fix a reported problem) must re-validate that the code still builds and its
+        // tests still pass. verify_code lives inside the developer stage's retry Loop alongside
+        // the agent step, so the "skip everything up to and including the first Agent/Loop step"
+        // logic used to skip it forever after the stage's first pass — a repaired stage could
+        // reach BlockedSignoff/Complete without its tests ever running against the latest edits.
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        Assert.Equal(1, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.VerifyCode));
+
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(2, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.VerifyCode));
     }
 
     [Fact]
@@ -689,10 +905,11 @@ public class WorkflowEngineTests : IDisposable
         var engine = CreateEngine();
         var (release, featureId) = await DriveToDeveloperAsync(engine);
 
-        // context_bundle (a leading builtin, runs before the loop) draws from the same fake
-        // queue — give it a pass first, then fail verify_code on attempt 1 with distinctive
-        // evidence; everything after falls through to the fake's default pass.
+        // code_map and context_bundle (leading builtins, run before the loop) draw from the same
+        // fake queue — give them a pass first, then fail verify_code on attempt 1 with
+        // distinctive evidence; everything after falls through to the fake's default pass.
         _gateRunner.Results.Clear();
+        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
         _gateRunner.Results.Add(new GateResult(true, "OK", ""));
         _gateRunner.Results.Add(new GateResult(false, "Tests failed", "MARKER-attempt1-verify-code-failure"));
 
@@ -1171,11 +1388,12 @@ public class WorkflowEngineTests : IDisposable
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
 
-        // qa stage: context_bundle and verify_code pass, coverage_matrix fails. QA's mandate
-        // is to verify, not author tests, so this must route back to developer (who owns
+        // qa stage: code_map, context_bundle and verify_code pass, coverage_matrix fails. QA's
+        // mandate is to verify, not author tests, so this must route back to developer (who owns
         // verify_code/coverage_matrix per the default pipeline) instead of leaving QA in a
         // retry loop it can never win.
         _gateRunner.Results.Clear();
+        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
         _gateRunner.Results.Add(new GateResult(true, "OK", ""));
         _gateRunner.Results.Add(new GateResult(true, "OK", ""));
         _gateRunner.Results.Add(new GateResult(false, "missing coverage", "REQ-002 not covered"));
@@ -1438,6 +1656,123 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task PushBack_OpensNumberedPointsAndTheNextPromptAsksPointByPoint()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        await engine.PushBackAsync(
+            featureId, "business-analyst", "Rework: the BRS omits the empty-input rule", CancellationToken.None);
+
+        await using (var db = CreateFactory().CreateDbContext())
+        {
+            var point = Assert.Single(db.ReviewFindings.Where(f => f.PushedBackTo == "business-analyst"));
+            Assert.Equal(1, point.Round);
+            Assert.Equal("user", point.OpenedBy);
+            Assert.Equal(ReviewFindingStatus.Open, point.Status);
+        }
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var prompt = fake.Prompts.Last();
+        Assert.Contains("answer every point", prompt);
+        Assert.Contains("ADDRESSED", prompt);
+    }
+
+    [Fact]
+    public async Task QaCoverageFailure_RoutesBackToDeveloperAndOpensAPoint()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+
+        // QA's exit checks, in order: code_map, context_bundle, verify_code, coverage_matrix,
+        // render_handoff (the agent step between them is not a gate). Only coverage fails.
+        _gateRunner.Results.Clear();
+        _gateRunner.Results.AddRange([
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", "verify ok"),
+            new GateResult(false, "missing coverage", "fail: no test references REQ-1"),
+            new GateResult(true, "OK", string.Empty),
+        ]);
+
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        Assert.Equal("developer", updated.FlowPosition!.CurrentStageName);
+        await using var db = CreateFactory().CreateDbContext();
+        var points = db.ReviewFindings.Where(f => f.PushedBackTo == "developer").ToList();
+        Assert.Contains(points, p => p.OpenedBy == "system:gate-failure" && p.Target == "coverage_matrix" && p.Round == 1);
+    }
+
+    [Fact]
+    public async Task RunStage_SameCheckFailingThreeTimes_SuppressesAutoRetry()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        async Task<DevTeamRelease> RunOnceAsync()
+        {
+            // Developer exit checks in order: code_map, context_bundle, build_check, verify_code
+            // (loop attempt 1), code_hygiene, reuse_gate, project_structure, slice_scope,
+            // render_pr. Only code_hygiene fails, and it has no ResponsibleRole — so it stays
+            // same-stage.
+            _gateRunner.Script(
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(false, "unclean", "TODO found"),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty));
+            return await engine.RunStageAsync(featureId, CancellationToken.None);
+        }
+
+        await RunOnceAsync();
+        await RunOnceAsync();
+        var release = await RunOnceAsync();
+
+        var devRun = release.StageRuns
+            .Where(sr => sr.StageName == "developer")
+            .OrderByDescending(sr => sr.Attempt)
+            .First();
+        Assert.Equal(GateFailureLoopGuard.MaxConsecutiveFailures, devRun.ConsecutiveFailures);
+        Assert.True(devRun.AutoRetrySuppressed);
+    }
+
+    [Fact]
+    public async Task RunStage_DifferentCheckFailingResetsTheLoopGuard()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        async Task<DevTeamRelease> RunOnceAsync(int failIndex)
+        {
+            // code_map, context_bundle, build_check, verify_code, code_hygiene, reuse_gate,
+            // project_structure, slice_scope, render_pr.
+            var results = Enumerable.Range(0, 9).Select(_ => new GateResult(true, "OK", string.Empty)).ToList();
+            results[failIndex] = new GateResult(false, "failed", "boom");
+            _gateRunner.Script(results.ToArray());
+            return await engine.RunStageAsync(featureId, CancellationToken.None);
+        }
+
+        await RunOnceAsync(4); // code_hygiene
+        await RunOnceAsync(4); // code_hygiene
+        var release = await RunOnceAsync(5); // reuse_gate — different check
+
+        var devRun = release.StageRuns
+            .Where(sr => sr.StageName == "developer")
+            .OrderByDescending(sr => sr.Attempt)
+            .First();
+        Assert.Equal(1, devRun.ConsecutiveFailures);
+        Assert.False(devRun.AutoRetrySuppressed);
+    }
+
+    [Fact]
     public async Task GetStageMessages_ReturnsLinkedSessionMessages()
     {
         var engine = CreateEngine();
@@ -1479,13 +1814,15 @@ public class WorkflowEngineTests : IDisposable
 
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
 
-        Assert.Equal(3, pipeline.Count);
+        Assert.Equal(4, pipeline.Count);
         Assert.Equal("business-analyst", pipeline[0].Name);
         Assert.True(pipeline[0].UserInputRequired);
         Assert.Equal("requirements-approval", pipeline[0].Signoff);
         Assert.Equal("developer", pipeline[1].Name);
         Assert.False(pipeline[1].UserInputRequired);
         Assert.Equal("qa", pipeline[2].Name);
+        Assert.Equal("verification", pipeline[3].Name);
+        Assert.Null(pipeline[3].Signoff);
     }
 
     [Fact]
@@ -1512,15 +1849,44 @@ public class WorkflowEngineTests : IDisposable
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
 
         Assert.Equal(
-            ["scaffold_specs", "context_bundle", "agent:business-analyst", "gherkin_validator", "render_handoff"],
+            ["scaffold_specs", "core_scaffold", "repo_hygiene", "code_map", "context_bundle", "agent:business-analyst", "gherkin_validator", "render_handoff"],
             pipeline[0].Steps);
         // The loop's inner steps are flattened once, not repeated per retry attempt.
         Assert.Equal(
-            ["context_bundle", "agent:developer", "verify_code", "code_hygiene", "reuse_gate", "slice_scope", "render_pr"],
+            ["code_map", "context_bundle", "agent:developer", "build_check", "verify_code", "code_hygiene", "app_launch", "reuse_gate", "project_structure", "slice_scope", "render_pr"],
             pipeline[1].Steps);
         Assert.Equal(
-            ["context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"],
+            ["code_map", "context_bundle", "agent:qa", "verify_code", "coverage_matrix", "render_handoff"],
             pipeline[2].Steps);
+    }
+
+    [Fact]
+    public async Task GetPipeline_ExposesAPlainLanguageLabelForEveryStep()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
+
+        foreach (var stage in pipeline)
+        {
+            // One label per step, in the same order — the checklist renders labels, diagnostics
+            // still address steps by their stable id.
+            Assert.Equal(stage.Steps.Count, stage.StepLabels.Count);
+            Assert.All(stage.StepLabels, label =>
+            {
+                Assert.False(string.IsNullOrWhiteSpace(label));
+                Assert.DoesNotContain("_", label);
+                Assert.DoesNotContain(":", label);
+            });
+        }
+
+        var qa = pipeline.Single(p => p.Name == "qa");
+        Assert.Equal("Reading the project overview", qa.StepLabels[0]);
+        Assert.Equal("Gathering background for the agent", qa.StepLabels[1]);
+        Assert.Equal("QA agent working", qa.StepLabels[2]);
+        Assert.Equal("The code builds and its tests pass", qa.StepLabels[3]);
     }
 
     [Fact]
@@ -1598,7 +1964,7 @@ public class WorkflowEngineTests : IDisposable
 
             var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
 
-            Assert.Equal(["business-analyst", "developer", "qa"], pipeline.Select(p => p.Name).ToArray());
+            Assert.Equal(["business-analyst", "developer", "qa", "verification"], pipeline.Select(p => p.Name).ToArray());
         }
         finally
         {
@@ -1631,9 +1997,9 @@ public class WorkflowEngineTests : IDisposable
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
 
         Assert.Equal(
-            [BuiltinRegistry.ScaffoldSpecs, BuiltinRegistry.ContextBundle],
+            [BuiltinRegistry.ScaffoldSpecs, BuiltinRegistry.CoreScaffold, BuiltinRegistry.RepoHygiene, BuiltinRegistry.CodeMap, BuiltinRegistry.ContextBundle],
             _gateRunner.Requests.Select(r => r.Builtin).ToList());
-        Assert.Equal(2, stageRun.GateChecks.Count);
+        Assert.Equal(5, stageRun.GateChecks.Count);
         Assert.All(stageRun.GateChecks, gc => Assert.True(gc.Passed));
         Assert.Single(_coordinator.Prompts);
     }
@@ -1677,6 +2043,38 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(
             new[] { ArtifactPaths.FeatureDirRelative("feat-001"), "docs", "back-end/Features/login", "front-end/app/login", "back-end/src/Core", "front-end/app/core", "Program.cs" },
             prefixes);
+    }
+
+    [Fact]
+    public async Task RunStage_DeveloperSession_FreeFormManifestWithMoreThanTwoCodePaths_GrantsWriteAccessToAllOfThem()
+    {
+        // An app that doesn't split into backend/frontend (e.g. a single WPF project) can declare
+        // any number of code paths — write access must cover every one of them, not just the
+        // first two (the old CodePathBack/CodePathFront-only behavior this regresses against).
+        using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
+        SliceManifestIO.Write(
+            ArtifactPaths.ManifestPath(workspace.Path, "feat-001"),
+            new SliceManifest(
+                "feat-001", "Calculator",
+                ["src/Features/login", "src/Features/login.Tests", "src/Features/login.Resources"],
+                [], "dotnet test"));
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+        await engine.RunGatesAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "business-analyst", "pm", null, CancellationToken.None);
+
+        _coordinator.AllowedWritePrefixesCalls.Clear();
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var prefixes = _coordinator.AllowedWritePrefixesCalls[0];
+        Assert.Contains("src/Features/login", prefixes!);
+        Assert.Contains("src/Features/login.Tests", prefixes!);
+        Assert.Contains("src/Features/login.Resources", prefixes!);
     }
 
     [Fact]
@@ -1892,6 +2290,40 @@ public class WorkflowEngineTests : IDisposable
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
         Assert.All(_coordinator.RequestedModelIds, id => Assert.False(string.IsNullOrEmpty(id)));
+    }
+
+    [Fact]
+    public async Task StartStage_UsesTheWorkspacesRememberedModel_WhenOneIsSet()
+    {
+        // The whole point of remembering: pick a model once, every later stage uses it, instead
+        // of re-picking it on each of the (many) sessions a pipeline opens.
+        await using (var seedDb = CreateFactory().CreateDbContext())
+        {
+            seedDb.WorkspaceModelSettings.Add(new WorkspaceModelSettings
+            {
+                WorkspacePath = @"C:\work\proj",
+                ModelId = "anthropic/claude-x",
+            });
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+
+        await engine.StartStageAsync(release.CurrentFeatureId!.Value, CancellationToken.None);
+
+        Assert.Equal(["anthropic/claude-x"], _coordinator.RequestedModelIds);
+    }
+
+    [Fact]
+    public async Task StartStage_FallsBackToTheDefault_WhenTheWorkspaceHasNoPreference()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+
+        await engine.StartStageAsync(release.CurrentFeatureId!.Value, CancellationToken.None);
+
+        Assert.Equal(["opencode/big-pickle"], _coordinator.RequestedModelIds);
     }
 
     [Fact]
@@ -2554,7 +2986,11 @@ public class WorkflowEngineTests : IDisposable
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
-        return await engine.SignoffAsync(featureId, "qa", "qa-lead", null, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "qa", "qa-lead", null, CancellationToken.None);
+
+        // The final 'verification' stage is deterministic and has no signoff: running it is the
+        // last thing that happens before the feature completes and merges into its release.
+        return await engine.RunStageAsync(featureId, CancellationToken.None);
     }
 
     private sealed class TempDir(string path) : IDisposable
@@ -2607,6 +3043,16 @@ internal sealed class FakeGateRunner : IGateRunner
 {
     public List<(string Builtin, GateRequest Request)> Requests { get; } = [];
     public List<GateResult> Results { get; } = [];
+
+    /// <summary>Replace the scripted results and reset the read cursor, so a test that runs a
+    /// stage several times gets the same sequence each time (plain Results.Clear does not).</summary>
+    public void Script(params GateResult[] results)
+    {
+        Results.Clear();
+        Results.AddRange(results);
+        _index = 0;
+    }
+
     // Lets a test observe state (e.g. via a fresh DbContext) right before this call returns,
     // without needing real concurrency — RunStageAsync awaits this call synchronously, so
     // whatever the previous step already persisted is visible here if it was actually saved.
@@ -2704,6 +3150,16 @@ internal sealed class FakeGitService : IGitService
         return Task.FromResult(new GitResponse(true, "OK"));
     }
 
+    // The commit a readiness attestation is pinned to; tests vary it to simulate "the branch
+    // moved after the check ran".
+    public string HeadCommitSha { get; set; } = "sha-attested";
+
+    public Task<GitResponse> HeadCommitAsync(string workspacePath, string reference, CancellationToken ct = default)
+    {
+        Commands.Add($"head-commit:{reference}");
+        return Task.FromResult(new GitResponse(true, "OK", CommitSha: HeadCommitSha));
+    }
+
     public bool RemoteConfigured { get; set; } = true;
     public bool FailMerge { get; set; }
     public string[] MergeConflictedFiles { get; set; } = ["conflicted.txt"];
@@ -2786,6 +3242,10 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
 
     public List<string> Prompts { get; } = [];
 
+    /// <summary>What each prompt asked the UI to show as the user's message (the model text, minus
+    /// any appended DevTeam instructions).</summary>
+    public List<string> DisplayTexts { get; } = [];
+
     public List<bool> PromptIsPriming { get; } = [];
 
     public CancellationToken? LastPromptToken { get; private set; }
@@ -2840,10 +3300,11 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
     // writing delegate-request.json again, to test the delegation round-trip cap).
     public Action<Guid, string>? OnPrompt { get; set; }
 
-    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false)
+    public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false, string? displayText = null)
     {
         LastPromptToken = ct;
         Prompts.Add(text);
+        DisplayTexts.Add(displayText ?? text);
         PromptIsPriming.Add(isPriming);
         Commands.Add($"prompt:{text[..Math.Min(50, text.Length)]}...");
         OnPrompt?.Invoke(sessionId, text);

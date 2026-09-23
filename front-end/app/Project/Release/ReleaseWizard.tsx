@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
+import NegotiationPanel from "./NegotiationPanel";
+import CruiseControl from "./CruiseControl";
+import RequirementProgressBars from "./RequirementProgressBars";
 import { usePoller } from "../../Chat/Data/usePoller";
 import {
   ActiveTurnInfo,
@@ -14,12 +17,22 @@ import {
   StageArtifactDto,
 } from "../../Chat/Data/BrokerTypes";
 import MessageRow from "../../Chat/UI/MessageRow";
+import QuickReplyButtons from "../../Chat/UI/QuickReplyButtons";
+import { parseQuickReplyOptions } from "../../Chat/Data/quickReply";
 import RichText from "../../UI/RichText";
 import ZestButton from "jattac.libs.web.zest-button";
 import { ZestResponsiveLayout } from "jattac.libs.web.zest-responsive-layout";
 import { FaSpinner } from "react-icons/fa6";
 import SelectWrapper from "../../Forms/SelectWrapper/UI/SelectWrapper";
 import { effectiveReleaseStatus } from "../Navigation/releaseView";
+import { activityKindLabel, feedAge, quietMessage, visibleActivity } from "./activity";
+import {
+  estimateStageDurationMs,
+  formatEstimate,
+  historicalStageDurationsMs,
+  overdueNote,
+  stepProgress,
+} from "./progress";
 import { errorKindLabel, moveOnButtonLabel, phaseLabel, proceedButtonLabel, repairNotice, stageLabel, stageOutputLabel, statusLabel, whatsNext } from "./labels";
 import type { RepairNotice } from "./labels";
 import { formatElapsed } from "../../UI/formatElapsed";
@@ -863,6 +876,9 @@ export function StageScreen({ release, featureId, api, pipeline, role, run, test
   // A Complete run means "no fresh work in flight" — except when only looking, where it is
   // exactly the record to show (a finished feature's last stage).
   const needsFreshStart = !run || (run.status === "Complete" && !readOnly);
+  // How far the checklist has got — the same rule the list ticks on, so the bar can't disagree
+  // with it. A long agent turn deliberately parks here (that step is in progress, not done).
+  const progress = run ? stepProgress(role.steps, run.gateChecks) : null;
 
   return (
     <ZestResponsiveLayout
@@ -909,10 +925,34 @@ export function StageScreen({ release, featureId, api, pipeline, role, run, test
         )}
       </div>
 
+      {!hidePrimaryPanel && !needsFreshStart && run && progress && progress.total > 0 && (
+        <div
+          className={styles.stageProgress}
+          data-testid={`${testIdPrefix}-progress`}
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={progress.total}
+          aria-valuenow={progress.completed}
+          aria-label={`${progress.completed} of ${progress.total} steps reached`}
+        >
+          <div className={styles.stageProgressFill} style={{ width: `${Math.round(progress.ratio * 100)}%` }} />
+        </div>
+      )}
+
+      {!hidePrimaryPanel && !needsFreshStart && run && (
+        <RequirementProgressBars
+          featureId={featureId}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          refreshKey={`${run.status}:${run.gateChecks?.length ?? 0}`}
+        />
+      )}
+
       {!hidePrimaryPanel && !needsFreshStart && run && role.steps.length > 0 && (
         <StepChecklist
           testIdPrefix={testIdPrefix}
           steps={role.steps}
+          labels={role.stepLabels}
           gateChecks={run.gateChecks}
           inProgress={!["BlockedGate", "BlockedEntry", "BlockedSignoff", "Complete"].includes(run.status)}
         />
@@ -924,7 +964,7 @@ export function StageScreen({ release, featureId, api, pipeline, role, run, test
 
       {!hidePrimaryPanel && needsFreshStart && readOnly && (
         <div className={styles.noRun}>
-          <div className={styles.noRunHint}>This stage hasn't started yet.</div>
+          <div className={styles.noRunHint}>This stage hasn&apos;t started yet.</div>
         </div>
       )}
 
@@ -1001,6 +1041,27 @@ export function StageScreen({ release, featureId, api, pipeline, role, run, test
           refreshRelease={refreshRelease}
         />
       )}
+
+      {!hidePrimaryPanel && run && (
+        <NegotiationPanel
+          featureId={featureId}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          refreshRelease={refreshRelease}
+        />
+      )}
+
+      {!hidePrimaryPanel && (
+        <CruiseControl
+          featureId={featureId}
+          release={release}
+          pipeline={pipeline}
+          api={api}
+          testIdPrefix={testIdPrefix}
+          refreshRelease={refreshRelease}
+          readOnly={readOnly}
+        />
+      )}
     </div>
     </ZestResponsiveLayout>
   );
@@ -1015,11 +1076,14 @@ function GateCheckItem({ gateCheck, currentStageName }: { gateCheck: ReleaseGate
   return (
     <li>
       <div>
-        {gateCheck.passed ? "✓" : "✗"} {gateCheck.name}
+        {gateCheck.passed ? "✓" : "✗"} {gateCheck.displayTitle ?? gateCheck.name}
         {ownedElsewhere && (
           <span className={styles.diagnosticsOwner}> — owned by {stageLabel(gateCheck.responsibleRole!)}</span>
         )}
       </div>
+      {!gateCheck.passed && gateCheck.plainProblem && (
+        <div className={styles.diagnosticsOwner}>{gateCheck.plainProblem}</div>
+      )}
       {gateCheck.evidenceText && <pre className={styles.diagnosticsEvidence}>{gateCheck.evidenceText}</pre>}
     </li>
   );
@@ -1158,16 +1222,18 @@ function AutoRunNotice({ testIdPrefix, onRun }: IAutoRunNoticeProps) {
 interface IStepChecklistProps {
   testIdPrefix: string;
   steps: string[];
+  // Parallel to `steps` — the plain-language wording to show instead of the raw step id.
+  labels?: string[];
   gateChecks: ReleaseGateCheckDto[];
   inProgress: boolean;
 }
 
-function StepChecklist({ testIdPrefix, steps, gateChecks, inProgress }: IStepChecklistProps) {
+function StepChecklist({ testIdPrefix, steps, labels, gateChecks, inProgress }: IStepChecklistProps) {
   let currentAssigned = false;
 
   return (
     <ul className={styles.stepChecklist} data-testid={`${testIdPrefix}-step-checklist`}>
-      {steps.map((name) => {
+      {steps.map((name, index) => {
         const check = gateChecks.find((gc) => gc.name === name);
         let status: "done" | "current" | "pending";
         if (check) {
@@ -1188,7 +1254,7 @@ function StepChecklist({ testIdPrefix, steps, gateChecks, inProgress }: IStepChe
           >
             {status === "done" && (check?.passed === false ? "✗ " : "✓ ")}
             {status === "current" && <FaSpinner className={styles.spinIcon} aria-hidden="true" />}
-            {" "}{name}
+            {" "}{labels?.[index] ?? name}
           </li>
         );
       })}
@@ -1468,6 +1534,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   const [repairInfo, setRepairInfo] = useState<RepairNotice | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
   const gatesInFlight = useRef(false);
   const lastAutoRunMsgId = useRef<string | null>(null);
   // Only auto-follow new messages while the reader is already at (or near) the bottom —
@@ -1548,10 +1615,18 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
     }
   }, [messages]);
 
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
+  // The assistant's turn just ended (sending/gates finished, nothing else blocking) — it's the
+  // user's turn again, so put the cursor back in the box instead of making them click in.
+  useEffect(() => {
+    if (!readOnly && !sending && !busy && !gatesRunning) {
+      chatInputRef.current?.focus();
+    }
+  }, [readOnly, sending, busy, gatesRunning]);
+
+  const handleSend = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if (!text || sending) return;
-    setInput("");
+    if (overrideText === undefined) setInput("");
     setMessages((prev) => [
       ...prev,
       { id: `pending-${Date.now()}`, role: "user", bodyText: text, createdAt: new Date().toISOString(), parts: [], isPriming: false },
@@ -1572,6 +1647,15 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   }, [api, featureId, input, sending, loadMessages, refreshRelease]);
 
   const nextStepLabel = moveOnButtonLabel(nextStageName);
+
+  // Only when it's genuinely the user's turn (the latest message is the assistant's, nothing
+  // is in flight) is a trailing short option list actually the live question to answer — not,
+  // say, a recap the user already replied past.
+  const lastMessage = messages[messages.length - 1];
+  const quickReplyOptions =
+    !readOnly && !sending && !gatesRunning && lastMessage?.role === "assistant"
+      ? parseQuickReplyOptions(lastMessage.bodyText)
+      : null;
 
   return (
     <ZestResponsiveLayout
@@ -1609,13 +1693,20 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
       >
         {messages.length === 0 && (
           <div className={styles.chatIntro}>
-            Conversation with the {stageRun.stageName} agent will appear here.
+            Conversation with the {stageLabel(stageRun.stageName)} agent will appear here.
             {stageRun.status === "BlockedSignoff" && " The checks passed — waiting for your approval above."}
           </div>
         )}
         {messages.map((message) => (
           <MessageRow key={message.id} message={message} onInspect={setInspecting} />
         ))}
+        {quickReplyOptions && (
+          <QuickReplyButtons
+            options={quickReplyOptions}
+            onSelect={(option) => void handleSend(option)}
+            disabled={sending || busy || gatesRunning}
+          />
+        )}
         {sending && (
           <div className={styles.thinkingRow} role="status" data-testid={`${testIdPrefix}-thinking`}>
             <div className={styles.thinkingBubble}>thinking…</div>
@@ -1645,6 +1736,7 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
 
       {!readOnly && <div className={styles.chatInput}>
         <input
+          ref={chatInputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void handleSend(); }}
@@ -1732,6 +1824,18 @@ function CountdownRunButton({ testIdPrefix, disabled, busy, runningLabel, counti
 
 // ─── autonomous stage log ──────────────────────────────────────────────────
 
+const SHOW_THOUGHTS_KEY = "devteam.show-thinking";
+
+// Private reasoning is opt-in; the default feed is tool calls + short "said this" snippets.
+function readShowThoughts(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(SHOW_THOUGHTS_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 interface IStageLogProps {
   release: ReleaseDto;
   stageRun: ReleaseStageRunDto;
@@ -1743,7 +1847,7 @@ interface IStageLogProps {
   readOnly?: boolean;
 }
 
-function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease, readOnly = false }: IStageLogProps) {
+function StageLog({ release, stageRun, api, testIdPrefix, busy, runStage, refreshRelease, readOnly = false }: IStageLogProps) {
   const logContainerRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   // Only auto-follow new log lines while the reader is already at (or near) the bottom —
@@ -1778,8 +1882,48 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease,
     return () => window.clearInterval(timer);
   }, [turn]);
 
-  const isRunningHere = turn !== undefined && turn.acpSessionId === stageRun.acpSessionId;
-  const isWaitingOnOtherTurn = turn !== undefined && turn.acpSessionId !== stageRun.acpSessionId;
+  // Private reasoning is opt-in and remembered; the default feed is tool calls + short "said
+  // this" snippets, which is what actually explains a long-running step.
+  const [showThoughts, setShowThoughts] = useState(readShowThoughts);
+  const toggleThoughts = useCallback((next: boolean) => {
+    setShowThoughts(next);
+    try { window.localStorage.setItem(SHOW_THOUGHTS_KEY, String(next)); } catch { /* ignore */ }
+  }, []);
+
+  const now = Date.now();
+
+  // Escape hatch: stop whatever turn is running right now, then re-read so the stage settles
+  // back to a state the user can act on.
+  const [cancelling, setCancelling] = useState(false);
+  const cancelTurn = useCallback(async () => {
+    setCancelling(true);
+    try {
+      await api.cancelCurrentTurnAsync();
+      await refreshRelease();
+    } finally {
+      setCancelling(false);
+    }
+  }, [api, refreshRelease]);
+  const estimate = useMemo(
+    () => estimateStageDurationMs(historicalStageDurationsMs(release, stageRun.stageName)),
+    [release, stageRun.stageName],
+  );
+  const startedAtMs = stageRun.startedAt ? Date.parse(stageRun.startedAt) : now;
+  const overdue = overdueNote(Math.max(0, now - startedAtMs), estimate);
+
+  // ReleaseStageRun.acpSessionId actually stores the DevTeamSession id (see WorkflowEngine),
+  // so correlate on the turn's StageRunSessionId. Comparing the *real* ACP id never matched,
+  // which made this screen claim it was waiting on another release while this very run was the
+  // one executing — and never showed elapsed time.
+  const isRunningHere = turn !== undefined && (turn.stageRunSessionId ?? turn.sessionId) === stageRun.acpSessionId;
+  const isWaitingOnOtherTurn = turn !== undefined && !isRunningHere;
+  const feed = visibleActivity(turn?.activity, showThoughts);
+  // More than the one "started working" entry means the agent has actually said or done
+  // something — the difference between "quiet" and "never responded".
+  const hasOutput = (turn?.activity?.length ?? 0) > 1;
+  const quiet = isRunningHere ? quietMessage(turn?.lastEventAt, now, hasOutput) : null;
+  // How many other prompts are queued ahead of this one (this caller counts itself).
+  const ahead = Math.max(0, (turn?.queuedTurns ?? 1) - 1);
   // The backend now persists exactly why a turn didn't complete (Escalated + lastErrorKind)
   // instead of this having to be guessed client-side from "no active turn right now" — that
   // heuristic stays as a fallback for the brief window before the backend's own error state
@@ -1820,9 +1964,10 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease,
       out.push({ text: "waiting for your approval to continue.", tone: "warn" });
     } else if (stageRun.status === "Complete") {
       out.push({ text: "stage complete.", tone: "ok" });
-    } else {
-      out.push({ text: `${phaseLabel(stageRun.phase)}…`, tone: "phase" });
     }
+    // No trailing "phase…" line: an in-progress stage is already described by the live status
+    // row below, which carries the elapsed time. A second static phase line just looked like
+    // the app was stuck on the same sentence forever.
     return out;
   }, [stageRun]);
 
@@ -1855,20 +2000,85 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease,
           </div>
         )}
         {inProgress && isWaitingOnOtherTurn && (
-          <div className={`${styles.logLine} ${styles.logLineWarn}`}>
-            waiting — the broker is busy with another release right now
+          <div className={`${styles.logLine} ${styles.logLineWarn} ${styles.logLiveStatus}`}>
+            <FaSpinner className={styles.spinIcon} aria-hidden="true" />
+            <span>
+              waiting for the agent to finish another step
+              {ahead > 0 ? `, ${ahead} ahead of you` : ""}
+              {turn ? ` (running ${formatElapsed(turn.startedAt)})` : ""} — this run starts
+              automatically when it&apos;s free
+            </span>
+          </div>
+        )}
+        {inProgress && !overdue && estimate !== null && (
+          <div className={styles.logLine} data-testid={`${testIdPrefix}-eta`}>
+            this normally takes {formatEstimate(estimate)}
+          </div>
+        )}
+        {inProgress && overdue && (
+          <div className={`${styles.logLine} ${styles.logLineWarn}`} data-testid={`${testIdPrefix}-overdue`}>
+            {overdue}
+          </div>
+        )}
+        {inProgress && isRunningHere && quiet && (
+          <div className={`${styles.logLine} ${styles.logLineWarn} ${styles.logLiveStatus}`} data-testid={`${testIdPrefix}-quiet`}>
+            {quiet}
+          </div>
+        )}
+        {inProgress && isRunningHere && feed.length > 0 && (
+          <div className={styles.activityFeed} data-testid={`${testIdPrefix}-activity`}>
+            <div className={styles.activityHeader}>
+              <span className={styles.activityHeading}>What it&apos;s doing</span>
+              <label className={styles.activityToggle}>
+                <input
+                  type="checkbox"
+                  checked={showThoughts}
+                  onChange={(e) => toggleThoughts(e.target.checked)}
+                  data-testid={`${testIdPrefix}-show-thoughts`}
+                />
+                Show the agent&apos;s thinking
+              </label>
+            </div>
+            {feed.slice(0, 12).map((entry, i) => (
+              <div
+                key={`${entry.at}-${i}`}
+                className={`${styles.activityRow} ${entry.kind === "thought" ? styles.activityRowThought : ""}`}
+              >
+                <span className={styles.activityKind}>{activityKindLabel(entry.kind)}</span>
+                <span className={styles.activityLabel}>{entry.label}</span>
+                {entry.status && <span className={styles.activityStatus}>{entry.status}</span>}
+                <span className={styles.activityAt}>{feedAge(entry.at, now)}</span>
+              </div>
+            ))}
           </div>
         )}
         {inProgress && looksStalled && (
           <div className={`${styles.logLine} ${styles.logLineWarn}`}>
-            No active turn detected — this stage may need a retry.
+            the agent hasn&apos;t reported in yet — it may be between steps. If this doesn&apos;t
+            change, run the step again.
           </div>
         )}
         <div ref={logEndRef} />
       </div>
 
       <div className={styles.logActions}>
-        {showRunButton && (stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated") && (
+        {/* The escape hatch, right where the "running" line is: the global turn indicator also
+            offers Cancel, but someone staring at a stalled stage shouldn't have to find it.
+            Deliberately NOT disabled by `busy`: busy is true for the whole run, so tying the
+            stop button to it would disable the escape hatch exactly when it is needed. */}
+        {!readOnly && isRunningHere && (
+          <ZestButton
+            type="button"
+            className={styles.stopButton}
+            onClick={() => void cancelTurn()}
+            disabled={cancelling}
+            data-testid={`${testIdPrefix}-cancel-turn-btn`}
+            zest={{ busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
+          >
+            {cancelling ? "Stopping." : "Stop This Step"}
+          </ZestButton>
+        )}
+        {showRunButton && (stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated") && !stageRun.autoRetrySuppressed && (
           <CountdownRunButton
             testIdPrefix={testIdPrefix}
             disabled={busy}
@@ -1877,6 +2087,18 @@ function StageLog({ stageRun, api, testIdPrefix, busy, runStage, refreshRelease,
             countingLabel={(s) => `Running again in ${s} second${s === 1 ? "" : "s"}. Click To Run Now.`}
             onRun={runStage}
           />
+        )}
+        {/* The same check has failed too many times: stop auto-retrying, keep a manual escape. */}
+        {showRunButton && (stageRun.status === "BlockedGate" || stageRun.status === "BlockedEntry" || stageRun.status === "Escalated") && stageRun.autoRetrySuppressed && (
+          <ZestButton
+            type="button"
+            onClick={runStage}
+            disabled={busy}
+            data-testid={`${testIdPrefix}-run-anyway-btn`}
+            zest={{ semanticType: "reload", busyOptions: { preventRageClick: true }, buttonStyle: "text", visualOptions: { size: "sm" } }}
+          >
+            {busy ? "Running…" : "Run anyway"}
+          </ZestButton>
         )}
         {showRunButton && stageRun.status !== "BlockedGate" && stageRun.status !== "BlockedEntry" && stageRun.status !== "Escalated" && (
           <ZestButton
@@ -1976,7 +2198,7 @@ function PushBackPanel({ featureId, api, stageIndex, pipeline, stageRun, testIdP
           data-testid={`${testIdPrefix}-pushback-target`}
         >
           {targets.map((name) => (
-            <option key={name} value={name}>{name}</option>
+            <option key={name} value={name}>{stageLabel(name)}</option>
           ))}
         </select>
       </label>
@@ -2135,7 +2357,7 @@ export function StageHistoryCard({ stageRun, testIdPrefix }: IStageHistoryCardPr
               <span className={gc.passed ? styles.gatePassed : styles.gateFailed}>
                 {gc.passed ? "✓" : "✗"}
               </span>
-              <span className={styles.gateName}>{gc.name}</span>
+              <span className={styles.gateName}>{gc.displayTitle ?? gc.name}</span>
               {gc.evidenceText && (
                 <span className={styles.gateEvidence}>{gc.evidenceText}</span>
               )}
