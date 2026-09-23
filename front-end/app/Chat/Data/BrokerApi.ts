@@ -278,6 +278,13 @@ export default class BrokerApi {
     });
   }
 
+  setReleaseAutonomousEnabledAsync(releaseId: string, enabled: boolean): Promise<ReleaseDto> {
+    return this.requestAsync<ReleaseDto>(`/api/releases/${releaseId}/autonomous`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
   startHotfixAsync(key: string, workspacePath: string): Promise<ReleaseFeatureDto> {
     return this.requestAsync<ReleaseFeatureDto>("/api/hotfixes", {
       method: "POST",

@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import BrokerApi from "../../Chat/Data/BrokerApi";
 import { PipelineStageDto, ReleaseDto } from "../../Chat/Data/BrokerTypes";
 import styles from "../Styles/Negotiation.module.css";
-import { autoAdvanceStopReason, nextAutoStep } from "./autoAdvance";
+import { autoAdvanceStopReason, latestRun, nextAutoStep } from "./autoAdvance";
 
 export const AUTO_ADVANCE_SECONDS = 15;
 
@@ -32,12 +32,47 @@ export default function CruiseControl({
   refreshRelease,
   readOnly,
 }: ICruiseControlProps) {
-  const [armed, setArmed] = useState(false);
+  const [armed, setArmed] = useState(() => release?.autonomousEnabled ?? false);
   const [secondsLeft, setSecondsLeft] = useState(AUTO_ADVANCE_SECONDS);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // `release` can still be loading on first mount (the lazy initializer above only sees
+  // whatever was passed on that very first render) — pick up the persisted flag the moment
+  // real release data arrives, but only once: after that, local Start/Stop clicks (which
+  // persist immediately, see setArmedAndPersist) are the source of truth, not each poll's
+  // echo of what we already told the server.
+  const syncedFromReleaseRef = useRef(release !== undefined);
+  useEffect(() => {
+    if (!syncedFromReleaseRef.current && release) {
+      syncedFromReleaseRef.current = true;
+      setArmed(release.autonomousEnabled ?? false);
+    }
+  }, [release]);
+
+  const setArmedAndPersist = useCallback(
+    (next: boolean) => {
+      setArmed(next);
+      if (release?.id) {
+        void Promise.resolve(api.setReleaseAutonomousEnabledAsync(release.id, next)).catch(() => undefined);
+      }
+    },
+    [api, release?.id],
+  );
+
   const step = nextAutoStep(release, pipeline);
+  // A fresh non-interactive stage (no run yet) is AutoRunNotice's own moment — it fires
+  // immediately on mount, unconditionally, regardless of this being armed. Letting our own
+  // countdown also race toward the same runStageAsync call double-triggers it; defer entirely
+  // until AutoRunNotice has already started the run (at which point `step.kind` becomes "wait"
+  // with reason "busy" and the countdown below no longer applies anyway).
+  const stageName = release?.flowPosition?.currentStageName;
+  const currentStageRun = stageName ? latestRun(release?.stageRuns, stageName) : undefined;
+  // Mirrors ReleaseWizard's own needsFreshStart exactly (modulo the readOnly clause, which
+  // CruiseControl already handles via its own separate early return below) — a Complete run
+  // still counts as "fresh" here because a stage that just finished starts its next attempt
+  // exactly like a brand-new one.
+  const deferToAutoRunNotice = step.kind === "run-stage" && (!currentStageRun || currentStageRun.status === "Complete");
   const stepKey =
     step.kind === "signoff"
       ? `signoff:${step.stageName}`
@@ -50,13 +85,14 @@ export default function CruiseControl({
     setSecondsLeft(AUTO_ADVANCE_SECONDS);
   }, [stepKey]);
 
-  // Stop (and explain) the moment the next step needs a person.
+  // Stop (and explain) the moment the next step needs a person — persisted, so a reload
+  // doesn't silently re-arm into the same blocker.
   useEffect(() => {
     if (armed && step.kind === "wait" && step.reason !== "busy") {
-      setArmed(false);
+      setArmedAndPersist(false);
       setMessage(autoAdvanceStopReason(step.reason));
     }
-  }, [armed, step]);
+  }, [armed, step, setArmedAndPersist]);
 
   const act = useCallback(async () => {
     if (step.kind === "run-stage") {
@@ -73,7 +109,7 @@ export default function CruiseControl({
   }, [api, featureId, refreshRelease, step]);
 
   useEffect(() => {
-    if (!armed || busy || step.kind === "wait") {
+    if (!armed || busy || step.kind === "wait" || deferToAutoRunNotice) {
       return;
     }
 
@@ -92,9 +128,16 @@ export default function CruiseControl({
 
     const timer = window.setTimeout(() => setSecondsLeft((value) => value - 1), 1000);
     return () => window.clearTimeout(timer);
-  }, [act, armed, busy, secondsLeft, step.kind]);
+  }, [act, armed, busy, secondsLeft, step.kind, deferToAutoRunNotice]);
 
   if (readOnly) {
+    return null;
+  }
+
+  // AutoRunNotice already owns this exact moment (see deferToAutoRunNotice above) — showing our
+  // own countdown alongside its "starting automatically…" message would be confusing, and racing
+  // it entirely would double-trigger runStageAsync.
+  if (deferToAutoRunNotice) {
     return null;
   }
 
@@ -115,7 +158,7 @@ export default function CruiseControl({
           <button
             type="button"
             data-testid={`${testIdPrefix}-cruise-stop`}
-            onClick={() => setArmed(false)}
+            onClick={() => setArmedAndPersist(false)}
           >
             Stop
           </button>
@@ -126,7 +169,7 @@ export default function CruiseControl({
           data-testid={`${testIdPrefix}-cruise-start`}
           onClick={() => {
             setMessage(null);
-            setArmed(true);
+            setArmedAndPersist(true);
           }}
         >
           Continue automatically

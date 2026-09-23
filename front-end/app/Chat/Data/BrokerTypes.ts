@@ -174,6 +174,9 @@ export interface ReleaseDto {
   // normal release, branched from main instead of develop and excluded from the normal
   // release list.
   isHotfix?: boolean;
+  // Persisted "Continue automatically" state (CruiseControl) — survives a reload instead of
+  // resetting to a manual click every time the page is revisited.
+  autonomousEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
   features: ReleaseFeatureDto[];

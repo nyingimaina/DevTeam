@@ -80,8 +80,11 @@ describe("CruiseControl", () => {
   });
 
   it("runs the next autonomous stage after the countdown", async () => {
+    // A "Stale" run (reconciler-marked orphaned session) is a real run-stage case that is NOT
+    // AutoRunNotice's moment — unlike a truly fresh stage (no run at all), which CruiseControl
+    // defers to AutoRunNotice entirely (see the "defers to AutoRunNotice" test below).
     mockApi.runStageAsync.mockResolvedValue(release({ stageRuns: [run("developer", "Active")] }));
-    const { refreshRelease } = renderControl(release());
+    const { refreshRelease } = renderControl(release({ stageRuns: [run("developer", "Stale")] }));
 
     fireEvent.click(screen.getByTestId("stage-cruise-start"));
     expect(screen.getByTestId("stage-cruise-countdown")).toBeInTheDocument();
@@ -113,5 +116,61 @@ describe("CruiseControl", () => {
 
     expect(screen.getByTestId("stage-cruise-message")).toHaveTextContent(/attention/i);
     expect(screen.queryByTestId("stage-cruise-countdown")).toBeNull();
+  });
+
+  describe("persisted autonomous mode", () => {
+    it("arms automatically on mount when the release already has it enabled", () => {
+      renderControl(release({ autonomousEnabled: true, stageRuns: [run("developer", "Stale")] }));
+
+      expect(screen.getByTestId("stage-cruise-countdown")).toBeInTheDocument();
+      expect(screen.queryByTestId("stage-cruise-start")).toBeNull();
+    });
+
+    it("does not auto-arm when the release has it disabled", () => {
+      renderControl(release({ autonomousEnabled: false, stageRuns: [run("developer", "Stale")] }));
+
+      expect(screen.getByTestId("stage-cruise-start")).toBeInTheDocument();
+    });
+
+    it("persists enabling it when Continue automatically is clicked", () => {
+      mockApi.setReleaseAutonomousEnabledAsync.mockResolvedValue(release());
+      renderControl(release({ id: "r1", autonomousEnabled: false, stageRuns: [run("developer", "Stale")] }));
+
+      fireEvent.click(screen.getByTestId("stage-cruise-start"));
+
+      expect(mockApi.setReleaseAutonomousEnabledAsync).toHaveBeenCalledWith("r1", true);
+    });
+
+    it("persists disabling it when Stop is clicked", () => {
+      mockApi.setReleaseAutonomousEnabledAsync.mockResolvedValue(release());
+      renderControl(release({ id: "r1", autonomousEnabled: true, stageRuns: [run("developer", "Stale")] }));
+
+      fireEvent.click(screen.getByTestId("stage-cruise-stop"));
+
+      expect(mockApi.setReleaseAutonomousEnabledAsync).toHaveBeenCalledWith("r1", false);
+    });
+
+    it("persists disabling it when auto-advance stops itself on a blocker", () => {
+      mockApi.setReleaseAutonomousEnabledAsync.mockResolvedValue(release());
+      renderControl(release({ id: "r1", autonomousEnabled: true, stageRuns: [run("developer", "BlockedGate")] }));
+
+      expect(screen.getByTestId("stage-cruise-message")).toHaveTextContent(/attention/i);
+      expect(mockApi.setReleaseAutonomousEnabledAsync).toHaveBeenCalledWith("r1", false);
+    });
+
+    it("defers to AutoRunNotice for a fresh non-interactive stage instead of racing it", async () => {
+      // Regression: AutoRunNotice fires runStageAsync immediately (unconditionally) the moment
+      // a fresh non-interactive stage mounts. If CruiseControl is already armed at that same
+      // moment (persisted-on-load), its own countdown must not also race toward the same call.
+      renderControl(release({ autonomousEnabled: true, stageRuns: [] }));
+
+      expect(screen.queryByTestId("stage-cruise")).toBeNull();
+      expect(screen.queryByTestId("stage-cruise-countdown")).toBeNull();
+
+      // Even after the countdown's own window would have elapsed, nothing renders/acts here —
+      // this stays AutoRunNotice's moment until a run actually exists.
+      await tickCountdown();
+      expect(mockApi.runStageAsync).not.toHaveBeenCalled();
+    });
   });
 });
