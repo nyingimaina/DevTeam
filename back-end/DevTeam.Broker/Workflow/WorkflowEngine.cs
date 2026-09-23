@@ -2127,6 +2127,22 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
     }
 
+    // Persisted "Continue automatically" state — see DevTeamRelease.AutonomousEnabled. Tracked
+    // (not NoTracking, unlike GetReleaseAsync) since this call exists specifically to write.
+    public async Task<DevTeamRelease> SetReleaseAutonomousEnabledAsync(Guid releaseId, bool enabled, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var release = await db.Releases.SingleOrDefaultAsync(r => r.Id == releaseId, ct)
+            ?? throw new KeyNotFoundException($"Release {releaseId} not found.");
+
+        release.AutonomousEnabled = enabled;
+        release.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return await LoadReleaseAsync(db, releaseId, ct);
+    }
+
     public async Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);

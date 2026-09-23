@@ -111,6 +111,15 @@ public sealed class DevTeamRelease
     /// </summary>
     public bool IsHotfix { get; set; }
     /// <summary>
+    /// Persisted "Continue automatically" state (CruiseControl, front-end) — when true, the
+    /// release's active feature keeps auto-advancing through non-interactive stages and
+    /// auto-approving signoffs after a reload, instead of resetting to a manual click every
+    /// time the page is revisited. MVP: per-release, not per-feature; auto-advance still stops
+    /// on its own for the BA's interactive conversation, a genuine blocker, or once the current
+    /// feature reaches Ready — it does not auto-start a release's next feature.
+    /// </summary>
+    public bool AutonomousEnabled { get; set; }
+    /// <summary>
     /// The feature currently checked out in this release's workspace, if any — never a real
     /// column. A release has no disk representation of its own; "what's checked out" is a
     /// fact about the *workspace* (see WorkspaceActiveCheckout), since two releases can

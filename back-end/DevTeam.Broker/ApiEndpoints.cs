@@ -675,6 +675,22 @@ public static class ApiEndpoints
             }
         });
 
+        // Persisted "Continue automatically" (CruiseControl, front-end) — a release-level flag,
+        // not per-feature, so it survives a reload instead of resetting to a manual click.
+        app.MapPut("/api/releases/{releaseId:guid}/autonomous", async (Guid releaseId, SetAutonomousEnabledRequest request, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.SetReleaseAutonomousEnabledAsync(releaseId, request.Enabled, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound($"Release {releaseId} not found.");
+            }
+        });
+
         app.MapPost("/api/releases/{releaseId:guid}/finalize", async (Guid releaseId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();

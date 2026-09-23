@@ -799,6 +799,36 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
+    public async Task AutonomousEndpoint_PersistsTheFlagAndReturnsItOnTheNextGet()
+    {
+        var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("/api/releases",
+            new { featureKey = "feat-auto-001", workspacePath = @"C:\work\api-test-auto" });
+        create.EnsureSuccessStatusCode();
+        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+        Assert.NotNull(release);
+        Assert.False(release!.AutonomousEnabled);
+
+        var enable = await client.PutAsJsonAsync($"/api/releases/{release.Id}/autonomous", new { enabled = true }, JsonOptions);
+        enable.EnsureSuccessStatusCode();
+        var enabled = await enable.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+        Assert.True(enabled!.AutonomousEnabled);
+
+        var refetched = await client.GetFromJsonAsync<DevTeamRelease>($"/api/releases/{release.Id}", JsonOptions);
+        Assert.True(refetched!.AutonomousEnabled);
+    }
+
+    [Fact]
+    public async Task AutonomousEndpoint_UnknownRelease_Returns404()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PutAsJsonAsync($"/api/releases/{Guid.NewGuid()}/autonomous", new { enabled = true }, JsonOptions);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task PipelineEndpoint_UnknownRelease_Returns404()
     {
         var client = _factory.CreateClient();

@@ -23,6 +23,7 @@ public interface IWorkflowEngine
     Task<DevTeamRelease> SignoffAsync(Guid featureId, string stageName, string role, string? comment, CancellationToken ct);
     Task<DevTeamRelease> RetryStageAsync(Guid featureId, string? targetStageName, CancellationToken ct);
     Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct);
+    Task<DevTeamRelease> SetReleaseAutonomousEnabledAsync(Guid releaseId, bool enabled, CancellationToken ct);
     Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct);
     Task<ReleaseFeature> StartHotfixAsync(string key, string workspacePath, CancellationToken ct);

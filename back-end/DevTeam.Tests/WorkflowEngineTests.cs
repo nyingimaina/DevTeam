@@ -2903,6 +2903,44 @@ public class WorkflowEngineTests : IDisposable
         Assert.Equal(ReleaseFeatureStatus.OnHold, refreshedBAfter.Features.Single(f => f.Id == featureB).Status);
     }
 
+    // ─── persisted autonomous mode (Release 1) ─────────────────────────────
+
+    [Fact]
+    public async Task StartReleaseAsync_DefaultsAutonomousEnabledToFalse()
+    {
+        var engine = CreateEngine();
+
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+
+        Assert.False(release.AutonomousEnabled);
+    }
+
+    [Fact]
+    public async Task SetReleaseAutonomousEnabledAsync_PersistsTheFlagAcrossAFreshLoad()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+
+        var updated = await engine.SetReleaseAutonomousEnabledAsync(release.Id, true, CancellationToken.None);
+        Assert.True(updated.AutonomousEnabled);
+
+        // A brand-new read (simulating a page reload) must see the same persisted value.
+        var reloaded = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        Assert.True(reloaded.AutonomousEnabled);
+
+        var turnedOff = await engine.SetReleaseAutonomousEnabledAsync(release.Id, false, CancellationToken.None);
+        Assert.False(turnedOff.AutonomousEnabled);
+    }
+
+    [Fact]
+    public async Task SetReleaseAutonomousEnabledAsync_UnknownRelease_Throws()
+    {
+        var engine = CreateEngine();
+
+        await Assert.ThrowsAsync<KeyNotFoundException>(
+            () => engine.SetReleaseAutonomousEnabledAsync(Guid.NewGuid(), true, CancellationToken.None));
+    }
+
     // ─── GitFlow: release finalization (Part 7E) ───────────────────────────
 
     [Fact]
