@@ -134,7 +134,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     // Raises a desktop notification for a stage that reached a terminal state, so someone who
     // walked away learns that work finished or needs them. Failures are swallowed: a notification
     // problem must never affect the work it reports on.
-    private async Task NotifyStageFinishedAsync(WorkflowRole role, string featureKey, ReleaseStageRun stageRun, bool allPassed)
+    private async Task NotifyStageFinishedAsync(WorkflowRole role, string featureKey, ReleaseStageRun stageRun, bool allPassed, Guid? featureId = null)
     {
         if (_userNotifier is null)
             return;
@@ -142,7 +142,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         try
         {
             await _userNotifier.StageFinishedAsync(
-                new StageOutcome(featureKey, role.Name, stageRun.Status.ToString(), allPassed),
+                new StageOutcome(featureKey, role.Name, stageRun.Status.ToString(), allPassed, featureId),
                 CancellationToken.None);
         }
         catch (Exception ex)
@@ -1009,7 +1009,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             ? $"Stage {role.Name} passed all gates and challenge."
             : $"Stage {role.Name} failed gates or challenge.";
 
-        await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed);
+        await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed, featureId);
 
         feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -1369,7 +1369,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 ProviderRefused = providerRefused,
             }, ct);
 
-            await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed: false);
+            await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed: false, featureId: featureId);
             return await LoadReleaseAsync(db, feature.ReleaseId, ct);
         }
 
@@ -1484,7 +1484,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             "Stage {Stage} (feature {FeatureKey}, attempt {Attempt}) finished: status={Status} phase={Phase} allPassed={AllPassed}",
             role.Name, featureKey, stageRun.Attempt, stageRun.Status, stageRun.Phase, allPassed);
 
-        await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed);
+        await NotifyStageFinishedAsync(role, featureKey, stageRun, allPassed, featureId);
 
         feature.Release.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);

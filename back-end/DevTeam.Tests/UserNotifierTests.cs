@@ -122,8 +122,22 @@ public class UserNotifierTests : IDisposable
         await CreateNotifier().StageFinishedAsync(Outcome("Complete", allPassed: true), CancellationToken.None);
     }
 
-    private static StageOutcome Outcome(string status, bool allPassed, string stage = "developer")
-        => new("subtraction", stage, status, allPassed);
+    [Fact]
+    public async Task FeatureIdFlowsThroughToTheNotificationRequest()
+    {
+        // A platform notifier that needs to bind a reply channel to the right feature (e.g.
+        // SemaNamiPlatformNotifier) reads this — the outcome's own FeatureId is the reliable
+        // signal, not something worth re-deriving from Title/Message text.
+        var featureId = Guid.NewGuid();
+
+        await CreateNotifier().StageFinishedAsync(Outcome("BlockedSignoff", allPassed: true, featureId: featureId), CancellationToken.None);
+
+        var request = Assert.Single(_platform.Requests);
+        Assert.Equal(featureId, request.FeatureId);
+    }
+
+    private static StageOutcome Outcome(string status, bool allPassed, string stage = "developer", Guid? featureId = null)
+        => new("subtraction", stage, status, allPassed, featureId);
 
     private UserNotifier CreateNotifier() => new(_platform, CreateSettingsAsync().GetAwaiter().GetResult(), NullLogger<UserNotifier>.Instance);
 

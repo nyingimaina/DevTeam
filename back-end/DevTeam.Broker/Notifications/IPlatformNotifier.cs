@@ -10,7 +10,11 @@ public enum NotificationUrgency
     Attention,
 }
 
-public sealed record NotificationRequest(string Title, string Message, NotificationUrgency Urgency = NotificationUrgency.Info);
+// FeatureId is optional and carried through verbatim from StageOutcome — a platform notifier
+// that needs to bind a reply channel to a specific feature (e.g. SemaNamiPlatformNotifier) reads
+// it directly instead of re-deriving it from Title/Message text; adapters that don't care (the
+// OS toast, the log) simply ignore it.
+public sealed record NotificationRequest(string Title, string Message, NotificationUrgency Urgency = NotificationUrgency.Info, Guid? FeatureId = null);
 
 /// <summary>
 /// Raises an operating-system notification. One adapter per platform, chosen at runtime — the

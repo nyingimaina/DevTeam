@@ -1,7 +1,7 @@
 namespace DevTeam.Broker.Notifications;
 
 /// <summary>What happened to a stage, as the notifier needs to know it.</summary>
-public sealed record StageOutcome(string FeatureKey, string StageName, string Status, bool AllPassed);
+public sealed record StageOutcome(string FeatureKey, string StageName, string Status, bool AllPassed, Guid? FeatureId = null);
 
 /// <summary>
 /// Decides whether a stage outcome is worth a desktop notification, and raises it through the
@@ -64,7 +64,8 @@ public sealed class UserNotifier : IUserNotifier
                 ? new NotificationRequest(
                     $"{stage} is waiting for you",
                     $"Feature '{feature}' needs your approval before it can continue.",
-                    NotificationUrgency.Attention)
+                    NotificationUrgency.Attention,
+                    outcome.FeatureId)
                 : null;
 
         if (outcome.Status is "BlockedGate" or "BlockedEntry" or "Escalated")
@@ -72,7 +73,8 @@ public sealed class UserNotifier : IUserNotifier
                 ? new NotificationRequest(
                     $"{stage} needs attention",
                     $"Feature '{feature}' stopped: a check didn't pass or the agent hit an error.",
-                    NotificationUrgency.Attention)
+                    NotificationUrgency.Attention,
+                    outcome.FeatureId)
                 : null;
 
         if (outcome.Status == "Complete")
@@ -80,7 +82,8 @@ public sealed class UserNotifier : IUserNotifier
                 ? new NotificationRequest(
                     $"{stage} finished",
                     $"Feature '{feature}' completed the {stage} step.",
-                    NotificationUrgency.Info)
+                    NotificationUrgency.Info,
+                    outcome.FeatureId)
                 : null;
 
         return null;
