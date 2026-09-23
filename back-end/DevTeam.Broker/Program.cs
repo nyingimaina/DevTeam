@@ -9,11 +9,17 @@ using DevTeam.Broker.Metrics;
 using DevTeam.Broker.Models;
 using DevTeam.Broker.Notifications;
 using DevTeam.Broker.Rpc;
+using DevTeam.Broker.SemaNami;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using DevTeam.Broker.Workflow;
 using DevTeam.Shared;
 using Microsoft.EntityFrameworkCore;
+using SemaNami.Core;
+// Aliased, not a plain `using` — SemaNami.Core.Conversations.IProcessRunner (unused here; it's
+// for SemaNami's own OS-service-registration CLI features) collides with the pervasive
+// DevTeam.Broker.Gates.IProcessRunner.
+using SNC = SemaNami.Core.Conversations;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
@@ -70,11 +76,50 @@ public partial class Program
         builder.Services.AddSingleton<NotificationSettings>();
         builder.Services.AddSingleton<IUserNotifier, UserNotifier>();
         // The app has no UI of its own, so the desktop is how it reaches someone who walked away.
-        // One adapter per platform; Linux/macOS are stubs for now.
+        // One adapter per platform; Linux/macOS are stubs for now. Registered by concrete type
+        // (not IPlatformNotifier directly) so the CompositePlatformNotifier factory below can
+        // resolve it alongside SemaNamiPlatformNotifier without either replacing the other.
         if (OperatingSystem.IsWindows())
-            builder.Services.AddSingleton<IPlatformNotifier, WindowsToastNotifier>();
+            builder.Services.AddSingleton<WindowsToastNotifier>();
         else
-            builder.Services.AddSingleton<IPlatformNotifier, LoggingNotifier>();
+            builder.Services.AddSingleton<LoggingNotifier>();
+
+        // SemaNami: the live Telegram channel. Optional — reuses SemaNami's own
+        // TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID env var convention; if either is missing, the
+        // channel simply isn't registered (the composite below still gets the OS notifier on
+        // its own). Whether it's actually USED, even when registered, is separately gated by
+        // SemaNamiSettings.Enabled (an in-app toggle) — see SemaNamiListenerService.
+        builder.Services.AddSingleton<SemaNamiSettings>();
+        var telegramBotToken = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
+        var telegramChatId = Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID");
+        var semaNamiAvailable = !string.IsNullOrWhiteSpace(telegramBotToken) && !string.IsNullOrWhiteSpace(telegramChatId);
+        if (semaNamiAvailable)
+        {
+            var semaNamiDbPath = Path.Combine(identity.DataDirectory, "semanami.db");
+            builder.Services.AddSingleton<SNC.IConversationStore>(_ => new SNC.SqliteConversationStore(semaNamiDbPath));
+            builder.Services.AddSingleton<ITelegramMessageSender>(_ => new TelegramBotMessageSender(telegramBotToken!));
+            builder.Services.AddSingleton<SNC.IUpdatesSource>(
+                _ => new SNC.TelegramUpdatesSource(telegramBotToken!, long.Parse(telegramChatId!)));
+            builder.Services.AddSingleton<SNC.IRealtimeNotifier, SNC.InProcessRealtimeNotifier>();
+            builder.Services.AddSingleton<SNC.ConversationListener>();
+            builder.Services.AddSingleton(sp => new SNC.ConversationSender(
+                sp.GetRequiredService<SNC.IConversationStore>(), sp.GetRequiredService<ITelegramMessageSender>(), telegramChatId!));
+            builder.Services.AddSingleton<SemaNamiChannelState>();
+            builder.Services.AddSingleton<SemaNamiPlatformNotifier>();
+            builder.Services.AddSingleton<ISemaNamiReplyRouter, SemaNamiReplyRouter>();
+            builder.Services.AddHostedService<SemaNamiListenerService>();
+        }
+
+        builder.Services.AddSingleton<IPlatformNotifier>(sp =>
+        {
+            var notifiers = new List<IPlatformNotifier>();
+            notifiers.Add(OperatingSystem.IsWindows()
+                ? sp.GetRequiredService<WindowsToastNotifier>()
+                : sp.GetRequiredService<LoggingNotifier>());
+            if (semaNamiAvailable)
+                notifiers.Add(sp.GetRequiredService<SemaNamiPlatformNotifier>());
+            return new CompositePlatformNotifier(notifiers, sp.GetRequiredService<ILogger<CompositePlatformNotifier>>());
+        });
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
@@ -170,6 +215,8 @@ public partial class Program
         app.Services.GetRequiredService<DiagnosticsSettings>().LoadAsync(CancellationToken.None)
             .GetAwaiter().GetResult();
         app.Services.GetRequiredService<NotificationSettings>().LoadAsync(CancellationToken.None)
+            .GetAwaiter().GetResult();
+        app.Services.GetRequiredService<SemaNamiSettings>().LoadAsync(CancellationToken.None)
             .GetAwaiter().GetResult();
 
         app.UseSerilogRequestLogging();

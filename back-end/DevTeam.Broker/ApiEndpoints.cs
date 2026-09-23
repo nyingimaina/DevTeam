@@ -6,6 +6,7 @@ using DevTeam.Broker.Gates.Readiness;
 using DevTeam.Broker.Git;
 using DevTeam.Broker.Models;
 using DevTeam.Broker.Notifications;
+using DevTeam.Broker.SemaNami;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
 using DevTeam.Shared;
@@ -1178,7 +1179,28 @@ public static class ApiEndpoints
                 ctx.RequestAborted);
             return Results.Ok();
         });
+
+        // ─── live SemaNami channel ──────────────────────────────────────────────
+        // Available reflects whether TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are actually set (the
+        // channel can be turned on in settings, but has nothing to connect to without them) —
+        // env vars, so this is re-checked live rather than cached from startup.
+        app.MapGet("/api/semanami/settings", (HttpContext ctx) =>
+        {
+            var settings = ctx.RequestServices.GetRequiredService<SemaNamiSettings>();
+            return Results.Ok(new SemaNamiSettingsDto(settings.Enabled, IsSemaNamiAvailable()));
+        });
+
+        app.MapPost("/api/semanami/settings", async (SetSemaNamiEnabledRequest request, HttpContext ctx) =>
+        {
+            var settings = ctx.RequestServices.GetRequiredService<SemaNamiSettings>();
+            await settings.SetEnabledAsync(request.Enabled, ctx.RequestAborted);
+            return Results.Ok(new SemaNamiSettingsDto(settings.Enabled, IsSemaNamiAvailable()));
+        });
     }
+
+    private static bool IsSemaNamiAvailable()
+        => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"))
+            && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID"));
 
     private static ModelCandidateDto ToCandidateDto(ModelCandidate candidate)
     {

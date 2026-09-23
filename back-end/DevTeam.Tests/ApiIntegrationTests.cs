@@ -7,6 +7,7 @@ using DevTeam.Broker.Gates;
 using DevTeam.Broker.Gates.Readiness;
 using DevTeam.Broker.Git;
 using DevTeam.Broker.Notifications;
+using DevTeam.Broker.SemaNami;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
 using DevTeam.Broker.Workflow;
@@ -17,6 +18,7 @@ using Microsoft.AspNetCore.Server.Kestrel;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 
 namespace DevTeam.Tests;
 
@@ -64,6 +66,29 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var health = await response.Content.ReadFromJsonAsync<HealthResponse>();
         Assert.Equal("ok", health!.Status);
         Assert.False(string.IsNullOrEmpty(health.Version));
+    }
+
+    [Fact]
+    public async Task SemaNamiSettings_RoundTripsThroughTheApi()
+    {
+        // Available reflects TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID being set in the *process*
+        // environment, which is genuinely machine-dependent (e.g. a dev box already configured
+        // for real SemaNami notifications) — deliberately not asserted here. The listener hosted
+        // service itself is removed for tests regardless (see AppFactory), so enabling the flag
+        // below never causes a real Telegram poll even when Available is true.
+        var client = _factory.CreateClient();
+
+        var initial = await client.GetFromJsonAsync<SemaNamiSettingsDto>("/api/semanami/settings", JsonOptions);
+        Assert.NotNull(initial);
+        Assert.False(initial!.Enabled);
+
+        var enable = await client.PostAsJsonAsync("/api/semanami/settings", new { enabled = true }, JsonOptions);
+        enable.EnsureSuccessStatusCode();
+        var enabled = await enable.Content.ReadFromJsonAsync<SemaNamiSettingsDto>(JsonOptions);
+        Assert.True(enabled!.Enabled);
+
+        var refetched = await client.GetFromJsonAsync<SemaNamiSettingsDto>("/api/semanami/settings", JsonOptions);
+        Assert.True(refetched!.Enabled);
     }
 
     [Fact]
@@ -1475,6 +1500,19 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
                 services.RemoveAll<IPlatformNotifier>();
                 services.AddSingleton<IPlatformNotifier>(Notifier);
+
+                // On a machine with TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID already set (e.g. for
+                // real SemaNami notifications elsewhere), Program.cs registers a real
+                // SemaNamiListenerService hosted service — unlike IPlatformNotifier above, it
+                // isn't reachable through a seam a test can just swap out, since it polls a real
+                // Telegram bot directly. Remove it specifically (not all IHostedService
+                // registrations, which would also silently disable RepoContextWorker/
+                // MetricsRetentionService) so tests never make a real network call or enable the
+                // channel against the developer's own bot/chat.
+                var semaNamiHostedService = services.FirstOrDefault(d =>
+                    d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(SemaNamiListenerService));
+                if (semaNamiHostedService is not null)
+                    services.Remove(semaNamiHostedService);
             });
         }
     }

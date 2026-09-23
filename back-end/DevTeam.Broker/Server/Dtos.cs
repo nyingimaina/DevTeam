@@ -195,6 +195,10 @@ public sealed record SetModelCandidateEnabledRequest(bool Enabled);
 
 public sealed record NotificationSettingsDto(bool StageComplete, bool NeedsAttention, bool ApprovalNeeded, bool Sound);
 
+public sealed record SemaNamiSettingsDto(bool Enabled, bool Available);
+
+public sealed record SetSemaNamiEnabledRequest(bool Enabled);
+
 public sealed record NotificationSettingsRequest(bool? StageComplete, bool? NeedsAttention, bool? ApprovalNeeded, bool? Sound);
 
 public sealed record GitRemoteResponse(string? Url, string? CredentialName = null);
