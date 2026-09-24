@@ -1,5 +1,8 @@
+using DevTeam.Broker.Domain;
 using DevTeam.Broker.Notifications;
 using DevTeam.Broker.SemaNami;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using SemaNami.Core;
 using SemaNami.Core.Conversations;
 
@@ -30,8 +33,36 @@ public class SemaNamiChannelStateTests
     }
 }
 
-public class SemaNamiPlatformNotifierTests
+public class SemaNamiPlatformNotifierTests : IDisposable
 {
+    private readonly SqliteConnection _connection;
+
+    public SemaNamiPlatformNotifierTests()
+    {
+        _connection = new SqliteConnection("Data Source=:memory:");
+        _connection.Open();
+        using var db = CreateSettingsFactory().CreateDbContext();
+        db.Database.EnsureCreated();
+    }
+
+    public void Dispose() => _connection.Dispose();
+
+    private IDbContextFactory<DevTeamDbContext> CreateSettingsFactory() => new TestDbContextFactory(_connection);
+
+    private sealed class TestDbContextFactory(SqliteConnection connection) : IDbContextFactory<DevTeamDbContext>
+    {
+        public DevTeamDbContext CreateDbContext()
+            => new(new DbContextOptionsBuilder<DevTeamDbContext>().UseSqlite(connection).Options);
+    }
+
+    /// <summary>A settings instance with .Enabled already at the given value, ready to hand to the notifier.</summary>
+    private async Task<SemaNamiSettings> CreateSettingsAsync(bool enabled)
+    {
+        var settings = new SemaNamiSettings(CreateSettingsFactory());
+        await settings.SetEnabledAsync(enabled, CancellationToken.None);
+        return settings;
+    }
+
     private sealed class FakeMessageSender : ITelegramMessageSender
     {
         public List<(string ChatId, string Text, int? ReplyToMessageId)> Sent { get; } = [];
@@ -79,19 +110,20 @@ public class SemaNamiPlatformNotifierTests
         public void SetLastUpdateId(int updateId) { }
     }
 
-    private static (SemaNamiPlatformNotifier Notifier, FakeMessageSender MessageSender, SemaNamiChannelState ChannelState) Create()
+    private async Task<(SemaNamiPlatformNotifier Notifier, FakeMessageSender MessageSender, SemaNamiChannelState ChannelState)> CreateAsync(bool enabled = true)
     {
         var messageSender = new FakeMessageSender();
         var store = new FakeConversationStore();
         var sender = new ConversationSender(store, messageSender, "12345");
         var channelState = new SemaNamiChannelState();
-        return (new SemaNamiPlatformNotifier(sender, channelState), messageSender, channelState);
+        var settings = await CreateSettingsAsync(enabled);
+        return (new SemaNamiPlatformNotifier(sender, channelState, settings), messageSender, channelState);
     }
 
     [Fact]
     public async Task NotifyAsync_SendsTitleAndMessage()
     {
-        var (notifier, messageSender, _) = Create();
+        var (notifier, messageSender, _) = await CreateAsync();
 
         await notifier.NotifyAsync(new NotificationRequest("QA needs attention", "Feature 'addition' stopped."), CancellationToken.None);
 
@@ -103,7 +135,7 @@ public class SemaNamiPlatformNotifierTests
     [Fact]
     public async Task NotifyAsync_WithAFeatureId_BindsTheChannelToIt()
     {
-        var (notifier, _, channelState) = Create();
+        var (notifier, _, channelState) = await CreateAsync();
         var featureId = Guid.NewGuid();
 
         await notifier.NotifyAsync(new NotificationRequest("Title", "Message", FeatureId: featureId), CancellationToken.None);
@@ -114,7 +146,7 @@ public class SemaNamiPlatformNotifierTests
     [Fact]
     public async Task NotifyAsync_WithNoFeatureId_LeavesAnyExistingBindingAlone()
     {
-        var (notifier, _, channelState) = Create();
+        var (notifier, _, channelState) = await CreateAsync();
         var existing = Guid.NewGuid();
         channelState.Bind(existing);
 
@@ -124,9 +156,34 @@ public class SemaNamiPlatformNotifierTests
     }
 
     [Fact]
+    public async Task NotifyAsync_WhenTheChannelIsDisabled_DoesNotSend()
+    {
+        // Regression: the toggle in Settings ("Send stage updates to Telegram") is documented as
+        // gating outbound notifications, but the notifier used to ignore SemaNamiSettings.Enabled
+        // entirely and always send whenever TELEGRAM_BOT_TOKEN/CHAT_ID were configured — so turning
+        // the toggle off in the UI had no effect on whether Telegram actually got messages.
+        var (notifier, messageSender, _) = await CreateAsync(enabled: false);
+
+        await notifier.NotifyAsync(new NotificationRequest("Developer is waiting for you", "Approve to continue."), CancellationToken.None);
+
+        Assert.Empty(messageSender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_WhenTheChannelIsDisabled_DoesNotBindTheChannelEither()
+    {
+        var (notifier, _, channelState) = await CreateAsync(enabled: false);
+        var featureId = Guid.NewGuid();
+
+        await notifier.NotifyAsync(new NotificationRequest("Title", "Message", FeatureId: featureId), CancellationToken.None);
+
+        Assert.Null(channelState.BoundFeatureId);
+    }
+
+    [Fact]
     public async Task SecondNotification_RepliesInTheSameThread()
     {
-        var (notifier, messageSender, _) = Create();
+        var (notifier, messageSender, _) = await CreateAsync();
 
         await notifier.NotifyAsync(new NotificationRequest("First", "message"), CancellationToken.None);
         await notifier.NotifyAsync(new NotificationRequest("Second", "message"), CancellationToken.None);

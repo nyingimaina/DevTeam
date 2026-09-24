@@ -17,15 +17,22 @@ public sealed class SemaNamiPlatformNotifier : IPlatformNotifier
 
     private readonly ConversationSender _sender;
     private readonly SemaNamiChannelState _channelState;
+    private readonly SemaNamiSettings _settings;
 
-    public SemaNamiPlatformNotifier(ConversationSender sender, SemaNamiChannelState channelState)
+    public SemaNamiPlatformNotifier(ConversationSender sender, SemaNamiChannelState channelState, SemaNamiSettings settings)
     {
         _sender = sender;
         _channelState = channelState;
+        _settings = settings;
     }
 
     public async Task NotifyAsync(NotificationRequest request, CancellationToken ct)
     {
+        // The Settings UI's "Send stage updates to Telegram" toggle is documented as gating
+        // whether Telegram gets messages at all, not just whether replies are routed back in.
+        if (!_settings.Enabled)
+            return;
+
         if (request.FeatureId is { } featureId)
             _channelState.Bind(featureId);
 
