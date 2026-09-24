@@ -1,6 +1,7 @@
 # .NET build artifacts
 **/bin/
 **/obj/
+**/bin_verify/
 *.user
 *.suo
 .vs/
