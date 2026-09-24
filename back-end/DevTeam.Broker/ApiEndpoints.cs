@@ -530,6 +530,22 @@ public static class ApiEndpoints
             catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
         });
 
+        // Escape hatch for a feature whose pipeline finished but whose completion never got
+        // recorded — e.g. the merge+branch-delete succeeded but saving feature.Status = Complete
+        // failed afterward. StartStageAsync/RunStageAsync both refuse once the flow position is
+        // past the last stage, so this is the only way to resume finalizing in that state.
+        app.MapPost("/api/features/{featureId:guid}/retry-finalize", async (Guid featureId, HttpContext ctx) =>
+        {
+            var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
+            try
+            {
+                var release = await engine.RetryFeatureFinalizationAsync(featureId, ctx.RequestAborted);
+                return Results.Ok(release);
+            }
+            catch (KeyNotFoundException) { return Results.NotFound(); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+        });
+
         app.MapGet("/api/features/{featureId:guid}/pipeline", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();

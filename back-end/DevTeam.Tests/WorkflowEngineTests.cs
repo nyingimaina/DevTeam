@@ -3258,6 +3258,77 @@ public class WorkflowEngineTests : IDisposable
         Assert.Contains("delete-branch:feature/feat-001", _gitService.Commands);
     }
 
+    [Fact]
+    public async Task Signoff_OnLastStage_FeatureBranchAlreadyDeleted_StillCompletesFeature()
+    {
+        // Regression: a prior finalize attempt can merge + delete the feature branch and then
+        // fail before feature.Status = Complete is ever saved. Retrying used to always re-attempt
+        // the merge, which fails outright once the branch is gone, permanently wedging the
+        // feature (StartStageAsync/RunStageAsync both refuse once the pipeline has finished).
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        _gitService.MissingBranches.Add("feature/feat-001");
+
+        var final = await CompleteFeatureThroughQaAsync(engine, featureId);
+
+        Assert.Equal(ReleaseFeatureStatus.Complete, final.Features.Single().Status);
+        Assert.DoesNotContain(_gitService.Commands, c => c.StartsWith("merge:"));
+        Assert.DoesNotContain(_gitService.Commands, c => c.StartsWith("delete-branch:"));
+        Assert.Contains("push:release/feat-001", _gitService.Commands);
+    }
+
+    [Fact]
+    public async Task RetryFeatureFinalizationAsync_PipelineNotFinishedYet_Throws()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.RetryFeatureFinalizationAsync(featureId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RetryFeatureFinalizationAsync_AlreadyComplete_IsANoOp()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await CompleteFeatureThroughQaAsync(engine, featureId);
+        _gitService.Commands.Clear();
+
+        var result = await engine.RetryFeatureFinalizationAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(ReleaseFeatureStatus.Complete, result.Features.Single().Status);
+        Assert.Empty(_gitService.Commands);
+    }
+
+    [Fact]
+    public async Task RetryFeatureFinalizationAsync_StuckAfterAFailedFinalize_CompletesIt()
+    {
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+
+        _gitService.FailMerge = true;
+        _gitService.StageAllConflictedFiles = ["conflicted.txt"];
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CompleteFeatureThroughQaAsync(engine, featureId));
+
+        var stuck = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, stuck.Features.Single().Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => engine.StartStageAsync(featureId, CancellationToken.None));
+
+        // Whatever blocked it clears (here: the conflict is now resolvable) — retrying finalize,
+        // not re-running the whole stage again, is what should unstick it.
+        _gitService.FailMerge = false;
+        var recovered = await engine.RetryFeatureFinalizationAsync(featureId, CancellationToken.None);
+
+        Assert.Equal(ReleaseFeatureStatus.Complete, recovered.Features.Single().Status);
+    }
+
     private async Task<DevTeamRelease> CompleteFeatureThroughQaAsync(WorkflowEngine engine, Guid featureId)
     {
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -3437,9 +3508,16 @@ internal sealed class FakeGitService : IGitService
     // moved after the check ran".
     public string HeadCommitSha { get; set; } = "sha-attested";
 
+    // Refs a test wants HeadCommitAsync to report as gone — simulates a branch a prior finalize
+    // attempt already merged and deleted, without touching the default success-for-everything
+    // behavior every other test already relies on.
+    public HashSet<string> MissingBranches { get; } = [];
+
     public Task<GitResponse> HeadCommitAsync(string workspacePath, string reference, CancellationToken ct = default)
     {
         Commands.Add($"head-commit:{reference}");
+        if (MissingBranches.Contains(reference))
+            return Task.FromResult(new GitResponse(false, $"unknown revision: {reference}"));
         return Task.FromResult(new GitResponse(true, "OK", CommitSha: HeadCommitSha));
     }
 

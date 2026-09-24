@@ -41,6 +41,7 @@ public class SemaNamiReplyRouterTests
         public Task<IReadOnlyList<string>> GetWorkspaceChangesAsync(Guid featureId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> SignoffAsync(Guid featureId, string stageName, string role, string? comment, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> RetryStageAsync(Guid featureId, string? targetStageName, CancellationToken ct) => throw new NotImplementedException();
+        public Task<DevTeamRelease> RetryFeatureFinalizationAsync(Guid featureId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> SetReleaseAutonomousEnabledAsync(Guid releaseId, bool enabled, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct) => throw new NotImplementedException();

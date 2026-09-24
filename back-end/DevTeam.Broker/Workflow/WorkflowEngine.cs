@@ -2106,6 +2106,31 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return await LoadReleaseAsync(db, feature.ReleaseId, ct);
     }
 
+    // Escape hatch for a feature whose pipeline genuinely finished (FlowPosition at "done") but
+    // whose ReleaseFeatureStatus never reached Complete — e.g. FinalizeFeatureCompletionAndIndexAsync
+    // merged and deleted the feature branch but then failed before the Complete status was saved.
+    // StartStageAsync/RunStageAsync both refuse to do anything once the position is past the last
+    // stage ("All stages already complete."), so without this there is no way to resume: calling it
+    // again just re-runs FinalizeFeatureCompletionAndIndexAsync, which is itself safely retryable
+    // (see FinalizeFeatureCompletionAsync's branch-already-gone check).
+    public async Task<DevTeamRelease> RetryFeatureFinalizationAsync(Guid featureId, CancellationToken ct)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var feature = await LoadFeatureAsync(db, featureId, ct);
+        var workflow = LoadWorkflow(feature.Release.WorkspacePath);
+        var position = feature.FlowPosition
+            ?? throw new InvalidOperationException("Feature has no flow position.");
+
+        if (position.CurrentStageIndex < workflow.Pipeline.Count)
+            throw new InvalidOperationException("Feature has not finished its pipeline yet.");
+
+        if (feature.Status != ReleaseFeatureStatus.Complete)
+            await FinalizeFeatureCompletionAndIndexAsync(db, feature, ct);
+
+        return await LoadReleaseAsync(db, feature.ReleaseId, ct);
+    }
+
     public async Task<DevTeamRelease> GetReleaseAsync(Guid releaseId, CancellationToken ct)
     {
         try
@@ -2212,21 +2237,35 @@ public sealed class WorkflowEngine : IWorkflowEngine
             throw new InvalidOperationException(
                 $"Could not check out release branch '{release.BranchName}': {checkoutResult.Message}");
 
-        var mergeResult = await _gitService.MergeAsync(release.WorkspacePath, feature.BranchName, release.BranchName, ct);
-        if (!mergeResult.Success)
+        // A prior call here can merge and delete the feature branch and then fail (or crash)
+        // before feature.Status = Complete is ever saved — retrying must not re-attempt a merge
+        // of a branch that's already gone (MergeAsync would just fail outright), so treat a
+        // missing branch as "already merged by an earlier attempt" and skip straight past it.
+        var branchStillExists = (await _gitService.HeadCommitAsync(release.WorkspacePath, feature.BranchName, ct)).Success;
+        if (branchStillExists)
         {
-            var conflictedFiles = mergeResult.ConflictedFiles ?? [];
-            var prefixes = ResolveAllowedWritePrefixes(writesCode: true, "conflict-resolver", release.WorkspacePath, feature.Key, LoadWorkflow(release.WorkspacePath));
-            var resolved = conflictedFiles.Length > 0 &&
-                await ResolveConflictAsync(feature.Id, release.WorkspacePath, prefixes, conflictedFiles, db, ct);
-            if (!resolved)
-                throw new InvalidOperationException(
-                    $"Could not merge '{feature.BranchName}' into '{release.BranchName}': {mergeResult.Message}");
+            var mergeResult = await _gitService.MergeAsync(release.WorkspacePath, feature.BranchName, release.BranchName, ct);
+            if (!mergeResult.Success)
+            {
+                var conflictedFiles = mergeResult.ConflictedFiles ?? [];
+                var prefixes = ResolveAllowedWritePrefixes(writesCode: true, "conflict-resolver", release.WorkspacePath, feature.Key, LoadWorkflow(release.WorkspacePath));
+                var resolved = conflictedFiles.Length > 0 &&
+                    await ResolveConflictAsync(feature.Id, release.WorkspacePath, prefixes, conflictedFiles, db, ct);
+                if (!resolved)
+                    throw new InvalidOperationException(
+                        $"Could not merge '{feature.BranchName}' into '{release.BranchName}': {mergeResult.Message}");
 
-            var commitResult = await _gitService.CommitAsync(
-                release.WorkspacePath, $"Merge '{feature.BranchName}' into {release.BranchName} (conflicts resolved)", ct);
-            if (!commitResult.Success)
-                throw new InvalidOperationException($"Could not finalize the merge commit after resolving conflicts: {commitResult.Message}");
+                var commitResult = await _gitService.CommitAsync(
+                    release.WorkspacePath, $"Merge '{feature.BranchName}' into {release.BranchName} (conflicts resolved)", ct);
+                if (!commitResult.Success)
+                    throw new InvalidOperationException($"Could not finalize the merge commit after resolving conflicts: {commitResult.Message}");
+            }
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Feature branch '{Branch}' no longer exists for {FeatureKey} — an earlier finalize attempt already merged it; resuming from there.",
+                feature.BranchName, feature.Key);
         }
 
         var authToken = await TryGetCredentialForWorkspaceAsync(db, release.WorkspacePath, ct);
@@ -2243,9 +2282,12 @@ public sealed class WorkflowEngine : IWorkflowEngine
             _logger.LogInformation("No remote configured for '{Workspace}'; skipping push of release branch.", release.WorkspacePath);
         }
 
-        var deleteResult = await _gitService.DeleteBranchAsync(release.WorkspacePath, feature.BranchName, authToken, ct);
-        if (!deleteResult.Success)
-            _logger.LogWarning("Deleting feature branch '{Branch}' failed: {Message}", feature.BranchName, deleteResult.Message);
+        if (branchStillExists)
+        {
+            var deleteResult = await _gitService.DeleteBranchAsync(release.WorkspacePath, feature.BranchName, authToken, ct);
+            if (!deleteResult.Success)
+                _logger.LogWarning("Deleting feature branch '{Branch}' failed: {Message}", feature.BranchName, deleteResult.Message);
+        }
 
         feature.Status = ReleaseFeatureStatus.Complete;
         // The workspace is left checked out on the release branch (not any feature) at this
