@@ -50,3 +50,23 @@ installer/
 back-end/DevTeam.Broker/wwwroot/*
 !back-end/DevTeam.Broker/wwwroot/index.html
 !back-end/DevTeam.Broker/wwwroot/404.html
+
+# Added by DevTeam
+# Build output
+bin/
+obj/
+dist/
+build/
+artifacts/
+# Dependencies
+# Test output
+TestResults/
+# IDE / editor
+.idea/
+# OS noise
+# Logs and temp files
+*.tmp
+*.temp
+# Secrets / certs
+.env.*.local
+*.pfx

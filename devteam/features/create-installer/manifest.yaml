@@ -1,0 +1,8 @@
+feature: create-installer
+title: Windows InnoSetup installer packaging DevTeam broker + Avalonia desktop shell
+codePaths:
+  - "packaging"
+  - "DevTeam.Desktop"
+  - "DevTeam.Desktop.Tests"
+corePathBack: "back-end/DevTeam.Shared"
+testCommand: "dotnet test DevTeam.slnx"
