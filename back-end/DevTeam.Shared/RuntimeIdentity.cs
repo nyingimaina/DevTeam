@@ -39,32 +39,76 @@ public sealed record RuntimeIdentity
     /// <summary>Absolute path to the opencode executable, or null if not found.</summary>
     public string? OpenCodePath { get; }
 
-    private RuntimeIdentity(int port, string dataDirectory, string appHomeDirectory, string? openCodePath)
+    /// <summary>
+    /// True when the resolved executable is a <c>.cmd</c>/<c>.bat</c> shim (npm, scoop, choco) and
+    /// therefore has to be launched through <c>cmd.exe</c> rather than directly.
+    /// </summary>
+    public bool OpenCodeRequiresShell { get; }
+
+    /// <summary>
+    /// The directories that were searched for opencode. Kept so a failed detection can be explained
+    /// and reported in the diagnostics bundle instead of leaving the user to guess.
+    /// </summary>
+    public IReadOnlyList<string> OpenCodeSearchedDirectories { get; }
+
+    /// <summary>
+    /// True when the OpenCode desktop app is installed. It ships no CLI, so this distinguishes
+    /// "opencode is not installed at all" from "only the desktop app is installed".
+    /// </summary>
+    public bool OpenCodeDesktopAppInstalled { get; }
+
+    private RuntimeIdentity(
+        int port,
+        string dataDirectory,
+        string appHomeDirectory,
+        OpenCodeResolution openCode,
+        bool openCodeDesktopAppInstalled)
     {
         Port = port;
         DataDirectory = dataDirectory;
         AppHomeDirectory = appHomeDirectory;
         MutexName = "DevTeam.Desktop";
-        OpenCodePath = openCodePath;
+        OpenCodePath = openCode.Path;
+        OpenCodeRequiresShell = openCode.RequiresShell;
+        OpenCodeSearchedDirectories = openCode.SearchedDirectories;
+        OpenCodeDesktopAppInstalled = openCodeDesktopAppInstalled;
     }
 
     /// <summary>
-    /// Resolves identity from command line args and environment variables.
+    /// Resolves identity from command line args and environment variables. <paramref name="pathEnv"/>
+    /// and <paramref name="openCodePathEnv"/> default to the real environment, so tests can inject
+    /// them and stay deterministic.
     /// </summary>
     public static RuntimeIdentity Resolve(
         IReadOnlyList<string> args,
         string? portEnv,
         string? dataDirEnv,
         string userProfile,
-        string localAppData)
+        string localAppData,
+        string? pathEnv = null,
+        string? openCodePathEnv = null)
     {
         var port = ParsePort(ReadArg(args, PortArgument) ?? portEnv, DefaultPort);
         var dataDirectory = ResolveDataDirectory(
             ReadArg(args, DataDirectoryArgument) ?? dataDirEnv,
             userProfile);
         var appHome = Path.Combine(localAppData, "DevTeam");
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
 
-        return new RuntimeIdentity(port, dataDirectory, appHome, ResolveOpenCodePath(localAppData));
+        // Both the override and PATH fall back to the real environment. The persisted PATH is
+        // merged in because a Start-Menu launch carries whatever Explorer saw at logon, which
+        // predates a CLI installed since.
+        var explicitPath = openCodePathEnv ?? Environment.GetEnvironmentVariable("OPENCODE_PATH");
+        var effectivePath = pathEnv ?? WindowsEnvironmentPath.Effective(Environment.GetEnvironmentVariable("PATH"));
+
+        var openCode = OpenCodePathResolver.Probe(localAppData, effectivePath, explicitPath, programFiles);
+
+        return new RuntimeIdentity(
+            port,
+            dataDirectory,
+            appHome,
+            openCode,
+            OpenCodePathResolver.IsDesktopAppInstalled(localAppData));
     }
 
     public static string? ReadArg(IReadOnlyList<string> args, string name)
@@ -92,22 +136,5 @@ public sealed record RuntimeIdentity
             return Path.GetFullPath(explicitDataDir);
 
         return Path.Combine(userProfile, ".devteam");
-    }
-
-    private static string? ResolveOpenCodePath(string localAppData)
-    {
-        var candidates = new[]
-        {
-            Path.Combine(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "opencode", "opencode.exe"),
-        };
-
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-                return candidate;
-        }
-
-        return null;
     }
 }

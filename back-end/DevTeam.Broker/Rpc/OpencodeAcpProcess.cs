@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using DevTeam.Shared;
 
 namespace DevTeam.Broker.Rpc;
 
@@ -15,24 +16,51 @@ public sealed class OpencodeAcpProcess : IAcpProcess
     private readonly object _writeLock = new();
     private int _disposed;
 
-    public OpencodeAcpProcess(string executable, IReadOnlyList<string> args, Action<string>? onStderr = null)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = executable,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = new UTF8Encoding(false),
-        };
-        foreach (var arg in args)
-            startInfo.ArgumentList.Add(arg);
+    /// <summary>
+    /// Starts the opencode CLI, transparently handling a <c>.cmd</c>/<c>.bat</c> install. npm,
+    /// scoop and choco all install a shim rather than an executable, and
+    /// <see cref="Process"/> with <c>UseShellExecute=false</c> cannot start one by name, so the
+    /// shim is run through <c>cmd.exe /d /s /c</c> (the same approach RepomixRunner uses for npx).
+    /// </summary>
+    public static OpencodeAcpProcess Create(string executable, IReadOnlyList<string> args, Action<string>? onStderr = null) =>
+        OpenCodePathResolver.RequiresShell(executable)
+            ? new OpencodeAcpProcess("cmd.exe", BuildShellCommand(executable, args), onStderr)
+            : new OpencodeAcpProcess(executable, args, onStderr);
 
+    /// <summary>
+    /// Builds the <c>cmd.exe</c> command line that runs a shim and passes its arguments. The whole
+    /// command is wrapped in one extra pair of quotes because <c>/s</c> strips exactly the outer
+    /// pair, leaving the (possibly space-containing) script path correctly quoted.
+    /// </summary>
+    public static string BuildShellCommand(string executable, IReadOnlyList<string> args)
+    {
+        var line = new StringBuilder("/d /s /c \"");
+        line.Append(Quote(executable));
+        foreach (var arg in args)
+            line.Append(' ').Append(Quote(arg));
+        line.Append('"');
+        return line.ToString();
+    }
+
+    private static string Quote(string value) =>
+        value.Length == 0 || value.Any(char.IsWhiteSpace) || value.Contains('"')
+            ? "\"" + value.Replace("\"", "\\\"") + "\""
+            : value;
+
+    public OpencodeAcpProcess(string executable, IReadOnlyList<string> args, Action<string>? onStderr = null)
+        : this(WithArguments(NewStartInfo(executable), args), onStderr)
+    {
+    }
+
+    public OpencodeAcpProcess(string executable, string rawArguments, Action<string>? onStderr = null)
+        : this(WithRawArguments(NewStartInfo(executable), rawArguments), onStderr)
+    {
+    }
+
+    private OpencodeAcpProcess(ProcessStartInfo startInfo, Action<string>? onStderr)
+    {
         _process = Process.Start(startInfo)
-                   ?? throw new InvalidOperationException($"Failed to start '{executable}'");
+                   ?? throw new InvalidOperationException($"Failed to start '{startInfo.FileName}'");
 
         _reader = new StreamReader(_process.StandardOutput.BaseStream, new UTF8Encoding(false));
         _writer = new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false))
@@ -45,6 +73,31 @@ public sealed class OpencodeAcpProcess : IAcpProcess
         // fills up (4-64KB) and the child then blocks writing to it — which looks exactly like
         // the agent going silent forever. This is a correctness fix, not just diagnostics.
         _ = Task.Run(() => DrainStandardErrorAsync(onStderr));
+    }
+
+    private static ProcessStartInfo NewStartInfo(string executable) => new()
+    {
+        FileName = executable,
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        StandardInputEncoding = new UTF8Encoding(false),
+        StandardOutputEncoding = new UTF8Encoding(false),
+    };
+
+    private static ProcessStartInfo WithArguments(ProcessStartInfo startInfo, IReadOnlyList<string> args)
+    {
+        foreach (var arg in args)
+            startInfo.ArgumentList.Add(arg);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo WithRawArguments(ProcessStartInfo startInfo, string rawArguments)
+    {
+        startInfo.Arguments = rawArguments;
+        return startInfo;
     }
 
     private async Task DrainStandardErrorAsync(Action<string>? onStderr)

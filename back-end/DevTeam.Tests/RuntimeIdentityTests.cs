@@ -110,7 +110,7 @@ public class RuntimeIdentityTests
 
         try
         {
-            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData);
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, openCodePathEnv: string.Empty);
 
             Assert.Equal(exePath, identity.OpenCodePath);
         }
@@ -128,9 +128,168 @@ public class RuntimeIdentityTests
 
         try
         {
-            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData);
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: string.Empty, openCodePathEnv: string.Empty);
 
             Assert.Null(identity.OpenCodePath);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The CLI is installed by winget, scoop, choco, npm and the install script, and only some of
+    /// those land in a directory we hardcode. Anything reachable on PATH must count, otherwise a
+    /// machine with opencode installed reports that it is missing.
+    /// </summary>
+    [Fact]
+    public void Resolve_OpenCodeOnPathOutsideKnownLocations_ReturnsThatPath()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var toolDir = Path.Combine(localAppData, "scoop-shims");
+        Directory.CreateDirectory(toolDir);
+        var exePath = Path.Combine(toolDir, "opencode.exe");
+        File.WriteAllText(exePath, "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: toolDir, openCodePathEnv: string.Empty);
+
+            Assert.Equal(exePath, identity.OpenCodePath);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_OpenCodeEnvOverride_WinsOverEverythingElse()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var overrideDir = Path.Combine(localAppData, "explicit");
+        var pathDir = Path.Combine(localAppData, "on-path");
+        Directory.CreateDirectory(overrideDir);
+        Directory.CreateDirectory(pathDir);
+        var overrideExe = Path.Combine(overrideDir, "opencode.exe");
+        File.WriteAllText(overrideExe, "stub");
+        File.WriteAllText(Path.Combine(pathDir, "opencode.exe"), "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: pathDir, openCodePathEnv: overrideExe);
+
+            Assert.Equal(overrideExe, identity.OpenCodePath);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_OpenCodeEnvOverridePointingAtNothing_FallsBackToPath()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var pathDir = Path.Combine(localAppData, "on-path");
+        Directory.CreateDirectory(pathDir);
+        File.WriteAllText(Path.Combine(pathDir, "opencode.exe"), "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: pathDir, openCodePathEnv: Path.Combine(localAppData, "gone", "opencode.exe"));
+
+            Assert.Equal(Path.Combine(pathDir, "opencode.exe"), identity.OpenCodePath);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The desktop app is a separate product that ships no CLI, so it must not be mistaken for one.
+    /// </summary>
+    [Fact]
+    public void DesktopAppOnly_ReportsNoCliButKnowsTheDesktopAppIsThere()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var desktopDir = Path.Combine(localAppData, "Programs", "opencode");
+        Directory.CreateDirectory(desktopDir);
+        File.WriteAllText(Path.Combine(desktopDir, "OpenCode.exe"), "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: string.Empty, openCodePathEnv: string.Empty);
+
+            Assert.Null(identity.OpenCodePath);
+            Assert.True(identity.OpenCodeDesktopAppInstalled);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// npm installs a <c>.cmd</c> shim, which <c>Process</c> cannot start directly, so the identity
+    /// has to say that a shell is needed.
+    /// </summary>
+    [Fact]
+    public void Resolve_OpenCodeCmdShim_ReportsThatAShellIsNeeded()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var npmDir = Path.Combine(localAppData, "npm");
+        Directory.CreateDirectory(npmDir);
+        var shim = Path.Combine(npmDir, "opencode.cmd");
+        File.WriteAllText(shim, "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: npmDir, openCodePathEnv: string.Empty);
+
+            Assert.Equal(shim, identity.OpenCodePath);
+            Assert.True(identity.OpenCodeRequiresShell);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_AnExe_ReportsThatNoShellIsNeeded()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var toolDir = Path.Combine(localAppData, "tool");
+        Directory.CreateDirectory(toolDir);
+        File.WriteAllText(Path.Combine(toolDir, "opencode.exe"), "stub");
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: toolDir, openCodePathEnv: string.Empty);
+
+            Assert.False(identity.OpenCodeRequiresShell);
+        }
+        finally
+        {
+            Directory.Delete(localAppData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_RecordsTheDirectoriesItSearched()
+    {
+        var localAppData = Path.Combine(Path.GetTempPath(), "devteam-tests-" + Guid.NewGuid());
+        var toolDir = Path.Combine(localAppData, "tool");
+        Directory.CreateDirectory(toolDir);
+
+        try
+        {
+            var identity = RuntimeIdentity.Resolve([], null, null, @"C:\Users\tester", localAppData, pathEnv: toolDir, openCodePathEnv: string.Empty);
+
+            Assert.Contains(toolDir, identity.OpenCodeSearchedDirectories);
         }
         finally
         {

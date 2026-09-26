@@ -42,24 +42,30 @@ public sealed class OpenCodeLogWatcher : IProviderFailureWatcher, IDisposable
     {
         var cts = new CancellationTokenSource();
         lock (_watches) _watches.Add(cts);
-        _ = Task.Run(() => WatchAsync(acpSessionId, onFailure, cts.Token));
+        // The baseline must be read here, synchronously. Reading it inside the background task let
+        // the task start late, so a failure logged moments after Watch() was mistaken for one from
+        // an earlier run and silently discarded.
+        var offset = CaptureOffset();
+        _ = Task.Run(() => WatchAsync(acpSessionId, onFailure, offset, cts.Token));
         return new Scope(this, cts);
     }
 
-    private async Task WatchAsync(string acpSessionId, Action<ProviderFailure> onFailure, CancellationToken ct)
+    private long CaptureOffset()
     {
-        long offset = 0;
         try
         {
             // Only care about what happens from now on; a failure from an earlier run must not
             // abort this one.
-            if (File.Exists(_logPath))
-                offset = new FileInfo(_logPath).Length;
+            return File.Exists(_logPath) ? new FileInfo(_logPath).Length : 0;
         }
         catch (IOException)
         {
+            return 0;
         }
+    }
 
+    private async Task WatchAsync(string acpSessionId, Action<ProviderFailure> onFailure, long offset, CancellationToken ct)
+    {
         while (!ct.IsCancellationRequested)
         {
             try

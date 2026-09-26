@@ -6,4 +6,8 @@
     <Project Path="back-end/DevTeam.Shared/DevTeam.Shared.csproj" />
     <Project Path="back-end/DevTeam.Tests/DevTeam.Tests.csproj" />
   </Folder>
+  <Folder Name="/desktop/">
+    <Project Path="DevTeam.Desktop/DevTeam.Desktop.csproj" />
+    <Project Path="DevTeam.Desktop.Tests/DevTeam.Desktop.Tests.csproj" />
+  </Folder>
 </Solution>

@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:web="clr-namespace:Avalonia.Controls;assembly=Avalonia.Controls.WebView"
+        x:Class="DevTeam.Desktop.MainWindow"
+        Title="DevTeam"
+        Width="1280" Height="800"
+        MinWidth="900" MinHeight="600"
+        WindowState="Maximized"
+        Closing="OnClosing">
+  <DockPanel>
+    <Menu DockPanel.Dock="Top">
+      <MenuItem Header="_File">
+        <MenuItem Header="E_xit" Click="OnExitClick" />
+      </MenuItem>
+      <MenuItem Header="_Help">
+        <MenuItem Header="_About DevTeam" Click="OnAboutClick" />
+      </MenuItem>
+    </Menu>
+    <Border DockPanel.Dock="Top" x:Name="OpenCodeBanner" IsVisible="False"
+            Background="#FFF4CE" Padding="12,8">
+      <TextBlock x:Name="OpenCodeText" TextWrapping="Wrap" FontSize="13" Foreground="#5C4B00" />
+    </Border>
+    <Border DockPanel.Dock="Bottom" x:Name="StatusBar" Padding="12,6"
+            Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <ProgressBar x:Name="StatusProgress" Grid.Column="0" IsIndeterminate="True"
+                     Width="120" Height="6" Margin="0,0,12,0" VerticalAlignment="Center" />
+        <TextBlock x:Name="StatusText" Grid.Column="1" VerticalAlignment="Center" FontSize="13"
+                   TextWrapping="Wrap" />
+        <Button x:Name="RetryButton" Grid.Column="2" Content="Try again" IsVisible="False"
+                Click="OnRetryClick" />
+      </Grid>
+    </Border>
+    <web:NativeWebView x:Name="Browser" />
+  </DockPanel>
+</Window>

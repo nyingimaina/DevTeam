@@ -1,36 +1,18 @@
+using DevTeam.Shared;
+
 namespace DevTeam.Tests;
 
 /// <summary>
-/// Locates the <c>opencode</c> executable. Returns null when opencode is not
-/// installed so tests that talk to the real agent can skip portably.
+/// Locates the <c>opencode</c> executable for tests that talk to the real agent, skipping portably
+/// when it is absent. This deliberately delegates to the production resolver: when the two
+/// disagreed, the integration tests found a CLI on PATH that the shipped app could not see.
 /// </summary>
 internal static class OpenCodeLocator
 {
-    public static string? ResolvePath()
-    {
-        var knownPaths = new[]
-        {
+    public static string? ResolvePath() =>
+        OpenCodePathResolver.Resolve(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Environment.GetEnvironmentVariable("PATH"),
             Environment.GetEnvironmentVariable("OPENCODE_PATH"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WinGet", "Links", "opencode.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "opencode", "opencode.exe"),
-        };
-
-        var onDisk = knownPaths
-            .Where(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p))
-            .FirstOrDefault();
-
-        if (onDisk is not null)
-            return onDisk;
-
-        // Fall back to PATH lookup without launching the binary.
-        var pathVar = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        foreach (var dir in pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var candidate = Path.Combine(dir.Trim('"'), "opencode.exe");
-            if (File.Exists(candidate))
-                return candidate;
-        }
-
-        return null;
-    }
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
 }

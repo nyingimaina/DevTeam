@@ -127,11 +127,13 @@ public partial class Program
         {
             var exe = identity.OpenCodePath
                 ?? throw new InvalidOperationException(
-                    "opencode executable not found. Install opencode or set the path.");
+                    "opencode executable not found. Install the opencode command-line tool " +
+                    $"(npm install -g opencode-ai, or winget install opencode), or set OPENCODE_PATH. " +
+                    $"Searched: {string.Join(", ", identity.OpenCodeSearchedDirectories)}");
             var logger = sp.GetRequiredService<ILogger<Program>>();
             // Stderr is drained by the process wrapper regardless; forwarding it here means the
             // agent's own complaints ("stream error: rate limit exceeded") land in our log too.
-            return new OpencodeAcpProcess(exe, ["acp"], line => logger.LogDebug("opencode: {Line}", line));
+            return OpencodeAcpProcess.Create(exe, ["acp"], line => logger.LogDebug("opencode: {Line}", line));
         });
         builder.Services.AddSingleton<IPermissionPolicy, WorkspaceScopedPermissionPolicy>();
         builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
@@ -203,6 +205,23 @@ public partial class Program
         });
 
         var app = builder.Build();
+
+        // Record how opencode was located (or that it was not). Without this a detection failure
+        // is only ever visible to the user, never in the log a support bundle collects.
+        if (identity.OpenCodePath is null)
+        {
+            app.Logger.LogWarning(
+                "opencode CLI not found. Searched: {Directories}. Desktop app installed: {DesktopApp}",
+                identity.OpenCodeSearchedDirectories,
+                identity.OpenCodeDesktopAppInstalled);
+        }
+        else
+        {
+            app.Logger.LogInformation(
+                "opencode CLI resolved to {Path} (requires shell: {RequiresShell})",
+                identity.OpenCodePath,
+                identity.OpenCodeRequiresShell);
+        }
 
         using (var scope = app.Services.CreateScope())
         {
