@@ -40,6 +40,41 @@ public class VerifyCodeGateTests
     }
 
     [Fact]
+    public async Task Fails_WhenDotnetReportsAFailedTestWithoutAnySummary()
+    {
+        var runner = FakeProcessRunner.Git(
+            "  Failed DevTeam.Tests.WorkflowDefinitionLoaderTests.Load_AgentWithoutMode_Throws [11 ms]", exitCode: 0);
+        var gate = new VerifyCodeGate(runner);
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.VerifyCode, @"C:\work\proj", "feat-001", "developer"),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Contains("fail: DevTeam.Tests.WorkflowDefinitionLoaderTests", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Passes_WhenAllTestsPass_ButReactActWarningsAndVendorFramesArePrinted()
+    {
+        var runner = FakeProcessRunner.Git(string.Join('\n',
+        [
+            "Tests:       0 failed, 120 passed, 120 total",
+            "  console.error",
+            "    Warning: An update to ZestButton inside a test was not wrapped in act(...)",
+            "    at node_modules/react-dom/cjs/react-dom-test-utils.development.js:129:18",
+            "    at ZestResponsiveLayout.test.tsx:41:12",
+        ]), exitCode: 0);
+        var gate = new VerifyCodeGate(runner);
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.VerifyCode, @"C:\work\proj", "feat-001", "developer"),
+            CancellationToken.None);
+
+        Assert.True(result.Passed, result.Reason + " | `n" + result.EvidenceText);
+    }
+
+    [Fact]
     public async Task Fails_WhenProcessTimesOut()
     {
         var runner = new FakeProcessRunner(_ => new ProcessRunResult(0, "slow build...", "", true, TimeSpan.FromMinutes(3)));

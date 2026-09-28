@@ -2,8 +2,19 @@ using System.Text.RegularExpressions;
 
 namespace DevTeam.Broker.Gates;
 
+/// <summary>
+/// Turns raw `dotnet test` / `jest` output into one summary line plus one `fail:` line per
+/// genuinely failed test. A failure is a *test entry* (dotnet's "Failed &lt;test&gt; [x ms]",
+/// jest's bullet-headed test name) - never a bare file:line, never a compiler warning, never
+/// a console warning, never a stack frame. Test runners print file:line references all over
+/// their output (including inside node_modules and react-dom's own internals) for tests that
+/// passed, so treating every file:line as a failure reports failures nobody can fix and
+/// loops the developer stage against output that is already green.
+/// </summary>
 public static class TestOutputNormalizer
 {
+    private const int MaxFailures = 20;
+
     private static readonly Regex PassedSummaryRegex = new(
         @"Passed!\s+-\s+Failed:\s+(?<failed>\d+),\s+Passed:\s+(?<passed>\d+)",
         RegexOptions.Compiled);
@@ -12,11 +23,22 @@ public static class TestOutputNormalizer
         @"Tests:\s+(?<failed>\d+)\s+failed,\s+(?<passed>\d+)\s+passed",
         RegexOptions.Compiled);
 
-    private static readonly Regex FailureFileRegex = new(
-        @"(?<file>(?:\.{1,2}[/\\]|/)?[\w.][\w.\-/\\]*\.(?:cs|ts|tsx|js|jsx))\s*(?:(?:\(|:)\s*line\s*(?<line1>\d+)|\((?<line2>\d+)|:(?<line3>\d+))",
+    private static readonly Regex NormalizedSummaryRegex = new(
+        @"tests:\s+(\d+)\s+passed,\s+(?<failed>\d+)\s+failed",
+        RegexOptions.Compiled);
+
+    // dotnet: "  Failed Namespace.Type.Method [11 ms]" or "  Failed: Namespace.Type.Method".
+    // The summary lines ("Failed!  - Failed: 0, Passed: 41, ...") can't match: they are
+    // "Failed!" with no whitespace, and their captured name is a bare count.
+    private static readonly Regex DotnetFailureRegex = new(
+        @"^\s*Failed:?\s+(?<name>.+?)(?:\s*\[[^\]]*\])?\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly Regex WarningLineRegex = new(@"^\s*warning\s+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // jest/vitest: "  <bullet> Release wizard > saves settings". Bullet, bullet and the ASCII
+    // stand-in all appear in the wild, so accept any of them.
+    private static readonly Regex JestFailureRegex = new(
+        @"^\s*(?:\u25CF|\u2022|\*)\s+(?<name>.+?)\s*$",
+        RegexOptions.Compiled);
 
     public static string Normalize(string rawOutput)
     {
@@ -26,17 +48,42 @@ public static class TestOutputNormalizer
         var lines = rawOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         var summary = ExtractSummary(lines);
-        var failures = ExtractFailures(lines);
+        var failures = FailureEntries(rawOutput);
 
         var builder = new System.Text.StringBuilder();
         if (summary is not null)
             builder.Append(summary).Append('\n');
         foreach (var failure in failures)
             builder.Append("fail: ").Append(failure).Append('\n');
-        if (summary is null && failures.Length == 0)
+        if (summary is null && failures.Count == 0)
             builder.Append(lines.Length > 12 ? LinesTruncated(lines) : string.Join('\n', lines));
 
         return builder.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// The failed test names in this run, in output order, deduplicated - the single
+    /// authoritative failure list. Gate verdicts and the Test Runner report both read this
+    /// rather than re-deriving "did something fail" from the rendered text.
+    /// </summary>
+    public static IReadOnlyList<string> FailureEntries(string rawOutput)
+    {
+        if (string.IsNullOrWhiteSpace(rawOutput))
+            return [];
+
+        var failures = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in rawOutput.Split('\n', StringSplitOptions.TrimEntries))
+        {
+            var name = FailureName(line);
+            if (name is null || !seen.Add(name))
+                continue;
+            failures.Add(name);
+            if (failures.Count >= MaxFailures)
+                break;
+        }
+
+        return failures;
     }
 
     public static int FailedCount(string normalizedOutput)
@@ -45,9 +92,32 @@ public static class TestOutputNormalizer
         return match.Success ? int.Parse(match.Groups["failed"].Value) : 0;
     }
 
-    private static readonly Regex NormalizedSummaryRegex = new(
-        @"tests:\s+(\d+)\s+passed,\s+(?<failed>\d+)\s+failed",
-        RegexOptions.Compiled);
+    private static string? FailureName(string line)
+    {
+        var jest = JestFailureRegex.Match(line);
+        if (jest.Success)
+        {
+            var name = Clean(jest.Groups["name"].Value);
+            // A "Console" heading introduces jest's captured console output, not a failing test.
+            return name.Length > 0 && !name.StartsWith("Console", StringComparison.OrdinalIgnoreCase)
+                ? name
+                : null;
+        }
+
+        var dotnet = DotnetFailureRegex.Match(line);
+        if (!dotnet.Success)
+            return null;
+
+        var candidate = Clean(dotnet.Groups["name"].Value);
+        // A bare count means this was a summary line ("Failed: 0, Passed: 41"), not a test name.
+        return candidate.Length > 0 && !candidate.All(char.IsDigit) ? candidate : null;
+    }
+
+    private static string Clean(string name)
+    {
+        var cleaned = name.Trim().TrimEnd('.', ',', ';');
+        return cleaned.Length > 160 ? cleaned[..157] + "..." : cleaned;
+    }
 
     private static string? ExtractSummary(string[] lines)
     {
@@ -65,37 +135,6 @@ public static class TestOutputNormalizer
         return null;
     }
 
-    private static string[] ExtractFailures(string[] lines)
-    {
-        var failures = new List<string>();
-        foreach (var line in lines)
-        {
-            if (WarningLineRegex.IsMatch(line))
-                continue;
-            if (PassedSummaryRegex.IsMatch(line) || JestSummaryRegex.IsMatch(line))
-                continue;
-
-            var match = FailureFileRegex.Match(line);
-            if (match.Success)
-            {
-                var failureLine = match.Groups["line1"].Success ? match.Groups["line1"].Value
-                : match.Groups["line2"].Success ? match.Groups["line2"].Value
-                : match.Groups["line3"].Value;
-                failures.Add(TrimmedFailure($"{match.Groups["file"].Value}:{failureLine}"));
-            }
-            else if (line.StartsWith("Failed ", StringComparison.Ordinal) || line.StartsWith("Failed:", StringComparison.Ordinal))
-                failures.Add(TrimmedFailure(line));
-        }
-
-        return failures.Take(10).ToArray();
-    }
-
-    private static string TrimmedFailure(string text)
-    {
-        var cleaned = text.Trim();
-        return cleaned.Length > 140 ? cleaned[..137] + "…" : cleaned;
-    }
-
     private static string LinesTruncated(string[] lines)
-        => string.Join('\n', lines.Take(12)) + $"\n… {lines.Length - 12} more lines truncated";
+        => string.Join('\n', lines.Take(12)) + $"\n... {lines.Length - 12} more lines truncated";
 }
