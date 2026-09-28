@@ -204,6 +204,9 @@ public partial class Program
         // lost turns escalated) before any background worker or incoming request can touch them.
         builder.Services.AddSingleton<WorkflowCrashRecoverer>();
         builder.Services.AddHostedService<WorkflowCrashRecoveryService>();
+        // The heartbeat runs alongside so those classifications can tell a genuine broker death
+        // from "another process merely resolved Program against the shared database".
+        builder.Services.AddHostedService<BrokerHeartbeatService>();
         builder.Services.AddHostedService<RepoContextWorker>();
         builder.Services.AddHostedService<MetricsRetentionService>();
 

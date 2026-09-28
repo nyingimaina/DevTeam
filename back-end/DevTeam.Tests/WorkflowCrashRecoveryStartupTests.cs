@@ -73,6 +73,60 @@ public class WorkflowCrashRecoveryStartupTests : IDisposable
         Assert.Single(hosted.OfType<WorkflowCrashRecoveryService>());
     }
 
+    [Fact]
+    public async Task Broker_Startup_SkipsHealingWhenAnotherLiveBrokerOwnsTheDatabase()
+    {
+        // The loop this must break (observed 2026-09-28, 19:15:30 and 19:18:02): a test host
+        // builds Program with the DEFAULT connection string — the production devteam.db — and
+        // its boot-time recovery pass escalates the live app's mid-prompt run ("broker
+        // restarted"), which tears down a turn that was alive the whole time. Ownership proves
+        // the difference: a fresh heartbeat from a live pid means somebody else owns this db,
+        // and healing it would be lying about a restart nobody had.
+        var wedgedAsFarAsTheDbKnows = SeedRun(
+            ReleaseStageStatus.Active, StagePhase.GuidedQA, checkpointSignal: StageCheckpointSignal.PromptInProgress);
+
+        using (var db = OpenDb())
+        {
+            db.AppSettings.Add(new AppSetting
+            {
+                Name = "devteam.broker.owner",
+                // Our own pid via a truthy aliveness seam: the recoverer's liveness fn says YES
+                // for any pid in this scenario, but it must also differ from our own.
+                Value = $"{{\"pid\":{Environment.ProcessId - 1},\"beat\":\"{DateTimeOffset.UtcNow:O}\"}}",
+            });
+            db.SaveChanges();
+        }
+
+        _factory = new RecoveryAppFactory(_dbPath, pidIsAlive: () => true);
+        _factory.CreateClient();
+
+        Assert.Equal(ReleaseStageStatus.Active, ReadRun(wedgedAsFarAsTheDbKnows).Status);
+    }
+
+    [Fact]
+    public void Broker_Startup_HealsWhenTheOwnerHeartbeatIsStaleAndItsPidIsGone()
+    {
+        // The true-restart path: the recorded owner process no longer exists and its beat is
+        // old, so a wedged run is genuinely ours to heal.
+        var abandoned = SeedRun(
+            ReleaseStageStatus.Active, StagePhase.GuidedQA, checkpointSignal: StageCheckpointSignal.PromptInProgress);
+
+        using (var db = OpenDb())
+        {
+            db.AppSettings.Add(new AppSetting
+            {
+                Name = "devteam.broker.owner",
+                Value = $"{{\"pid\":999999,\"beat\":\"{DateTimeOffset.UtcNow.AddMinutes(-10):O}\"}}",
+            });
+            db.SaveChanges();
+        }
+
+        _factory = new RecoveryAppFactory(_dbPath, pidIsAlive: () => false);
+        _factory.CreateClient();
+
+        Assert.Equal(ReleaseStageStatus.Escalated, ReadRun(abandoned).Status);
+    }
+
     public void Dispose()
     {
         if (_factory is not null)
@@ -144,7 +198,7 @@ public class WorkflowCrashRecoveryStartupTests : IDisposable
     /// the network — only the pieces the recovery pass needs, with the much larger container
     /// (fakes, real SemaNami listener) deliberately left out.
     /// </summary>
-    private sealed class RecoveryAppFactory(string dbPath) : WebApplicationFactory<Program>
+    private sealed class RecoveryAppFactory(string dbPath, Func<bool>? pidIsAlive = null) : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -156,6 +210,9 @@ public class WorkflowCrashRecoveryStartupTests : IDisposable
                 services.Remove(descriptor);
                 services.AddDbContextFactory<DevTeamDbContext>(options =>
                     options.UseSqlite($"Data Source={dbPath}"));
+
+                if (pidIsAlive is { } alive)
+                    services.AddSingleton<Func<int, bool>>(_ => alive());
 
                 // Same seam as in ApiIntegrationTests: the SemaNami listener hits a real Telegram
                 // bot when the environment carries a token, so tests swap it out explicitly.

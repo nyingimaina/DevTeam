@@ -181,13 +181,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task SessionModelAndMode_ReachableViaSessionCreatedByReleasePipeline()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-model-mode", workspacePath = @"C:\work\model-mode-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-model-mode", @"C:\work\model-mode-test");
 
-        var startStage = await client.PostAsJsonAsync($"/api/features/{release!.CurrentFeatureId}/start-stage", new { });
+        var startStage = await client.PostAsJsonAsync($"/api/features/{release.CurrentFeatureId}/start-stage", new { });
         startStage.EnsureSuccessStatusCode();
         var stageRun = await startStage.Content.ReadFromJsonAsync<ReleaseStageRun>(JsonOptions);
         Assert.NotNull(stageRun);
@@ -491,12 +487,10 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         {
             var client = _factory.CreateClient();
 
-            var create = await client.PostAsJsonAsync("/api/releases",
-                new { releaseKey = "cancel-test", workspacePath = @"C:\work\cancel-test-" + Guid.NewGuid().ToString("N") });
-            create.EnsureSuccessStatusCode();
-            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
+            var release = await CreateReleaseWithFeatureAsync(
+                client, "cancel-test", @"C:\work\cancel-test-" + Guid.NewGuid().ToString("N"));
 
-            var startTask = client.PostAsync($"/api/features/{release!.CurrentFeatureId}/start-stage", null);
+            var startTask = client.PostAsync($"/api/features/{release.CurrentFeatureId}/start-stage", null);
 
             ActiveTurnInfo? turn = null;
             for (var i = 0; i < 100 && turn is null; i++)
@@ -567,13 +561,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
 
-        // Create release
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-api-001", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
-        Assert.Equal("feat-api-001", release!.Features[0].Key);
+        // Create release, then add its first feature (a release now starts empty).
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-api-001", @"C:\work\api-test");
+        Assert.Equal("feat-api-001", release.Features[0].Key);
         Assert.Equal(ReleaseStatus.InProgress, release.Status);
 
         // List releases
@@ -615,11 +605,8 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task RunGatesAndRepair_ReturnsOutcomeEnvelopeWithTheRelease()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-api-repair", workspacePath = @"C:\work\api-repair-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        var featureId = release!.CurrentFeatureId;
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-api-repair", @"C:\work\api-repair-test");
+        var featureId = release.CurrentFeatureId;
 
         (await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { })).EnsureSuccessStatusCode();
         (await client.PostAsJsonAsync($"/api/features/{featureId}/send-message", new { text = "We need a login form" }))
@@ -773,13 +760,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
             var gitBranch = await client.PostAsJsonAsync("/api/git/branch", new { workspacePath = tmpDir, branchName = "feature/test" });
             gitBranch.EnsureSuccessStatusCode();
 
-            // 4. Create release
-            var create = await client.PostAsJsonAsync("/api/releases",
-                new { releaseKey = "e2e-test", workspacePath = tmpDir });
-            create.EnsureSuccessStatusCode();
-            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-            Assert.NotNull(release);
-            Assert.Equal("e2e-test", release!.Features[0].Key);
+            // 4. Create release, then add its first feature (a release now starts empty)
+            var release = await CreateReleaseWithFeatureAsync(client, "e2e-test", tmpDir);
+            Assert.Equal("e2e-test", release.Features[0].Key);
 
             // 5. List releases
             var list = await client.GetFromJsonAsync<DevTeamRelease[]>("/api/releases", JsonOptions);
@@ -829,13 +812,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task PipelineEndpoint_ReturnsOrderedStages()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-pipe-001", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-pipe-001", @"C:\work\api-test");
 
-        var pipeline = await client.GetFromJsonAsync<PipelineStageDto[]>($"/api/features/{release!.CurrentFeatureId}/pipeline", JsonOptions);
+        var pipeline = await client.GetFromJsonAsync<PipelineStageDto[]>($"/api/features/{release.CurrentFeatureId}/pipeline", JsonOptions);
         Assert.NotNull(pipeline);
         Assert.Equal(4, pipeline!.Length);
         Assert.Equal("business-analyst", pipeline[0].Name);
@@ -908,13 +887,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                 "When they enter valid credentials" + Environment.NewLine +
                 "Then they are signed in");
 
-            var create = await client.PostAsJsonAsync("/api/releases",
-                new { releaseKey = "feat-ba-001", workspacePath = workspace });
-            create.EnsureSuccessStatusCode();
-            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-            Assert.NotNull(release);
+            var release = await CreateReleaseWithFeatureAsync(client, "feat-ba-001", workspace);
 
-            var featureId = release!.CurrentFeatureId;
+            var featureId = release.CurrentFeatureId;
             (await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { })).EnsureSuccessStatusCode();
             var send = await client.PostAsJsonAsync($"/api/features/{featureId}/send-message",
                 new { text = "We need a login form with email and password" });
@@ -960,12 +935,8 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                 "When the user adds them" + Environment.NewLine +
                 "Then the sum is shown");
 
-            var create = await client.PostAsJsonAsync("/api/releases",
-                new { releaseKey = "feat-calc-001", workspacePath = workspace });
-            create.EnsureSuccessStatusCode();
-            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-            Assert.NotNull(release);
-            var featureId = release!.CurrentFeatureId;
+            var release = await CreateReleaseWithFeatureAsync(client, "feat-calc-001", workspace);
+            var featureId = release.CurrentFeatureId;
 
             (await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { })).EnsureSuccessStatusCode();
 
@@ -1017,13 +988,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         try
         {
             var client = _factory.CreateClient();
-            var create = await client.PostAsJsonAsync("/api/releases",
-                new { releaseKey = "feat-ba-002", workspacePath = workspace });
-            create.EnsureSuccessStatusCode();
-            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-            Assert.NotNull(release);
+            var release = await CreateReleaseWithFeatureAsync(client, "feat-ba-002", workspace);
 
-            var featureId = release!.CurrentFeatureId;
+            var featureId = release.CurrentFeatureId;
             (await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { })).EnsureSuccessStatusCode();
             (await client.PostAsJsonAsync($"/api/features/{featureId}/send-message",
                 new { text = "We need a login form" })).EnsureSuccessStatusCode();
@@ -1047,13 +1014,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task RunStage_InteractiveStage_ReturnsBadRequest()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-run-001", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-run-001", @"C:\work\api-test");
 
-        var response = await client.PostAsJsonAsync($"/api/features/{release!.CurrentFeatureId}/run-stage", new { });
+        var response = await client.PostAsJsonAsync($"/api/features/{release.CurrentFeatureId}/run-stage", new { });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
@@ -1061,13 +1024,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task StageMessages_ReturnsLinkedSessionConversation()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-msg-001", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-msg-001", @"C:\work\api-test");
 
-        var featureId = release!.CurrentFeatureId;
+        var featureId = release.CurrentFeatureId;
         var start = await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { });
         start.EnsureSuccessStatusCode();
         var stageRun = await start.Content.ReadFromJsonAsync<ReleaseStageRun>(JsonOptions);
@@ -1097,16 +1056,12 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         try
         {
             var client = _factory.CreateClient();
-            var create = await client.PostAsJsonAsync("/api/releases",
-                new { releaseKey = "feat-rw-001", workspacePath = workspace });
-            create.EnsureSuccessStatusCode();
-            var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-            Assert.NotNull(release);
+            var release = await CreateReleaseWithFeatureAsync(client, "feat-rw-001", workspace);
 
             // BA progression (interactive + agent requirements extraction) is covered by the
             // engine tests with fake gates; here we seed the flow position to the developer
             // stage so the autonomous run/push-back HTTP surface can be exercised end to end.
-            var featureId = release!.CurrentFeatureId!.Value;
+            var featureId = release.CurrentFeatureId!.Value;
             await SeedDeveloperPositionAsync(featureId);
 
             // 1. Autonomous developer run: gates fail in an empty workspace (no code) → BlockedGate
@@ -1150,13 +1105,9 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task PushBack_Validation_ReturnsExpectedStatusCodes()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-pb-001", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-pb-001", @"C:\work\api-test");
 
-        var featureId = release!.CurrentFeatureId;
+        var featureId = release.CurrentFeatureId;
         var forward = await client.PostAsJsonAsync($"/api/features/{featureId}/push-back",
             new { targetStageName = "qa", instructions = "nope" });
         Assert.Equal(HttpStatusCode.BadRequest, forward.StatusCode);
@@ -1184,12 +1135,8 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task RetryStage_OnCurrentStage_SupersedesTheStuckAttemptWithAFreshOne()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-retry-001", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
-        var featureId = release!.CurrentFeatureId!.Value;
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-retry-001", @"C:\work\api-test");
+        var featureId = release.CurrentFeatureId!.Value;
 
         var started = await client.PostAsJsonAsync($"/api/features/{featureId}/start-stage", new { });
         started.EnsureSuccessStatusCode();
@@ -1215,12 +1162,8 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     public async Task RetryStage_Validation_ReturnsExpectedStatusCodes()
     {
         var client = _factory.CreateClient();
-        var create = await client.PostAsJsonAsync("/api/releases",
-            new { releaseKey = "feat-retry-002", workspacePath = @"C:\work\api-test" });
-        create.EnsureSuccessStatusCode();
-        var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
-        Assert.NotNull(release);
-        var featureId = release!.CurrentFeatureId;
+        var release = await CreateReleaseWithFeatureAsync(client, "feat-retry-002", @"C:\work\api-test");
+        var featureId = release.CurrentFeatureId;
 
         var unknown = await client.PostAsJsonAsync($"/api/features/{featureId}/retry-stage",
             new { targetStageName = "nobody" });
@@ -1462,6 +1405,25 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var reRead = await client.GetFromJsonAsync<WorkspaceProfileDto>(
             $"/api/workspace/profile?workspacePath={Uri.EscapeDataString(workspacePath)}", JsonOptions);
         Assert.Equal(other.Id, reRead!.ProfileId);
+    }
+
+    /// <summary>
+    /// REQ-1/REQ-7 (last-feature): starting a release now creates an empty shell, so a test that
+    /// exercises a feature-scoped endpoint must add that release's first feature explicitly —
+    /// exactly what the user does from the release's empty state.
+    /// </summary>
+    private async Task<DevTeamRelease> CreateReleaseWithFeatureAsync(
+        HttpClient client, string releaseKey, string workspacePath, string? featureKey = null)
+    {
+        var create = await client.PostAsJsonAsync("/api/releases", new { releaseKey, workspacePath });
+        create.EnsureSuccessStatusCode();
+        var release = (await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions))!;
+
+        var addFeature = await client.PostAsJsonAsync(
+            $"/api/releases/{release.Id}/features", new { featureKey = featureKey ?? releaseKey });
+        addFeature.EnsureSuccessStatusCode();
+
+        return (await client.GetFromJsonAsync<DevTeamRelease>($"/api/releases/{release.Id}", JsonOptions))!;
     }
 
     private async Task SeedDeveloperPositionAsync(Guid featureId)

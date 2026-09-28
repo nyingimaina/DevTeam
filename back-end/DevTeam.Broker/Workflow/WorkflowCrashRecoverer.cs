@@ -21,16 +21,108 @@ namespace DevTeam.Broker.Workflow;
 /// </summary>
 public sealed class WorkflowCrashRecoverer
 {
+    private const string OwnerKey = "devteam.broker.owner";
+
+    /// <summary>
+    /// How long a recorded owner beat is considered a live claim. The heartbeat writes one every
+    /// 15 seconds, so anything inside this window belongs to a process that was alive moments
+    /// ago; 90s comfortably rides out a busy machine.
+    /// </summary>
+    private static readonly TimeSpan OwnerFreshWindow = TimeSpan.FromSeconds(90);
+
     private readonly IDbContextFactory<DevTeamDbContext> _dbFactory;
+    private readonly Func<int, bool> _pidIsAlive;
 
     public WorkflowCrashRecoverer(IDbContextFactory<DevTeamDbContext> dbFactory)
+        : this(dbFactory, DefaultPidIsAlive)
+    {
+    }
+
+    public WorkflowCrashRecoverer(IDbContextFactory<DevTeamDbContext> dbFactory, Func<int, bool> pidIsAlive)
     {
         _dbFactory = dbFactory;
+        _pidIsAlive = pidIsAlive;
+    }
+
+    private static bool DefaultPidIsAlive(int pid)
+    {
+        try
+        {
+            return System.Diagnostics.Process.GetProcessById(pid).Id == pid;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whose process owns this database right now, if anyone. See <see cref="Broker"/>'s
+    /// heartbeat service: every live broker stamps its pid here periodically, so a boot can tell
+    /// "the previous owner died mid-prompt" (safe to heal) from "another broker is running right
+    /// now" — which is exactly what a test host booting Program looks like when the app is up.
+    /// </summary>
+    private async Task<(int Pid, DateTimeOffset Beat)?> ReadOwnerAsync(DevTeamDbContext db, CancellationToken ct)
+    {
+        var row = await db.AppSettings.FirstOrDefaultAsync(a => a.Name == OwnerKey, ct);
+        if (row is null)
+            return null;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(row.Value);
+            var pid = doc.RootElement.GetProperty("pid").GetInt32();
+            var beat = doc.RootElement.GetProperty("beat").GetDateTimeOffset();
+            return (pid, beat);
+        }
+        catch
+        {
+            // an unreadable owner row must never paralyse recovery; old builds wrote nothing and
+            // a corrupt hand-written row should behave like an absent one.
+            return null;
+        }
+    }
+
+    /// <summary>Stamps our pid as the owner so a racing boot skids past instead of healing us.</summary>
+    private static void ClaimOwnership(DevTeamDbContext db)
+    {
+        var value = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            pid = System.Environment.ProcessId,
+            beat = DateTimeOffset.UtcNow,
+        });
+        var row = db.AppSettings.FirstOrDefault(a => a.Name == OwnerKey);
+        if (row is null)
+        {
+            db.AppSettings.Add(new AppSetting { Name = OwnerKey, Value = value });
+        }
+        else
+        {
+            row.Value = value;
+        }
     }
 
     public async Task RecoverAsync(CancellationToken ct)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+        var owner = await ReadOwnerAsync(db, ct);
+        if (owner is { } recorded)
+        {
+            var fresh = recorded.Beat >= DateTimeOffset.UtcNow.Subtract(OwnerFreshWindow);
+            var alive = _pidIsAlive(recorded.Pid);
+            if (fresh && alive && recorded.Pid != System.Environment.ProcessId)
+            {
+                // Another broker owns this db and demonstrably lives: healing its runs here
+                // would invent a restart that never happened (the class of failure that had a
+                // test host tear down the live app's turn mid-prompt). Nothing to do.
+                return;
+            }
+        }
+
+        // Take the database before acting on it, so a racing boot sees our claim instead of
+        // healing rows out from under us.
+        ClaimOwnership(db);
 
         var runs = await db.ReleaseStageRuns
             .Include(sr => sr.GuidanceNotes)

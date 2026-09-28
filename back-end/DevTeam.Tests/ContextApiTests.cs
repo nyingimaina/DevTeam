@@ -1,10 +1,15 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using DevTeam.Broker;
+using DevTeam.Broker.Domain;
+using DevTeam.Broker.SemaNami;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Workflow;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace DevTeam.Tests;
 
@@ -13,11 +18,42 @@ namespace DevTeam.Tests;
 /// context, and pin the wording of the compact command, because both are the difference between a
 /// bar that reflects reality and one that flatters it.
 /// </summary>
-public class ContextApiTests : IClassFixture<WebApplicationFactory<Program>>
+public class ContextApiTests : IClassFixture<ContextApiTests.AppFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly AppFactory _factory;
 
-    public ContextApiTests(WebApplicationFactory<Program> factory) => _factory = factory;
+    public ContextApiTests(AppFactory factory) => _factory = factory;
+
+    /// <summary>
+    /// The raw <c>WebApplicationFactory&lt;Program&gt;</c> fixture version of this class booted
+    /// Program with the production connection string, and its boot-time recovery pass escalated
+    /// the live app's mid-prompt runs. Every server fixture re-binds the database to its own
+    /// file — this one does too now.
+    /// </summary>
+    public sealed class AppFactory : WebApplicationFactory<Program>
+    {
+        public string DatabasePath { get; } =
+            Path.Combine(Path.GetTempPath(), "devteam-context-" + Guid.NewGuid().ToString("N") + ".db");
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("DataDirectory", Path.GetDirectoryName(DatabasePath) ?? ".");
+            builder.ConfigureServices(services =>
+            {
+                var descriptor = services.Single(d =>
+                    d.ServiceType == typeof(IDbContextFactory<DevTeamDbContext>));
+                services.Remove(descriptor);
+                services.AddDbContextFactory<DevTeamDbContext>(options =>
+                    options.UseSqlite($"Data Source={DatabasePath}"));
+
+                var listener = services.FirstOrDefault(d =>
+                    d.ServiceType == typeof(IHostedService) &&
+                    d.ImplementationType == typeof(SemaNamiListenerService));
+                if (listener is not null)
+                    services.Remove(listener);
+            });
+        }
+    }
 
     [Fact]
     public async Task CurrentContext_ReportsNoContextBeforeTheAgentHasSaidAnything()
