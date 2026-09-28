@@ -1,0 +1,17 @@
+feature: last-feature
+title: last-feature
+codePathBack: back-end/**/Features/<F>
+codePathFront: front-end/app/<F>
+codePaths: []
+effectiveCodePaths:
+- back-end/**/Features/<F>
+- front-end/app/<F>
+shared: []
+testCommand: dotnet test DevTeam.slnx
+runCommand: 
+corePathBack: back-end/src/Core
+corePathFront: front-end/app/core
+corePaths: []
+effectiveCorePaths:
+- back-end/src/Core
+- front-end/app/core
