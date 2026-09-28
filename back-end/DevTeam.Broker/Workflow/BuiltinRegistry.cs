@@ -9,6 +9,7 @@ public static class BuiltinRegistry
     public const string CodeMap = "code_map";
     public const string GherkinValidator = "gherkin_validator";
     public const string BuildCheck = "build_check";
+    public const string FastLane = "fast_lane";
     public const string VerifyCode = "verify_code";
     public const string CodeHygiene = "code_hygiene";
     public const string AppLaunch = "app_launch";

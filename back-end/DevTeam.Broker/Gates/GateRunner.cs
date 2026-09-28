@@ -90,6 +90,7 @@ public sealed class BuiltinGateRegistry
         new CodeMapGate(repoContext),
         new GherkinValidatorGate(),
         new BuildCheckGate(runner),
+        new FastLaneGate(runner),
         new VerifyCodeGate(runner),
         new CodeHygieneGate(runner),
         new AppLaunchGate(runner),
