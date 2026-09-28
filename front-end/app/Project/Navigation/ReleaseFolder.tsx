@@ -22,7 +22,7 @@ interface IReleaseFolderProps {
 }
 
 /**
- * Level 1: every feature of a release as a card, a always-visible ＋ New feature, and a ship
+ * Level 1: every feature of a release as a card, an always-visible Add feature, and a ship
  * action only when every feature really is done (the reported bug: a stale stored "Ready").
  * A shipped or cancelled release is a read-only record — nothing here offers to change it.
  */
@@ -53,6 +53,13 @@ export default function ReleaseFolder({
         </span>
       </div>
 
+      {release.features.length === 0 && (
+        <div className={styles.folderEmpty} data-testid={`${testIdPrefix}-folder-empty`}>
+          <h3 className={styles.folderEmptyHeading}>No features yet</h3>
+          <p>This release doesn&apos;t have any features yet. Add one to begin the workflow.</p>
+        </div>
+      )}
+
       {open && (
         <NewFeatureTile
           api={api}
@@ -62,12 +69,6 @@ export default function ReleaseFolder({
           onFeatureCreated={onFeatureCreated}
           testIdPrefix={testIdPrefix}
         />
-      )}
-
-      {release.features.length === 0 && (
-        <p className={styles.folderEmpty} data-testid={`${testIdPrefix}-folder-empty`}>
-          No features yet — add one above to start working.
-        </p>
       )}
 
       <ul className={styles.cardGrid}>

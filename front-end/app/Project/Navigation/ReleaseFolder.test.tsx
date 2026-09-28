@@ -91,9 +91,9 @@ describe("ReleaseFolder", () => {
     expect(within(cards[0]).getByText(/Needs your approval/)).toBeInTheDocument();
   });
 
-  it("always offers a new feature — even when everything is done", () => {
+  it("always offers to add a feature — even when everything is done", () => {
     renderFolder(rel({ features: [ADDING], currentFeatureId: null }));
-    expect(screen.getByTestId("release-new-feature-open")).toBeInTheDocument();
+    expect(screen.getByTestId("release-new-feature-open")).toHaveTextContent("Add feature");
   });
 
   it("offers to ship only when every feature is done (the reported bug: stale 'Ready')", () => {
@@ -110,8 +110,13 @@ describe("ReleaseFolder", () => {
 
   it("has a friendly empty state that still lets you start", () => {
     renderFolder(rel({ features: [], currentFeatureId: null, status: "InProgress" }));
-    expect(screen.getByText(/No features yet/i)).toBeInTheDocument();
-    expect(screen.getByTestId("release-new-feature-open")).toBeInTheDocument();
+
+    const empty = screen.getByTestId("release-folder-empty");
+    expect(within(empty).getByRole("heading", { name: "No features yet" })).toBeInTheDocument();
+    expect(
+      within(empty).getByText("This release doesn't have any features yet. Add one to begin the workflow."),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("release-new-feature-open")).toHaveTextContent("Add feature");
   });
 
   it("marks the feature being worked on right now", () => {

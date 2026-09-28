@@ -16,7 +16,7 @@ interface INewFeatureTileProps {
 }
 
 /**
- * The always-visible "＋ New feature" tile (REQ-003/REQ-004). Asking for a feature is honest
+ * The always-visible "Add feature" tile (REQ-003/REQ-004). Asking for a feature is honest
  * about its one consequence, in plain words, before anything is created: the currently active
  * feature of the project (if any) will be paused and can be resumed later.
  */
@@ -75,7 +75,7 @@ export default function NewFeatureTile({ api, release, activeFeature, onReleaseU
           onClick={() => setOpen(true)}
           data-testid={`${testIdPrefix}-new-feature-open`}
         >
-          ＋ New feature
+          Add feature
         </button>
       </div>
     );
