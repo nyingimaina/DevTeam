@@ -62,7 +62,7 @@ public class GateSelfHealerTests : IDisposable
     private async Task<(WorkflowEngine Engine, Guid FeatureId)> DriveToChatAsync()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);

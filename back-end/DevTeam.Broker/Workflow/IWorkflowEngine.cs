@@ -5,7 +5,7 @@ namespace DevTeam.Broker.Workflow;
 
 public interface IWorkflowEngine
 {
-    Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct);
+    Task<DevTeamRelease> StartReleaseAsync(string releaseKey, string workspacePath, CancellationToken ct);
     Task<ReleaseFeature> CreateFeatureAsync(Guid releaseId, string featureKey, CancellationToken ct);
     Task<DevTeamRelease> SwitchFeatureAsync(Guid featureId, CancellationToken ct);
     Task<DevTeamRelease> AdvanceAsync(Guid featureId, CancellationToken ct);
@@ -27,7 +27,7 @@ public interface IWorkflowEngine
     Task<DevTeamRelease> SetReleaseAutonomousEnabledAsync(Guid releaseId, bool enabled, CancellationToken ct);
     Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct);
-    Task<ReleaseFeature> StartHotfixAsync(string key, string workspacePath, CancellationToken ct);
+    Task<DevTeamRelease> StartHotfixAsync(string key, string workspacePath, CancellationToken ct);
     Task<DevTeamRelease> FinalizeHotfixAsync(Guid hotfixId, CancellationToken ct);
     Task<IReadOnlyList<DevTeamRelease>> ListHotfixesAsync(string? workspacePath, CancellationToken ct);
     Task<IReadOnlyList<ModelOption>> GetAvailableModelsAsync(Guid releaseId, CancellationToken ct);

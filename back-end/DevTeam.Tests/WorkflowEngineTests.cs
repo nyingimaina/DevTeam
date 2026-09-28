@@ -30,28 +30,74 @@ public class WorkflowEngineTests : IDisposable
     public void Dispose() => _connection.Dispose();
 
     [Fact]
-    public async Task StartRelease_CreatesReleaseWithCorrectState()
+    public async Task StartRelease_CreatesAReleaseWithNoFeaturesAtAll()
     {
+        // The whole point of the change: starting a release must not conjure a feature that just
+        // repeats the release's own name. The release exists, keyed by the release key, and the
+        // user lands on an empty state from which they add the first feature themselves.
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         Assert.Equal(ReleaseStatus.InProgress, release.Status);
-        Assert.Single(release.Features);
-        Assert.Equal("feat-001", release.Features[0].Key);
+        Assert.Equal("Release feat-001", release.Title);
         Assert.Equal("release/feat-001", release.BranchName);
-        Assert.Equal("feature/feat-001", release.Features[0].BranchName);
-        Assert.Equal(release.Features[0].Id, release.CurrentFeatureId);
-        Assert.NotNull(release.FlowPosition);
-        Assert.Equal(0, release.FlowPosition.CurrentStageIndex);
+        Assert.Empty(release.Features);
+        Assert.Null(release.CurrentFeatureId);
+        Assert.Null(release.FlowPosition);
+        Assert.Empty(release.Signoffs);
     }
 
     [Fact]
-    public async Task StartRelease_CreatesSignoffRequirements()
+    public async Task StartRelease_CreatesNoGitBranchesAndDisturbsNoCheckout()
     {
+        // A featureless release has nothing to check out: it neither creates branches nor steps
+        // down whatever another release already had checked out in this workspace.
+        var engine = CreateEngine();
+        var checkedOut = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var checkedOutFeatureId = checkedOut.CurrentFeatureId!.Value;
+        _gitService.Commands.Clear();
+
+        var empty = await engine.StartReleaseAsync("feat-002", @"C:\work\proj", CancellationToken.None);
+
+        Assert.Empty(_gitService.Commands);
+        var stillCheckedOut = await engine.GetReleaseAsync(checkedOut.Id, CancellationToken.None);
+        Assert.Equal(checkedOutFeatureId, stillCheckedOut.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, stillCheckedOut.Features.Single().Status);
+        Assert.Empty(empty.Features);
+    }
+
+    [Fact]
+    public async Task CreatingTheFirstFeature_SeedsItsOwnSignoffRequirementsAndFlowPosition()
+    {
+        // Signoffs and the initial flow position belong to a feature, not to the release — so
+        // they are created with the first feature rather than at release creation.
         var engine = CreateEngine();
         var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
-        Assert.True(release.Signoffs.Count >= 1);
+        var feature = await engine.CreateFeatureAsync(release.Id, "first-feature", CancellationToken.None);
+
+        Assert.Equal("feature/first-feature", feature.BranchName);
+        Assert.True(feature.Signoffs.Count >= 1);
+        Assert.NotNull(feature.FlowPosition);
+        Assert.Equal(0, feature.FlowPosition!.CurrentStageIndex);
+
+        var refreshed = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
+        Assert.Equal(feature.Id, refreshed.CurrentFeatureId);
+    }
+
+    [Fact]
+    public async Task CreatingTheFirstFeature_CreatesTheReleaseBranchLazily()
+    {
+        // The release branch is only created at the first feature — that is the first moment
+        // anything is actually built on top of it.
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        Assert.DoesNotContain("ensure-branch:release/feat-001", _gitService.Commands);
+
+        await engine.CreateFeatureAsync(release.Id, "first-feature", CancellationToken.None);
+
+        Assert.Contains("ensure-branch:release/feat-001", _gitService.Commands);
+        Assert.Contains("ensure-branch:feature/first-feature", _gitService.Commands);
     }
 
     [Fact]
@@ -135,7 +181,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task StartStage_WhenTheTurnIsCancelled_DoesNotEscalateTheStage()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         _coordinator.ExceptionsToThrow.Enqueue(new OperationCanceledException());
 
@@ -155,7 +201,7 @@ public class WorkflowEngineTests : IDisposable
         // orchestration and — when asked how to proceed — hallucinates that the next
         // role's agent/config is missing instead of trusting the automatic handoff.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -174,7 +220,7 @@ public class WorkflowEngineTests : IDisposable
         // recognize a bare trailing list (see quickReply.ts), so those buttons never actually
         // appear and the user is stuck typing every answer by hand.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -214,7 +260,7 @@ public class WorkflowEngineTests : IDisposable
         // to do" short-circuit used to match that row on Status alone, so it returned the
         // sessionless row as-is and never opened a new session — the retry silently did nothing.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -245,7 +291,7 @@ public class WorkflowEngineTests : IDisposable
         // got cancelled and silently lost: the stage run was left "Active"/LastErrorKind=None
         // forever, with no way to tell it had failed short of reading raw broker logs.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
@@ -275,7 +321,7 @@ public class WorkflowEngineTests : IDisposable
         // has to rework later (see the calculator-wpf dogfood session: a WPF app's manifest still
         // carried an unused front-end/app/<F> slot). The BA should ask up front instead.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -314,7 +360,7 @@ public class WorkflowEngineTests : IDisposable
         }
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -328,7 +374,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task StartStage_OmitsProfileClauseWhenNoProfilesExist()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -360,7 +406,7 @@ public class WorkflowEngineTests : IDisposable
         }
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspacePath, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspacePath, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -397,7 +443,7 @@ public class WorkflowEngineTests : IDisposable
         }
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -424,7 +470,7 @@ public class WorkflowEngineTests : IDisposable
         }
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -453,7 +499,7 @@ public class WorkflowEngineTests : IDisposable
         }
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -465,10 +511,31 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
+    public async Task SendMessageAsync_ChecksTheFeatureBoundaryBeforePrompting()
+    {
+        // A session belongs to a workspace, not a feature, so the agent's context outlives the
+        // feature it was built for. The boundary check has to happen on the BA chat path — that is
+        // where a user starts a second feature in the same workspace.
+        var engine = CreateEngine();
+        const string featureKey = "feat-001";
+        var release = await engine.StartReleaseWithFeatureAsync(featureKey, @"C:\work\proj", CancellationToken.None);
+        var featureId = release.CurrentFeatureId!.Value;
+        await engine.StartStageAsync(featureId, CancellationToken.None);
+
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        var boundaryChecksAfterStart = fake.FeatureBoundaryChecks.Count;
+
+        await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
+
+        Assert.Equal(boundaryChecksAfterStart + 1, fake.FeatureBoundaryChecks.Count);
+        Assert.Equal(featureKey, fake.FeatureBoundaryChecks[^1]);
+    }
+
+    [Fact]
     public async Task StartStage_MarksTheOpeningPromptAsPriming_ButNotAGenuineUserReply()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -483,7 +550,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SendMessage_WhenTheAgentProcessDisconnects_ClassifiesAndEscalates()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -504,7 +571,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SendMessage_WhenTheProviderRejectsTheRequest_ClassifiesAsProviderRejectedNotDisconnected()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -524,7 +591,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SendMessage_AfterEscalation_ARetryMessageStillReachesTheSameStageRun()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -548,7 +615,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SendMessage_PromptIsDetachedFromCallerCancellationToken()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -565,7 +632,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(true, "Tests passed", "12 tests, all green"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA stage requires user input — use interactive flow
@@ -584,7 +651,7 @@ public class WorkflowEngineTests : IDisposable
         // changes until something commits them — without this, GitFlow's later merge/push on
         // signoff has no actual history to carry forward.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -599,7 +666,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(false, "Tests failed", "3 tests failed"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -614,7 +681,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(false, "Tests failed", "3 tests failed"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA stage requires user input — use interactive flow
@@ -630,7 +697,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(true, "OK", "passed"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA stage requires user input — use interactive flow
@@ -650,7 +717,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(true, "OK", "passed"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA stage requires user input — use interactive flow
@@ -679,7 +746,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetRelease_ReturnsReleaseWithIncludes()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         var fetched = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
 
@@ -693,8 +760,8 @@ public class WorkflowEngineTests : IDisposable
     public async Task ListReleases_NoWorkspaceFilter_ReturnsAllReleases()
     {
         var engine = CreateEngine();
-        var r1 = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
-        var r2 = await engine.StartReleaseAsync("feat-002", @"C:\work\proj", CancellationToken.None);
+        var r1 = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var r2 = await engine.StartReleaseWithFeatureAsync("feat-002", @"C:\work\proj", CancellationToken.None);
 
         var list = await engine.ListReleasesAsync(null, CancellationToken.None);
 
@@ -707,8 +774,8 @@ public class WorkflowEngineTests : IDisposable
     public async Task ListReleases_WithWorkspaceFilter_ReturnsOnlyThatWorkspacesReleases()
     {
         var engine = CreateEngine();
-        var projA = await engine.StartReleaseAsync("feat-a", @"C:\work\project-a", CancellationToken.None);
-        var projB = await engine.StartReleaseAsync("feat-b", @"C:\work\project-b", CancellationToken.None);
+        var projA = await engine.StartReleaseWithFeatureAsync("feat-a", @"C:\work\project-a", CancellationToken.None);
+        var projB = await engine.StartReleaseWithFeatureAsync("feat-b", @"C:\work\project-b", CancellationToken.None);
 
         var list = await engine.ListReleasesAsync(@"C:\work\project-a", CancellationToken.None);
 
@@ -723,7 +790,7 @@ public class WorkflowEngineTests : IDisposable
         // A release stored with backslashes must still match a query using forward
         // slashes (or vice versa) — the same path can be represented either way.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-a", @"C:\work\project-a", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-a", @"C:\work\project-a", CancellationToken.None);
 
         var list = await engine.ListReleasesAsync("C:/work/project-a", CancellationToken.None);
 
@@ -736,7 +803,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(true, "OK", "passed"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA stage requires user input — use interactive flow
@@ -752,7 +819,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task Signoff_AdvancesFlowPositionWhenCurrentStageSignsOff()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA interactive flow → gates pass → await signoff
@@ -772,7 +839,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task RunStage_RejectsUserInputStage()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await Assert.ThrowsAsync<InvalidOperationException>(
@@ -988,7 +1055,7 @@ public class WorkflowEngineTests : IDisposable
             _gateRunner.Results.Add(new GateResult(false, "bad", "leftover TODO"));
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1028,7 +1095,7 @@ public class WorkflowEngineTests : IDisposable
             // and finalizing the feature (DevTeamRelease.StageRuns only proxies the *current*
             // feature — once finalized, CurrentFeatureId clears and this would find nothing).
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1068,7 +1135,7 @@ public class WorkflowEngineTests : IDisposable
             _coordinator.StopReasonsToReturn.Enqueue("max_tokens");
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1102,7 +1169,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1156,7 +1223,7 @@ public class WorkflowEngineTests : IDisposable
             _coordinator.SessionIdsToReturn.Enqueue(specialistSessionId);
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1197,7 +1264,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1239,7 +1306,7 @@ public class WorkflowEngineTests : IDisposable
             File.WriteAllText(Path.Combine(artifactDir, "codemap.md"), "# Code Map\n");
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1282,7 +1349,7 @@ public class WorkflowEngineTests : IDisposable
             File.WriteAllText(artifactPath, "{ not valid json");
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var malformed = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1340,7 +1407,7 @@ public class WorkflowEngineTests : IDisposable
             File.WriteAllText(Path.Combine(artifactDir, "codemap.json"), """{"modules": []}""");
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1389,7 +1456,7 @@ public class WorkflowEngineTests : IDisposable
             File.WriteAllText(Path.Combine(artifactDir, "codemap.json"), """{"modules": []}""");
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -1427,7 +1494,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             // code-map has no entry gates and no signoff, so its own turn (an agent step with
@@ -1475,7 +1542,7 @@ public class WorkflowEngineTests : IDisposable
             _coordinator.StopReasonsToReturn.Enqueue("end_turn"); // the entry gate prompt itself
 
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             // code-map (index 0) completes and advances the flow position; researcher's entry
@@ -1926,7 +1993,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetStageMessages_ReturnsLinkedSessionMessages()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -1959,7 +2026,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetPipeline_ReturnsOrderedStages()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
@@ -1979,7 +2046,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetPipeline_ExposesExpectedArtifactsPerRole()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
@@ -1993,7 +2060,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetPipeline_ExposesFlattenedStepsPerRole_ForALiveChecklist()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
@@ -2019,7 +2086,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetPipeline_ExposesAPlainLanguageLabelForEveryStep()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
@@ -2045,9 +2112,9 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task StartRelease_UsesACustomDevteamReleaseYamlForTheInitialFlowPositionAndSignoffs()
+    public async Task TheFirstFeature_UsesACustomDevteamReleaseYamlForTheInitialFlowPositionAndSignoffs()
     {
-        // Regression: StartReleaseAsync used to call _loader.LoadDefault() directly instead
+        // Regression: feature creation used to call _loader.LoadDefault() directly instead
         // of going through LoadWorkflow(workspacePath) — a custom pipeline's first stage name
         // and signoffs were silently ignored, always seeded from the default business-analyst/
         // developer/qa pipeline no matter what devteam/release.yaml actually said.
@@ -2064,7 +2131,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
 
             Assert.Equal("researcher", release.FlowPosition!.CurrentStageName);
             Assert.Equal(0, release.FlowPosition.CurrentStageIndex);
@@ -2092,7 +2159,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
@@ -2114,7 +2181,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
@@ -2131,7 +2198,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task GetWorkspaceChanges_ReturnsRelativePathsFromGitStatus()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         _gitService.ChangedFiles = ["back-end/DevTeam.Broker/Features/Calc/Calculator.cs", "back-end/DevTeam.Tests/Features/Calc/CalculatorTests.cs"];
 
@@ -2150,7 +2217,7 @@ public class WorkflowEngineTests : IDisposable
         // running before the BA has even asked about hierarchy locked every feature into the
         // generic backend/frontend default regardless of what the BA/user actually decided.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2170,7 +2237,7 @@ public class WorkflowEngineTests : IDisposable
         // already had its turn (and, per its seed prompt, the chance to write a real
         // manifest.yaml) — never before.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -2190,7 +2257,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task StartStage_BusinessAnalystSession_RequestsFeatureDocsAndDocsRootPrefixesOnly()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2208,7 +2275,7 @@ public class WorkflowEngineTests : IDisposable
             new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", ["Program.cs"], "dotnet test"));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2242,7 +2309,7 @@ public class WorkflowEngineTests : IDisposable
                 [], "dotnet test"));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2268,7 +2335,7 @@ public class WorkflowEngineTests : IDisposable
             new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", ["Program.cs"], "dotnet test"));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -2295,7 +2362,7 @@ public class WorkflowEngineTests : IDisposable
             new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", [], "dotnet test"));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -2331,7 +2398,7 @@ public class WorkflowEngineTests : IDisposable
             new SliceManifest("feat-001", "Login", "back-end/Features/login", "front-end/app/login", ["Program.cs"], "dotnet test"));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2373,7 +2440,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -2410,7 +2477,7 @@ public class WorkflowEngineTests : IDisposable
         try
         {
             var engine = CreateEngine();
-            var release = await engine.StartReleaseAsync("feat-001", workspace, CancellationToken.None);
+            var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
             var featureId = release.CurrentFeatureId!.Value;
 
             await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -2436,7 +2503,7 @@ public class WorkflowEngineTests : IDisposable
         File.WriteAllText(contextPath, "MARKER-e8f3-allowed-working-areas");
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2456,7 +2523,7 @@ public class WorkflowEngineTests : IDisposable
         // requirement. Requiring both was too fragile: real agent replies rarely match a literal
         // standalone "DONE" line, which left the human with no way to advance the stage at all.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2472,7 +2539,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gateRunner.Results.Add(new GateResult(false, "Tests failed", "3 tests failed"));
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2487,7 +2554,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SendMessage_InvalidatesReadyToProceed()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2514,7 +2581,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _coordinator.ModelsToReturn = [new ModelOption("claude-sonnet-4-5", "Claude Sonnet 4.5", "Anthropic")];
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         var models = await engine.GetAvailableModelsAsync(release.Id, CancellationToken.None);
 
@@ -2529,7 +2596,7 @@ public class WorkflowEngineTests : IDisposable
         // "current" model is, which can silently drift to something very slow. Always
         // ask for a known-good default explicitly instead.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2553,7 +2620,7 @@ public class WorkflowEngineTests : IDisposable
         }
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         await engine.StartStageAsync(release.CurrentFeatureId!.Value, CancellationToken.None);
 
@@ -2564,7 +2631,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task StartStage_FallsBackToTheDefault_WhenTheWorkspaceHasNoPreference()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         await engine.StartStageAsync(release.CurrentFeatureId!.Value, CancellationToken.None);
 
@@ -2586,7 +2653,7 @@ public class WorkflowEngineTests : IDisposable
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -2610,7 +2677,7 @@ public class WorkflowEngineTests : IDisposable
             "Then they are signed in");
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -2627,7 +2694,7 @@ public class WorkflowEngineTests : IDisposable
         using var workspace = new TempDir(Path.Combine(Path.GetTempPath(), "devteam-engine-" + Guid.NewGuid().ToString("N")));
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -2651,7 +2718,7 @@ public class WorkflowEngineTests : IDisposable
         File.WriteAllText(ArtifactPaths.ManifestPath(workspace.Path, "feat-001"), "feature: feat-001" + Environment.NewLine + "testCommand: dotnet --version" + Environment.NewLine);
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -2679,7 +2746,7 @@ public class WorkflowEngineTests : IDisposable
         // Part 7A: a release can have many concurrently-open features — creating a second one
         // no longer requires the first to complete first.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
 
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
@@ -2700,7 +2767,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task CreateFeature_AfterFirstCompletes_StartsSecondFeatureIndependently()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         await CompleteFeatureThroughQaAsync(engine, release.CurrentFeatureId!.Value);
 
         var afterFirst = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
@@ -2725,7 +2792,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_ToADifferentFeature_UpdatesActiveCheckoutAndFeatureStatuses()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2741,7 +2808,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_WithADirtyWorkingTree_StashesTheOutgoingFeaturesChanges()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2755,7 +2822,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_RestoresAPreviouslyParkedFeaturesChanges()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
         // feat-002 is now the active checkout (CreateFeatureAsync checks it out immediately).
@@ -2784,7 +2851,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_WhenStashApplyConflicts_ThrowsAndLeavesTheStashInPlace()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2807,7 +2874,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_WhenStashApplyConflictIsResolvedByAgent_DropsTheStashAndSwitches()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2833,7 +2900,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_BlockedWhileATurnIsActiveInTheSameWorkspace()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2854,7 +2921,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SwitchFeature_NotBlockedByATurnActiveInADifferentWorkspace()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2878,10 +2945,10 @@ public class WorkflowEngineTests : IDisposable
         // releases pointed at the same physical folder must not stomp each other's checkout
         // state. This is the specific latent bug the workspace-scoped design closes.
         var engine = CreateEngine();
-        var releaseA = await engine.StartReleaseAsync("feat-a", @"C:\work\shared", CancellationToken.None);
+        var releaseA = await engine.StartReleaseWithFeatureAsync("feat-a", @"C:\work\shared", CancellationToken.None);
         var featureA = releaseA.CurrentFeatureId!.Value;
 
-        var releaseB = await engine.StartReleaseAsync("feat-b", @"C:\work\shared", CancellationToken.None);
+        var releaseB = await engine.StartReleaseWithFeatureAsync("feat-b", @"C:\work\shared", CancellationToken.None);
         var featureB = releaseB.CurrentFeatureId!.Value;
 
         // Starting release B's feature in the shared workspace displaces release A's feature —
@@ -2910,7 +2977,7 @@ public class WorkflowEngineTests : IDisposable
     {
         var engine = CreateEngine();
 
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         Assert.False(release.AutonomousEnabled);
     }
@@ -2919,7 +2986,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task SetReleaseAutonomousEnabledAsync_PersistsTheFlagAcrossAFreshLoad()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         var updated = await engine.SetReleaseAutonomousEnabledAsync(release.Id, true, CancellationToken.None);
         Assert.True(updated.AutonomousEnabled);
@@ -2947,7 +3014,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task FinalizeRelease_WhenNotReady_Throws()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => engine.FinalizeReleaseAsync(release.Id, CancellationToken.None));
@@ -2958,10 +3025,11 @@ public class WorkflowEngineTests : IDisposable
     {
         var engine = CreateEngine();
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
-        await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+        var hotfixFeature = await engine.CreateFeatureAsync(hotfix.Id, "critical-bug", CancellationToken.None);
+        await CompleteFeatureThroughQaAsync(engine, hotfixFeature.Id);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => engine.FinalizeReleaseAsync(hotfix.ReleaseId, CancellationToken.None));
+            () => engine.FinalizeReleaseAsync(hotfix.Id, CancellationToken.None));
 
         Assert.DoesNotContain("delete-branch:main", _gitService.Commands);
     }
@@ -2970,7 +3038,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task FinalizeRelease_WithAnIncompleteFeatureStillOpen_Throws()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var firstFeatureId = release.CurrentFeatureId!.Value;
         var second = await engine.CreateFeatureAsync(release.Id, "feat-002", CancellationToken.None);
 
@@ -2989,7 +3057,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task FinalizeRelease_MergesIntoMainAndDevelop_PushesAndDeletesReleaseBranch()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await CompleteFeatureThroughQaAsync(engine, featureId);
         _gitService.Commands.Clear();
@@ -3010,7 +3078,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task FinalizeRelease_MergeConflictResolvedByAgent_StillReachesReleased()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await CompleteFeatureThroughQaAsync(engine, featureId);
 
@@ -3035,7 +3103,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task FinalizeRelease_MergeConflictNeverResolved_ThrowsAndLeavesReleaseReady()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await CompleteFeatureThroughQaAsync(engine, featureId);
 
@@ -3053,51 +3121,56 @@ public class WorkflowEngineTests : IDisposable
     // ─── GitFlow: hotfixes (Part 7F) ────────────────────────────────────────
 
     [Fact]
-    public async Task StartHotfix_ChecksOutMainAndCreatesTheHotfixBranch()
+    public async Task StartHotfix_CreatesAShellWithNoFeaturesAndNoBranches()
     {
+        // A hotfix is created exactly like a release now: the shell exists, keyed by its key, and
+        // carries no feature, no branch, and no checkout until the first feature is added.
         var engine = CreateEngine();
 
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
 
-        Assert.Equal("hotfix/critical-bug", hotfix.BranchName);
-        Assert.Equal(ReleaseFeatureStatus.InProgress, hotfix.Status);
-        Assert.True(hotfix.Release.IsHotfix);
-        Assert.Equal("main", hotfix.Release.BranchName);
-        Assert.Contains("checkout:main", _gitService.Commands);
-        Assert.Contains("ensure-branch:hotfix/critical-bug", _gitService.Commands);
+        Assert.True(hotfix.IsHotfix);
+        Assert.Equal("main", hotfix.BranchName);
+        Assert.Equal("Hotfix critical-bug", hotfix.Title);
+        Assert.Empty(hotfix.Features);
+        Assert.Empty(_gitService.Commands);
     }
 
     [Fact]
-    public async Task StartHotfix_DisplacesAnActiveFeature_MarksItOnHold()
+    public async Task StartHotfix_LeavesAnAlreadyActiveFeatureUntouched()
     {
+        // Nothing is checked out, so an in-flight feature in the same workspace is not displaced.
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
 
         var afterHotfix = await engine.GetReleaseAsync(release.Id, CancellationToken.None);
-        Assert.Equal(ReleaseFeatureStatus.OnHold, afterHotfix.Features.Single(f => f.Id == featureId).Status);
+        Assert.Equal(featureId, afterHotfix.CurrentFeatureId);
+        Assert.Equal(ReleaseFeatureStatus.InProgress, afterHotfix.Features.Single(f => f.Id == featureId).Status);
     }
 
     [Fact]
-    public async Task Hotfix_CompletingThroughSignoff_MergesIntoMainAndDeletesTheHotfixBranch()
+    public async Task Hotfix_CompletingThroughSignoff_MergesIntoMainAndDeletesItsFeatureBranch()
     {
         var engine = CreateEngine();
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+        var feature = await engine.CreateFeatureAsync(hotfix.Id, "critical-bug", CancellationToken.None);
+        Assert.Contains("checkout:main", _gitService.Commands);
 
-        var final = await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+        var final = await CompleteFeatureThroughQaAsync(engine, feature.Id);
 
         Assert.Equal(ReleaseFeatureStatus.Complete, final.Features.Single().Status);
         Assert.Equal(ReleaseStatus.Ready, final.Status);
         Assert.Contains("checkout:main", _gitService.Commands);
-        Assert.Contains("merge:hotfix/critical-bug->main", _gitService.Commands);
+        Assert.Contains("merge:feature/critical-bug->main", _gitService.Commands);
         Assert.Contains("push:main", _gitService.Commands);
-        Assert.Contains("delete-branch:hotfix/critical-bug", _gitService.Commands);
+        Assert.Contains("delete-branch:feature/critical-bug", _gitService.Commands);
     }
 
     [Fact]
-    public async Task FinalizeHotfix_WhenNotYetComplete_Throws()
+    public async Task FinalizeHotfix_WhenItHasNoFeaturesYet_Throws()
     {
         var engine = CreateEngine();
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
@@ -3111,7 +3184,8 @@ public class WorkflowEngineTests : IDisposable
     {
         var engine = CreateEngine();
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
-        await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+        var feature = await engine.CreateFeatureAsync(hotfix.Id, "critical-bug", CancellationToken.None);
+        await CompleteFeatureThroughQaAsync(engine, feature.Id);
         _gitService.Commands.Clear();
 
         var final = await engine.FinalizeHotfixAsync(hotfix.Id, CancellationToken.None);
@@ -3127,7 +3201,8 @@ public class WorkflowEngineTests : IDisposable
     {
         var engine = CreateEngine();
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
-        await CompleteFeatureThroughQaAsync(engine, hotfix.Id);
+        var feature = await engine.CreateFeatureAsync(hotfix.Id, "critical-bug", CancellationToken.None);
+        await CompleteFeatureThroughQaAsync(engine, feature.Id);
         await engine.FinalizeHotfixAsync(hotfix.Id, CancellationToken.None);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
@@ -3138,7 +3213,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task ListReleases_ExcludesHotfixes_ButListHotfixesReturnsOnlyThem()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
 
         var releases = await engine.ListReleasesAsync(null, CancellationToken.None);
@@ -3151,22 +3226,23 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task SwitchFeature_AwayFromAnActiveHotfix_StashesItAndMarksItOnHold()
+    public async Task SwitchFeature_AwayFromAnActiveHotfixFeature_StashesItAndMarksItOnHold()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         var hotfix = await engine.StartHotfixAsync("critical-bug", @"C:\work\proj", CancellationToken.None);
+        var hotfixFeature = await engine.CreateFeatureAsync(hotfix.Id, "critical-bug", CancellationToken.None);
 
         _gitService.DirtyWorkingTree = true;
         var switched = await engine.SwitchFeatureAsync(featureId, CancellationToken.None);
 
         Assert.Equal(featureId, switched.CurrentFeatureId);
         Assert.Equal(ReleaseFeatureStatus.InProgress, switched.Features.Single(f => f.Id == featureId).Status);
-        Assert.Contains(_gitService.Commands, c => c.StartsWith($"stash-push:devteam-feature-{hotfix.Id:N}"));
+        Assert.Contains(_gitService.Commands, c => c.StartsWith($"stash-push:devteam-feature-{hotfixFeature.Id:N}"));
 
         await using var db = CreateFactory().CreateDbContext();
-        var hotfixAfter = await db.ReleaseFeatures.SingleAsync(f => f.Id == hotfix.Id);
+        var hotfixAfter = await db.ReleaseFeatures.SingleAsync(f => f.Id == hotfixFeature.Id);
         Assert.Equal(ReleaseFeatureStatus.OnHold, hotfixAfter.Status);
     }
 
@@ -3174,7 +3250,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task Signoff_OnLastStage_MergesFeatureIntoReleaseAndDeletesBranches()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var final = await CompleteFeatureThroughQaAsync(engine, featureId);
@@ -3193,7 +3269,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task Signoff_OnLastStage_MergeConflict_DoesNotMarkFeatureComplete()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         _gitService.FailMerge = true;
@@ -3221,7 +3297,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task Signoff_OnLastStage_MergeConflict_ResolvedByAgent_CompletesTheMerge()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         _gitService.FailMerge = true;
@@ -3246,7 +3322,7 @@ public class WorkflowEngineTests : IDisposable
     {
         _gitService.RemoteConfigured = false;
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var final = await CompleteFeatureThroughQaAsync(engine, featureId);
@@ -3266,7 +3342,7 @@ public class WorkflowEngineTests : IDisposable
         // the merge, which fails outright once the branch is gone, permanently wedging the
         // feature (StartStageAsync/RunStageAsync both refuse once the pipeline has finished).
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         _gitService.MissingBranches.Add("feature/feat-001");
@@ -3293,7 +3369,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task RetryFeatureFinalizationAsync_AlreadyComplete_IsANoOp()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await CompleteFeatureThroughQaAsync(engine, featureId);
         _gitService.Commands.Clear();
@@ -3308,7 +3384,7 @@ public class WorkflowEngineTests : IDisposable
     public async Task RetryFeatureFinalizationAsync_StuckAfterAFailedFinalize_CompletesIt()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         _gitService.FailMerge = true;
@@ -3360,7 +3436,7 @@ public class WorkflowEngineTests : IDisposable
 
     private async Task<(DevTeamRelease Release, Guid FeatureId)> DriveToDeveloperAsync(WorkflowEngine engine, string workspacePath = @"C:\work\proj")
     {
-        var release = await engine.StartReleaseAsync("feat-001", workspacePath, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspacePath, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         // BA interactive flow: gates pass (default) → signoff required → approve → advance to developer
@@ -3636,6 +3712,21 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
     // reviews the test isn't specifically tracking) without needing to predict every one
     // FakeBrokerCoordinator hands out via SessionIdsToReturn.
     public Action<Guid>? OnNewSession { get; set; }
+
+    /// <summary>Feature keys the engine asked to have their agent context boundary-checked, in order.</summary>
+    public List<string> FeatureBoundaryChecks { get; } = [];
+
+    /// <summary>What <see cref="ResetContextOnFeatureChangeAsync"/> reports, per call, for tests that
+    /// need a reset to actually happen.</summary>
+    public Queue<FeatureContextReset?> BoundaryResetsToReturn { get; } = new();
+
+    public Task<FeatureContextReset?> ResetContextOnFeatureChangeAsync(Guid sessionId, string featureKey, CancellationToken ct)
+    {
+        FeatureBoundaryChecks.Add(featureKey);
+        return Task.FromResult(BoundaryResetsToReturn.Count > 0
+            ? BoundaryResetsToReturn.Dequeue()
+            : null);
+    }
 
     public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken ct)
     {

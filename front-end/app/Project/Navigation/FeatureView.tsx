@@ -184,6 +184,7 @@ export default function FeatureView({ api, release, featureId, onReleaseUpdated,
           nextStageName={nextStageName}
           onReleaseUpdated={onReleaseUpdated}
           onContinue={() => setDismissedReadyRunId(run.id)}
+          autonomousEnabled={view.autonomousEnabled}
         />
       )}
 

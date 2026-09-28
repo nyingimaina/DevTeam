@@ -81,6 +81,12 @@ public sealed record TurnMeasurement(
     decimal? CostAmount = null,
     string? CostCurrency = null);
 
+/// <summary>
+/// The agent context that was still loaded when work moved to a different feature, and the fresh
+/// agent session opened in its place.
+/// </summary>
+public sealed record FeatureContextReset(string PreviousFeatureKey, string AcpSessionId);
+
 public sealed record PromptResponse(
     Guid SessionId,
     string StopReason,
@@ -95,7 +101,41 @@ public sealed record SetModeRequest(string ModeId);
 
 public sealed record HealthResponse(string Status, string? Version = null);
 
-public sealed record UsageDto(long InputTokens, long OutputTokens, long TotalTokens, long? CachedReadTokens);
+    public sealed record UsageDto(long InputTokens, long OutputTokens, long TotalTokens, long? CachedReadTokens);
+
+    /// <summary>
+    /// How full the context window was when the agent last reported.
+    /// </summary>
+    /// <param name="UsedTokens">Tokens occupying the context window.</param>
+    /// <param name="ContextSize">Total size of the window, or null if the agent did not report one.</param>
+    /// <param name="DeltaTokens">Change since the previous reading, or null if there is nothing to compare to.</param>
+    /// <param name="TurnActive">True while a turn is in flight, so a stale reading is not shown as current.</param>
+    /// <summary>
+    /// The outcome of a requested compaction, including whether it was worth doing: freeing almost
+    /// nothing means the context is irreducible, and doing it again will not help.
+    /// </summary>
+    public sealed record ContextCompactionResult(
+        long UsedTokensBefore,
+        long UsedTokensAfter,
+        long FreedTokens,
+        long DurationMs,
+        string? StopReason,
+        ContextDto Context);
+
+    /// <param name="SessionId">
+    /// The session this context belongs to, or null before any turn has run. Carried so a caller can
+    /// act on the context without having to track which session is current.
+    /// </param>
+    public sealed record ContextDto(
+        Guid? SessionId,
+        long UsedTokens,
+        long? ContextSize,
+        long? DeltaTokens,
+        decimal? CostAmount,
+        string? CostCurrency,
+        bool TurnActive,
+        int CompactionCount,
+        DateTimeOffset? UpdatedAt);
 
 public sealed record ConfigOptionDto(string ConfigId, string CurrentValue, IReadOnlyList<ModelOption> Options);
 
@@ -119,7 +159,7 @@ public sealed record CleanupWorkspaceRequest(string WorkspacePath);
 
 // ─── release endpoints ─────────────────────────────────────────────────────
 
-public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePath);
+public sealed record CreateReleaseRequest(string ReleaseKey, string WorkspacePath);
 
 public sealed record CreateFeatureRequest(string FeatureKey);
 

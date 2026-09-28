@@ -56,7 +56,7 @@ public class StageArtifactsTests : IDisposable
         File.WriteAllText(specsPath, "Feature: Login");
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -77,7 +77,7 @@ public class StageArtifactsTests : IDisposable
         Directory.CreateDirectory(codeDir);
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -105,7 +105,7 @@ public class StageArtifactsTests : IDisposable
         File.WriteAllText(specsPath, "Feature: Login");
 
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);
 

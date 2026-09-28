@@ -155,7 +155,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var client = _factory.CreateClient();
 
         var response = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-content-length", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-content-length", workspacePath = @"C:\work\api-test" });
 
         response.EnsureSuccessStatusCode();
         Assert.True(response.Headers.TryGetValues("X-Request-Declared-Length", out var declared));
@@ -182,7 +182,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-model-mode", workspacePath = @"C:\work\model-mode-test" });
+            new { releaseKey = "feat-model-mode", workspacePath = @"C:\work\model-mode-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -462,7 +462,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
             var client = _factory.CreateClient();
 
             var create = await client.PostAsJsonAsync("/api/releases",
-                new { featureKey = "cancel-test", workspacePath = @"C:\work\cancel-test-" + Guid.NewGuid().ToString("N") });
+                new { releaseKey = "cancel-test", workspacePath = @"C:\work\cancel-test-" + Guid.NewGuid().ToString("N") });
             create.EnsureSuccessStatusCode();
             var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
 
@@ -516,11 +516,11 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var workspaceA = @"C:\work\project-a-" + Guid.NewGuid().ToString("N");
         var workspaceB = @"C:\work\project-b-" + Guid.NewGuid().ToString("N");
 
-        var createA = await client.PostAsJsonAsync("/api/releases", new { featureKey = "feat-a", workspacePath = workspaceA });
+        var createA = await client.PostAsJsonAsync("/api/releases", new { releaseKey = "feat-a", workspacePath = workspaceA });
         createA.EnsureSuccessStatusCode();
         var releaseA = await createA.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
 
-        var createB = await client.PostAsJsonAsync("/api/releases", new { featureKey = "feat-b", workspacePath = workspaceB });
+        var createB = await client.PostAsJsonAsync("/api/releases", new { releaseKey = "feat-b", workspacePath = workspaceB });
         createB.EnsureSuccessStatusCode();
         var releaseB = await createB.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
 
@@ -539,7 +539,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
         // Create release
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-api-001", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-api-001", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -586,7 +586,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-api-repair", workspacePath = @"C:\work\api-repair-test" });
+            new { releaseKey = "feat-api-repair", workspacePath = @"C:\work\api-repair-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         var featureId = release!.CurrentFeatureId;
@@ -624,7 +624,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-effective", workspacePath = @"C:\work\effective-test" });
+            new { releaseKey = "feat-effective", workspacePath = @"C:\work\effective-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
 
@@ -670,7 +670,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         var client = _factory.CreateClient();
 
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-enum-json", workspacePath = @"C:\work\enum-test" });
+            new { releaseKey = "feat-enum-json", workspacePath = @"C:\work\enum-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -685,11 +685,11 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
-    public async Task ReleaseCreate_MissingFeatureKey_ReturnsBadRequest()
+    public async Task ReleaseCreate_MissingReleaseKey_ReturnsBadRequest()
     {
         var client = _factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = " ", workspacePath = @"C:\work\test" });
+            new { releaseKey = " ", workspacePath = @"C:\work\test" });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
@@ -698,7 +698,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-001", workspacePath = " " });
+            new { releaseKey = "feat-001", workspacePath = " " });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
@@ -745,7 +745,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
             // 4. Create release
             var create = await client.PostAsJsonAsync("/api/releases",
-                new { featureKey = "e2e-test", workspacePath = tmpDir });
+                new { releaseKey = "e2e-test", workspacePath = tmpDir });
             create.EnsureSuccessStatusCode();
             var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
             Assert.NotNull(release);
@@ -800,7 +800,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-pipe-001", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-pipe-001", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -828,7 +828,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-auto-001", workspacePath = @"C:\work\api-test-auto" });
+            new { releaseKey = "feat-auto-001", workspacePath = @"C:\work\api-test-auto" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -879,7 +879,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                 "Then they are signed in");
 
             var create = await client.PostAsJsonAsync("/api/releases",
-                new { featureKey = "feat-ba-001", workspacePath = workspace });
+                new { releaseKey = "feat-ba-001", workspacePath = workspace });
             create.EnsureSuccessStatusCode();
             var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
             Assert.NotNull(release);
@@ -931,7 +931,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                 "Then the sum is shown");
 
             var create = await client.PostAsJsonAsync("/api/releases",
-                new { featureKey = "feat-calc-001", workspacePath = workspace });
+                new { releaseKey = "feat-calc-001", workspacePath = workspace });
             create.EnsureSuccessStatusCode();
             var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
             Assert.NotNull(release);
@@ -988,7 +988,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         {
             var client = _factory.CreateClient();
             var create = await client.PostAsJsonAsync("/api/releases",
-                new { featureKey = "feat-ba-002", workspacePath = workspace });
+                new { releaseKey = "feat-ba-002", workspacePath = workspace });
             create.EnsureSuccessStatusCode();
             var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
             Assert.NotNull(release);
@@ -1018,7 +1018,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-run-001", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-run-001", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -1032,7 +1032,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-msg-001", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-msg-001", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -1068,7 +1068,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         {
             var client = _factory.CreateClient();
             var create = await client.PostAsJsonAsync("/api/releases",
-                new { featureKey = "feat-rw-001", workspacePath = workspace });
+                new { releaseKey = "feat-rw-001", workspacePath = workspace });
             create.EnsureSuccessStatusCode();
             var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
             Assert.NotNull(release);
@@ -1121,7 +1121,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-pb-001", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-pb-001", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -1155,7 +1155,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-retry-001", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-retry-001", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);
@@ -1186,7 +1186,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-retry-002", workspacePath = @"C:\work\api-test" });
+            new { releaseKey = "feat-retry-002", workspacePath = @"C:\work\api-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);

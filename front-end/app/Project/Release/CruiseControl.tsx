@@ -70,6 +70,11 @@ export default function CruiseControl({
   // still counts as "fresh" here because a stage that just finished starts its next attempt
   // exactly like a brand-new one.
   const deferToAutoRunNotice = step.kind === "run-stage" && (!currentStageRun || currentStageRun.status === "Complete");
+  // A pending sign-off belongs to the stage-complete card, which is the one surface that survives
+  // the panel being swapped out for that card — this shell is not. Running a second countdown
+  // here was unobservable in practice (the panel was torn down first) and is now a race if it
+  // ever did fire, so the card is the sole clock and this only explains what is about to happen.
+  const deferToSignoffCard = step.kind === "signoff";
   const stepKey =
     step.kind === "signoff"
       ? `signoff:${step.stageName}`
@@ -97,7 +102,7 @@ export default function CruiseControl({
   }, [api, featureId, refreshRelease, step]);
 
   useEffect(() => {
-    if (!armed || busy || step.kind === "wait" || deferToAutoRunNotice) {
+    if (!armed || busy || step.kind === "wait" || deferToAutoRunNotice || deferToSignoffCard) {
       return;
     }
 
@@ -116,13 +121,13 @@ export default function CruiseControl({
 
     const timer = window.setTimeout(() => setSecondsLeft((value) => value - 1), 1000);
     return () => window.clearTimeout(timer);
-  }, [act, armed, busy, secondsLeft, step.kind, deferToAutoRunNotice]);
+  }, [act, armed, busy, secondsLeft, step.kind, deferToAutoRunNotice, deferToSignoffCard]);
 
   if (readOnly || !release) {
     return null;
   }
 
-  const message = statusMessage(step, deferToAutoRunNotice, busy, secondsLeft);
+  const message = statusMessage(step, deferToAutoRunNotice, deferToSignoffCard, busy, secondsLeft);
 
   return (
     <section className={styles.panel} data-testid={`${testIdPrefix}-cruise`}>
@@ -147,6 +152,7 @@ export default function CruiseControl({
 function statusMessage(
   step: AutoStep,
   deferToAutoRunNotice: boolean,
+  deferToSignoffCard: boolean,
   busy: boolean,
   secondsLeft: number,
 ): string | null {
@@ -154,7 +160,11 @@ function statusMessage(
   if (deferToAutoRunNotice) return null;
 
   if (step.kind === "run-stage") return busy ? "Starting the next step…" : `Starting the next step in ${secondsLeft}s`;
-  if (step.kind === "signoff") return busy ? "Approving…" : `Approving the next step in ${secondsLeft}s`;
+  // The card owns the approval clock; this line just points at it.
+  if (step.kind === "signoff")
+    return deferToSignoffCard
+      ? "This step will be approved on its own — the card counts down so you can stop it."
+      : "Approving…";
 
   switch (step.reason) {
     case "interactive":

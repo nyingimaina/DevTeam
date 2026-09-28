@@ -135,7 +135,7 @@ public class ApiShipGateTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var response = await client.PostAsJsonAsync("/api/releases", new
         {
-            featureKey = key,
+            releaseKey = key,
             workspacePath = @"C:\work\api-test-ship",
         }, JsonOptions);
         response.EnsureSuccessStatusCode();

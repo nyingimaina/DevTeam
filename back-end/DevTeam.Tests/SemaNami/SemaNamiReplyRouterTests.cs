@@ -25,7 +25,7 @@ public class SemaNamiReplyRouterTests
         }
 
         // Not exercised by SemaNamiReplyRouter — this fake exists only to satisfy the interface.
-        public Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct) => throw new NotImplementedException();
+        public Task<DevTeamRelease> StartReleaseAsync(string releaseKey, string workspacePath, CancellationToken ct) => throw new NotImplementedException();
         public Task<ReleaseFeature> CreateFeatureAsync(Guid releaseId, string featureKey, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> SwitchFeatureAsync(Guid featureId, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> AdvanceAsync(Guid featureId, CancellationToken ct) => throw new NotImplementedException();
@@ -46,7 +46,7 @@ public class SemaNamiReplyRouterTests
         public Task<DevTeamRelease> SetReleaseAutonomousEnabledAsync(Guid releaseId, bool enabled, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> FinalizeReleaseAsync(Guid releaseId, CancellationToken ct) => throw new NotImplementedException();
         public Task<IReadOnlyList<DevTeamRelease>> ListReleasesAsync(string? workspacePath, CancellationToken ct) => throw new NotImplementedException();
-        public Task<ReleaseFeature> StartHotfixAsync(string key, string workspacePath, CancellationToken ct) => throw new NotImplementedException();
+        public Task<DevTeamRelease> StartHotfixAsync(string key, string workspacePath, CancellationToken ct) => throw new NotImplementedException();
         public Task<DevTeamRelease> FinalizeHotfixAsync(Guid hotfixId, CancellationToken ct) => throw new NotImplementedException();
         public Task<IReadOnlyList<DevTeamRelease>> ListHotfixesAsync(string? workspacePath, CancellationToken ct) => throw new NotImplementedException();
         public Task<IReadOnlyList<ModelOption>> GetAvailableModelsAsync(Guid releaseId, CancellationToken ct) => throw new NotImplementedException();

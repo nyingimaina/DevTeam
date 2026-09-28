@@ -1,0 +1,95 @@
+/* The root of the widget. It owns the placement inside the app's sticky tab bar: the bar is a
+   plain flex row with no spacer, and neither this component nor the sidekick menu pushes itself
+   right, so without an auto margin the dial would sit left-packed beside the project name. */
+.dialSlot {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.dialWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+}
+
+  .dial {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The status text beside the dial must never be able to squeeze the circle: it is fixed size,
+     and letting flex shrink it would distort the ring. */
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted, #6b7280);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dial:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.dial:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.track {
+  stroke: rgba(127, 127, 127, 0.22);
+}
+
+.arc {
+  /* Stepped, not animated: the agent reports once at the end of a turn, so a smooth sweep would
+     imply readings between the ones that exist. */
+  transition: stroke-dasharray 150ms linear;
+}
+
+.active .arc {
+  opacity: 0.6;
+}
+
+.percent {
+  position: absolute;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  pointer-events: none;
+}
+
+.unknown .percent {
+  opacity: 0.6;
+}
+
+.busy,
+.stale,
+.unmeasured,
+  .outcome,
+  .error {
+    font-size: 11px;
+    white-space: nowrap;
+    /* Transient text only: let it ellipsize rather than push the dial into the sidekick menu. */
+    max-width: 22ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+.busy,
+.stale,
+.unmeasured {
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.error {
+  color: #d9483b;
+}
+

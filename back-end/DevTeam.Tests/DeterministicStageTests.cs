@@ -70,7 +70,7 @@ public class DeterministicStageTests : IDisposable
 
     private async Task<(DevTeamRelease Release, Guid FeatureId)> DriveToVerificationAsync(WorkflowEngine engine)
     {
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);

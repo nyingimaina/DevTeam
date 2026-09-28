@@ -1531,6 +1531,18 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   const [sending, setSending] = useState(false);
   const [gatesRunning, setGatesRunning] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  // A refused send is its own kind of failure and gets its own state, because it is cleared by
+  // trying again - never by something else succeeding. It used to share `messagesError` with the
+  // transcript poll, which meant a successful read of the transcript (which always works, even when
+  // the agent cannot be started at all) wiped the reason the message was rejected within 2.5s. The
+  // input was already cleared and nothing had been stored, so the message looked simply dropped.
+  const [sendError, setSendError] = useState<string | null>(null);
+  // A failed readiness check is the send-path's story all over again: it used to write into
+  // `messagesError`, which the transcript poll clears on every successful read - and that read
+  // always succeeds while the check itself is what failed, so the reason came and went within
+  // one 2.5s tick. The button then sprang back to normal having said nothing, which is
+  // indistinguishable from the whole thing having done nothing at all.
+  const [gatesError, setGatesError] = useState<string | null>(null);
   const [repairInfo, setRepairInfo] = useState<RepairNotice | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -1556,12 +1568,16 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
     gatesInFlight.current = true;
     setGatesRunning(true);
     setRepairInfo(null);
+    // Clearing here rather than on success: a check that never completes must take the previous
+    // complaint down with it, otherwise the stale text reads as "this just failed again" while
+    // the new one is actually still in flight.
+    setGatesError(null);
     try {
       const result = await api.runStageGatesWithRepairAsync(featureId);
       setRepairInfo(repairNotice(result));
       await refreshRelease();
     } catch (e) {
-      setMessagesError(toErrorMessage(e));
+      setGatesError(toErrorMessage(e));
     } finally {
       gatesInFlight.current = false;
       setGatesRunning(false);
@@ -1627,12 +1643,14 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
     const text = (overrideText ?? input).trim();
     if (!text || sending) return;
     if (overrideText === undefined) setInput("");
+    const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setMessages((prev) => [
       ...prev,
-      { id: `pending-${Date.now()}`, role: "user", bodyText: text, createdAt: new Date().toISOString(), parts: [], isPriming: false },
+      { id: pendingId, role: "user", bodyText: text, createdAt: new Date().toISOString(), parts: [], isPriming: false },
     ]);
     setSending(true);
     setMessagesError(null);
+    setSendError(null); // a new attempt is what retires the last one's refusal
     try {
       await api.sendStageMessageAsync(featureId, text);
       await loadMessages();
@@ -1640,7 +1658,11 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
       // the release so a shown stage-complete card disappears immediately, not on the next poll.
       await refreshRelease();
     } catch (e) {
-      setMessagesError(toErrorMessage(e));
+      // The optimistic copy above is only real once the broker has stored it, so take it back out -
+      // otherwise the transcript shows a message the agent never received.
+      setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+      setInput((current) => (current.trim() ? current : text)); // so it can be re-sent as-is
+      setSendError(toErrorMessage(e));
     } finally {
       setSending(false);
     }
@@ -1669,6 +1691,8 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
       }}
     >
       {messagesError && <div className={styles.error}>{messagesError}</div>}
+      {sendError && <div className={styles.error} data-testid="release-send-error">{sendError}</div>}
+      {gatesError && <div className={styles.error} data-testid={`${testIdPrefix}-gates-error`}>{gatesError}</div>}
       {repairInfo && (
         <div
           className={repairInfo.tone === "error" ? styles.error : styles.chatIntro}
@@ -1759,14 +1783,22 @@ function ChatStage({ featureId, stageRun, api, testIdPrefix, busy, runStage, ref
   );
 }
 
-// ─── countdown run button (retry-with-a-window-to-intervene) ──────────────
+// ─── countdown run button (act-with-a-window-to-intervene) ─────────────────
 //
 // Unlike a fresh stage's AutoRunNotice (nothing to intervene on, so it just runs),
 // a failed autonomous stage genuinely might warrant the user pushing back instead
 // of blindly retrying — so this gives them a visible countdown and an explicit
 // "Don't Run" to opt out, auto-retrying only if they don't act in time.
+//
+// The same shape serves the sign-off countdown on the stage-complete card, which is why the
+// window, the opt-out wording and the test id are all parameters rather than constants: the
+// decision being taken is different (approve someone's work, not re-run a failure) but the user
+// needs the identical "here is the clock, you can stop it" affordance.
 
 const AUTO_RUN_SECONDS = 30;
+
+/** A sign-off approves a stage's work, which is a larger commitment than re-running a failure. */
+export const SIGN_OFF_SECONDS = 45;
 
 interface ICountdownRunButtonProps {
   testIdPrefix: string;
@@ -1775,10 +1807,26 @@ interface ICountdownRunButtonProps {
   runningLabel: string;
   countingLabel: (secondsLeft: number) => string;
   onRun: () => void;
+  /** How long the user has to intervene. Defaults to the stage-retry window. */
+  seconds?: number;
+  /** Wording for the opt-out item, which is not always "Don't Run". */
+  cancelLabel?: string;
+  /** Defaults to the stage-retry id, which is what the only pre-existing caller uses. */
+  testId?: string;
 }
 
-function CountdownRunButton({ testIdPrefix, disabled, busy, runningLabel, countingLabel, onRun }: ICountdownRunButtonProps) {
-  const [secondsLeft, setSecondsLeft] = useState(AUTO_RUN_SECONDS);
+function CountdownRunButton({
+  testIdPrefix,
+  disabled,
+  busy,
+  runningLabel,
+  countingLabel,
+  onRun,
+  seconds = AUTO_RUN_SECONDS,
+  cancelLabel = "Don't Run",
+  testId,
+}: ICountdownRunButtonProps) {
+  const [secondsLeft, setSecondsLeft] = useState(seconds);
   const [cancelled, setCancelled] = useState(false);
   const onRunRef = useRef(onRun);
   onRunRef.current = onRun;
@@ -1799,8 +1847,8 @@ function CountdownRunButton({ testIdPrefix, disabled, busy, runningLabel, counti
   // runs in, which hangs indefinitely in jsdom (confirmed via isolated repro). Once used,
   // "Don't Run" just becomes a disabled, inert menu item instead of disappearing.
   const dropdownOptions = useMemo(
-    () => [{ key: "dont-run", label: "Don't Run", disabled: cancelled, onClick: () => setCancelled(true) }],
-    [cancelled],
+    () => [{ key: "dont-run", label: cancelLabel, disabled: cancelled, onClick: () => setCancelled(true) }],
+    [cancelLabel, cancelled],
   );
 
   return (
@@ -1808,7 +1856,7 @@ function CountdownRunButton({ testIdPrefix, disabled, busy, runningLabel, counti
       type="button"
       onClick={onRun}
       disabled={disabled}
-      data-testid={`${testIdPrefix}-run-stage-btn`}
+      data-testid={testId ?? `${testIdPrefix}-run-stage-btn`}
       zest={{
         semanticType: "submit",
         busyOptions: { preventRageClick: true },
@@ -2266,9 +2314,17 @@ interface IStageCompleteCardProps {
   nextStageName: string | null;
   onReleaseUpdated: (release: ReleaseDto) => void;
   onContinue: () => void;
+  /**
+   * The release's persisted "continue automatically" preference. When on, the card's own approval
+   * button counts down instead of sitting inert, because this card is the one surface that
+   * outlives the primary panel the pre-existing cruise-control countdown lived in: that panel is
+   * torn down by the very event this card is shown for, which used to leave a passed stage
+   * waiting on an approval nothing would ever make.
+   */
+  autonomousEnabled?: boolean;
 }
 
-export function StageCompleteCard({ featureId, stageRun, pendingSignoffs, api, testIdPrefix, nextStageName, onReleaseUpdated, onContinue }: IStageCompleteCardProps) {
+export function StageCompleteCard({ featureId, stageRun, pendingSignoffs, api, testIdPrefix, nextStageName, onReleaseUpdated, onContinue, autonomousEnabled = false }: IStageCompleteCardProps) {
   const [artifacts, setArtifacts] = useState<StageArtifactDto[]>([]);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const { approve: handleProceed, loading, error } = useApproveSignoff(featureId, pendingSignoffs, api, onReleaseUpdated);
@@ -2316,15 +2372,34 @@ export function StageCompleteCard({ featureId, stageRun, pendingSignoffs, api, t
         >
           Continue {stageLabel(stageRun.stageName)}
         </ZestButton>
-        <ZestButton
-          type="button"
-          onClick={() => void handleProceed()}
-          disabled={loading}
-          data-testid={`${testIdPrefix}-proceed-btn`}
-          zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
-        >
-          {loading ? "Proceeding…" : proceedButtonLabel(nextStageName)}
-        </ZestButton>
+        {/* Autonomous mode swaps the plain approve button for the countdown form: the approval is
+            taken on the user's behalf after a visible window, but their click performs the
+            identical call, so intervening and approving manually are the same action. The card
+            stays mounted for the whole window — it replaced the panel the old cruise countdown
+            was torn down with. */}
+        {autonomousEnabled ? (
+          <CountdownRunButton
+            testIdPrefix={testIdPrefix}
+            disabled={loading}
+            busy={loading}
+            runningLabel={proceedButtonLabel(nextStageName)}
+            countingLabel={(s) => `Approving in ${s} second${s === 1 ? "" : "s"}. Click to approve now.`}
+            onRun={() => void handleProceed()}
+            seconds={SIGN_OFF_SECONDS}
+            cancelLabel="Don't approve"
+            testId={`${testIdPrefix}-approve-countdown-btn`}
+          />
+        ) : (
+          <ZestButton
+            type="button"
+            onClick={() => void handleProceed()}
+            disabled={loading}
+            data-testid={`${testIdPrefix}-proceed-btn`}
+            zest={{ semanticType: "submit", busyOptions: { preventRageClick: true }, visualOptions: { size: "sm" } }}
+          >
+            {loading ? "Proceeding…" : proceedButtonLabel(nextStageName)}
+          </ZestButton>
+        )}
       </div>
     </div>
   );

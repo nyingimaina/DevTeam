@@ -136,7 +136,12 @@ describe("CruiseControl", () => {
     expect(refreshRelease).toHaveBeenCalled();
   });
 
-  it("approves a stage that is only waiting for approval", async () => {
+  it("leaves the approval to the stage-complete card's countdown instead of racing it", async () => {
+    // Ownership moved: the card is the one surface that survives the panel being swapped out for
+    // it — this shell is not, and its countdown died in that swap every time, while a surviving
+    // second timer would race the card the moment it did fire. The card (which renders its own
+    // countdown clock when the toggle is on) is the sole owner; this component only says what is
+    // about to happen. Cruising a stage still finishes unattended; it just happens on the card.
     const waiting = release({
       autonomousEnabled: true,
       stageRuns: [run("developer", "BlockedSignoff")],
@@ -145,9 +150,14 @@ describe("CruiseControl", () => {
     mockApi.signoffFeatureAsync.mockResolvedValue(release());
     renderControl(waiting);
 
+    // Let the old countdown window lapse completely: nothing may approve it from here.
+    await tickCountdown();
     await tickCountdown();
 
-    expect(mockApi.signoffFeatureAsync).toHaveBeenCalledWith("f1", "developer", "automatic", expect.any(String));
+    expect(mockApi.signoffFeatureAsync).not.toHaveBeenCalled();
+    // And the waiting state must still read plainly, with nothing looking stuck.
+    expect(screen.getByTestId("stage-cruise-message")).toHaveTextContent(/approved on its own|card counts down/i);
+    expect(screen.getByTestId("stage-cruise-toggle")).toBeChecked();
   });
 
   it("shows a plain status message when a stage needs a human, and stays on", async () => {

@@ -67,10 +67,15 @@ public class AgentErrorMiddlewareTests
     }
 
     [Fact]
-    public async Task UnrelatedExceptions_AreLeftAlone()
+    public async Task UnexpectedExceptions_AreLeftAlone()
     {
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => InvokeAsync(_ => throw new InvalidOperationException("boom")));
+        // Outside ApiErrorMapper's taxonomy, so this is a broker bug rather than a client-visible
+        // condition: it keeps propagating and keeps producing a 500, where it can be noticed.
+        // (InvalidOperationException used to be asserted here; it is now part of the taxonomy and
+        // maps to a 400 from every endpoint, which is the change that removed the per-endpoint
+        // catch blocks.)
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => InvokeAsync(_ => throw new NotSupportedException("boom")));
     }
 
     [Fact]

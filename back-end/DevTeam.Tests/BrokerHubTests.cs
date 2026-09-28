@@ -31,7 +31,7 @@ public class BrokerHubTests : IClassFixture<ApiIntegrationTests.AppFactory>
     {
         var client = _factory.CreateClient();
         var create = await client.PostAsJsonAsync("/api/releases",
-            new { featureKey = "feat-hub-test", workspacePath = @"C:\work\hub-test" });
+            new { releaseKey = "feat-hub-test", workspacePath = @"C:\work\hub-test" });
         create.EnsureSuccessStatusCode();
         var release = await create.Content.ReadFromJsonAsync<DevTeamRelease>(JsonOptions);
         Assert.NotNull(release);

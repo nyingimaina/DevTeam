@@ -390,14 +390,7 @@ public static class ApiEndpoints
                 return Results.BadRequest("A pipeline must have at least one role.");
 
             var editor = ctx.RequestServices.GetRequiredService<PipelineEditorService>();
-            try
-            {
-                editor.Save(request.WorkspacePath, request.Roles);
-            }
-            catch (WorkflowConfigurationException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
+            editor.Save(request.WorkspacePath, request.Roles);
             return Results.Ok(editor.Load(request.WorkspacePath));
         });
 
@@ -405,17 +398,8 @@ public static class ApiEndpoints
         app.MapPost("/api/features/{featureId:guid}/start-stage", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var stageRun = await engine.StartStageAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(stageRun);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
-            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
-            {
-                return Results.Conflict("The agent turn was cancelled.");
-            }
+            var stageRun = await engine.StartStageAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(stageRun);
         });
 
         app.MapPost("/api/features/{featureId:guid}/send-message", async (Guid featureId, SendMessageRequest request, HttpContext ctx) =>
@@ -424,29 +408,15 @@ public static class ApiEndpoints
                 return Results.BadRequest("Text is required.");
 
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var result = await engine.SendMessageEnforcingSingleQuestionAsync(featureId, request.Text, ctx.RequestAborted);
-                return Results.Ok(result);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
-            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
-            {
-                return Results.Conflict("The agent turn was cancelled.");
-            }
+            var result = await engine.SendMessageEnforcingSingleQuestionAsync(featureId, request.Text, ctx.RequestAborted);
+            return Results.Ok(result);
         });
 
         app.MapPost("/api/features/{featureId:guid}/run-gates", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.RunGatesAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.RunGatesAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         // Like run-gates, but a failed check isn't a dead end: the agent is asked to fix it and the
@@ -454,19 +424,14 @@ public static class ApiEndpoints
         app.MapPost("/api/features/{featureId:guid}/run-gates-and-repair", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
+            var result = await new GateSelfHealer(engine).RunAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(new
             {
-                var result = await new GateSelfHealer(engine).RunAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(new
-                {
-                    release = result.Release,
-                    outcome = result.Outcome,
-                    autoFixAttempts = result.AutoFixAttempts,
-                    problems = result.Problems,
-                });
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+                release = result.Release,
+                outcome = result.Outcome,
+                autoFixAttempts = result.AutoFixAttempts,
+                problems = result.Problems,
+            });
         });
 
         // Recovery from a provider refusal: pick another model, prove it answers, and only then
@@ -478,24 +443,14 @@ public static class ApiEndpoints
                 return Results.BadRequest("ModelId is required.");
 
             var switcher = ctx.RequestServices.GetRequiredService<StageModelSwitcher>();
-            try
-            {
-                return Results.Ok(await switcher.SwitchAndVerifyAsync(featureId, request.ModelId, ctx.RequestAborted));
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            return Results.Ok(await switcher.SwitchAndVerifyAsync(featureId, request.ModelId, ctx.RequestAborted));
         });
 
         app.MapPost("/api/features/{featureId:guid}/run-stage", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.RunStageAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.RunStageAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         app.MapPost("/api/features/{featureId:guid}/push-back", async (Guid featureId, PushBackRequest request, HttpContext ctx) =>
@@ -504,14 +459,9 @@ public static class ApiEndpoints
                 return Results.BadRequest("TargetStageName is required.");
 
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.PushBackAsync(
-                    featureId, request.TargetStageName, request.Instructions, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.PushBackAsync(
+                featureId, request.TargetStageName, request.Instructions, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         // Unlike push-back (only allowed to an earlier stage), this can re-open the CURRENT
@@ -521,13 +471,8 @@ public static class ApiEndpoints
         app.MapPost("/api/features/{featureId:guid}/retry-stage", async (Guid featureId, RetryStageRequest request, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.RetryStageAsync(featureId, request.TargetStageName, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.RetryStageAsync(featureId, request.TargetStageName, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         // Escape hatch for a feature whose pipeline finished but whose completion never got
@@ -537,70 +482,43 @@ public static class ApiEndpoints
         app.MapPost("/api/features/{featureId:guid}/retry-finalize", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.RetryFeatureFinalizationAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.RetryFeatureFinalizationAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         app.MapGet("/api/features/{featureId:guid}/pipeline", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var pipeline = await engine.GetPipelineAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(pipeline);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
+            var pipeline = await engine.GetPipelineAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(pipeline);
         });
 
         app.MapGet("/api/features/{featureId:guid}/stages/{stageRunId:guid}/messages", async (Guid featureId, Guid stageRunId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var messages = await engine.GetStageMessagesAsync(featureId, stageRunId, ctx.RequestAborted);
-                return Results.Ok(messages);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
+            var messages = await engine.GetStageMessagesAsync(featureId, stageRunId, ctx.RequestAborted);
+            return Results.Ok(messages);
         });
 
         app.MapGet("/api/features/{featureId:guid}/stages/{stageRunId:guid}/artifacts", async (Guid featureId, Guid stageRunId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var artifacts = await engine.GetStageArtifactsAsync(featureId, stageRunId, ctx.RequestAborted);
-                return Results.Ok(artifacts);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var artifacts = await engine.GetStageArtifactsAsync(featureId, stageRunId, ctx.RequestAborted);
+            return Results.Ok(artifacts);
         });
 
         app.MapGet("/api/features/{featureId:guid}/workspace-changes", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var changes = await engine.GetWorkspaceChangesAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(changes);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
+            var changes = await engine.GetWorkspaceChangesAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(changes);
         });
 
         app.MapPost("/api/features/{featureId:guid}/advance", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.AdvanceAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Feature {featureId} not found."); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.AdvanceAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         app.MapPost("/api/features/{featureId:guid}/signoff", async (Guid featureId, SignoffRequest request, HttpContext ctx) =>
@@ -611,24 +529,15 @@ public static class ApiEndpoints
                 return Results.BadRequest("Role is required.");
 
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.SignoffAsync(featureId, request.StageName, request.Role, request.Comment, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Feature {featureId} not found."); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.SignoffAsync(featureId, request.StageName, request.Role, request.Comment, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         app.MapGet("/api/releases/{releaseId:guid}/models", async (Guid releaseId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var models = await engine.GetAvailableModelsAsync(releaseId, ctx.RequestAborted);
-                return Results.Ok(models);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound(); }
+            var models = await engine.GetAvailableModelsAsync(releaseId, ctx.RequestAborted);
+            return Results.Ok(models);
         });
 
         app.MapPost("/api/releases/{releaseId:guid}/features", async (Guid releaseId, CreateFeatureRequest request, HttpContext ctx) =>
@@ -637,37 +546,27 @@ public static class ApiEndpoints
                 return Results.BadRequest("FeatureKey is required.");
 
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var feature = await engine.CreateFeatureAsync(releaseId, request.FeatureKey, ctx.RequestAborted);
-                return Results.Created($"/api/features/{feature.Id}", feature);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var feature = await engine.CreateFeatureAsync(releaseId, request.FeatureKey, ctx.RequestAborted);
+            return Results.Created($"/api/features/{feature.Id}", feature);
         });
 
         app.MapPost("/api/features/{featureId:guid}/switch-to", async (Guid featureId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.SwitchFeatureAsync(featureId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Feature {featureId} not found."); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.SwitchFeatureAsync(featureId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         // ─── release endpoints ────────────────────────────────────────────
         app.MapPost("/api/releases", async (CreateReleaseRequest request, HttpContext ctx) =>
         {
-            if (string.IsNullOrWhiteSpace(request.FeatureKey))
-                return Results.BadRequest("FeatureKey is required.");
+            if (string.IsNullOrWhiteSpace(request.ReleaseKey))
+                return Results.BadRequest("ReleaseKey is required.");
             if (string.IsNullOrWhiteSpace(request.WorkspacePath))
                 return Results.BadRequest("WorkspacePath is required.");
 
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            var release = await engine.StartReleaseAsync(request.FeatureKey, request.WorkspacePath, ctx.RequestAborted);
+            var release = await engine.StartReleaseAsync(request.ReleaseKey, request.WorkspacePath, ctx.RequestAborted);
             return Results.Created($"/api/releases/{release.Id}", release);
         });
 
@@ -681,15 +580,8 @@ public static class ApiEndpoints
         app.MapGet("/api/releases/{releaseId:guid}", async (Guid releaseId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.GetReleaseAsync(releaseId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Release {releaseId} not found.");
-            }
+            var release = await engine.GetReleaseAsync(releaseId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         // Persisted "Continue automatically" (CruiseControl, front-end) — a release-level flag,
@@ -697,34 +589,22 @@ public static class ApiEndpoints
         app.MapPut("/api/releases/{releaseId:guid}/autonomous", async (Guid releaseId, SetAutonomousEnabledRequest request, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.SetReleaseAutonomousEnabledAsync(releaseId, request.Enabled, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Release {releaseId} not found.");
-            }
+            var release = await engine.SetReleaseAutonomousEnabledAsync(releaseId, request.Enabled, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         app.MapPost("/api/releases/{releaseId:guid}/finalize", async (Guid releaseId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
-            try
-            {
-                // Hard ship gate: the strict checks must pass — pinned to this exact commit —
-                // before the release branch may be merged into a protected branch.
-                var report = await gate.CheckReleaseAsync(releaseId, ctx.RequestAborted);
-                if (!report.Passed)
-                    return Results.Conflict(report.BlockerSummary);
+            // Hard ship gate: the strict checks must pass — pinned to this exact commit —
+            // before the release branch may be merged into a protected branch.
+            var report = await gate.CheckReleaseAsync(releaseId, ctx.RequestAborted);
+            if (!report.Passed)
+                return Results.Conflict(report.BlockerSummary);
 
-                var release = await engine.FinalizeReleaseAsync(releaseId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.FinalizeReleaseAsync(releaseId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         // Runs the strict checks for a release without shipping it — lets the user see the
@@ -732,11 +612,7 @@ public static class ApiEndpoints
         app.MapPost("/api/releases/{releaseId:guid}/readiness", async (Guid releaseId, HttpContext ctx) =>
         {
             var gate = ctx.RequestServices.GetRequiredService<IShipReadinessGate>();
-            try
-            {
-                return Results.Ok(await gate.CheckReleaseAsync(releaseId, ctx.RequestAborted));
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Release {releaseId} not found."); }
+            return Results.Ok(await gate.CheckReleaseAsync(releaseId, ctx.RequestAborted));
         });
 
         app.MapGet("/api/releases/{releaseId:guid}/readiness", async (Guid releaseId, HttpContext ctx) =>
@@ -775,7 +651,7 @@ public static class ApiEndpoints
 
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
             var hotfix = await engine.StartHotfixAsync(request.Key, request.WorkspacePath, ctx.RequestAborted);
-            return Results.Created($"/api/features/{hotfix.Id}", hotfix);
+            return Results.Created($"/api/releases/{hotfix.Id}", hotfix);
         });
 
         app.MapGet("/api/hotfixes", async (string? workspacePath, HttpContext ctx) =>
@@ -788,13 +664,8 @@ public static class ApiEndpoints
         app.MapPost("/api/hotfixes/{hotfixId:guid}/finalize", async (Guid hotfixId, HttpContext ctx) =>
         {
             var engine = ctx.RequestServices.GetRequiredService<IWorkflowEngine>();
-            try
-            {
-                var release = await engine.FinalizeHotfixAsync(hotfixId, ctx.RequestAborted);
-                return Results.Ok(release);
-            }
-            catch (KeyNotFoundException) { return Results.NotFound($"Hotfix {hotfixId} not found."); }
-            catch (InvalidOperationException ex) { return Results.BadRequest(ex.Message); }
+            var release = await engine.FinalizeHotfixAsync(hotfixId, ctx.RequestAborted);
+            return Results.Ok(release);
         });
 
         app.MapGet("/healthz", (HttpContext ctx) =>
@@ -825,15 +696,32 @@ public static class ApiEndpoints
                 return Results.BadRequest("ModelId is required.");
 
             var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
-            try
-            {
-                var modelId = await coordinator.SetModelAsync(sessionId, request.ModelId, ctx.RequestAborted);
-                return Results.Ok(new { modelId });
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Session {sessionId} not found.");
-            }
+            var modelId = await coordinator.SetModelAsync(sessionId, request.ModelId, ctx.RequestAborted);
+            return Results.Ok(new { modelId });
+        });
+
+        // Polled rather than pushed: the agent only reports its context at the end of a turn, so
+        // there is nothing to subscribe to, and a live-filling bar would be showing motion that the
+        // numbers do not support.
+        app.MapGet("/api/context/current", (HttpContext ctx) =>
+            Results.Ok(ctx.RequestServices.GetRequiredService<BrokerCoordinator>().CurrentContext()));
+
+        app.MapPost("/api/sessions/{sessionId:guid}/compact", async (Guid sessionId, HttpContext ctx) =>
+        {
+            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
+            var result = await coordinator.CompactContextAsync(sessionId, ctx.RequestAborted);
+            return result is null ? Results.NotFound() : Results.Ok(result);
+        });
+
+        // Compact whatever session the context currently belongs to. The bar is global, so it often
+        // has no session of its own to name — it knows how full the context is, and the broker knows
+        // whose context that is. Asking the caller to supply a session id it may not have would just
+        // push a lookup onto every caller.
+        app.MapPost("/api/context/compact", async (HttpContext ctx) =>
+        {
+            var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
+            var result = await coordinator.CompactCurrentContextAsync(ctx.RequestAborted);
+            return result is null ? Results.NotFound() : Results.Ok(result);
         });
 
         app.MapPost("/api/sessions/{sessionId:guid}/mode", async (Guid sessionId, SetModeRequest request, HttpContext ctx) =>
@@ -842,15 +730,8 @@ public static class ApiEndpoints
                 return Results.BadRequest("ModeId is required.");
 
             var coordinator = ctx.RequestServices.GetRequiredService<BrokerCoordinator>();
-            try
-            {
-                var modeId = await coordinator.SetModeAsync(sessionId, request.ModeId, ctx.RequestAborted);
-                return Results.Ok(new { modeId });
-            }
-            catch (KeyNotFoundException)
-            {
-                return Results.NotFound($"Session {sessionId} not found.");
-            }
+            var modeId = await coordinator.SetModeAsync(sessionId, request.ModeId, ctx.RequestAborted);
+            return Results.Ok(new { modeId });
         });
 
         // ─── filesystem browser (PathBrowser) ─────────────────────────────────
@@ -866,14 +747,7 @@ public static class ApiEndpoints
                 return Results.BadRequest("Path is required.");
 
             var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
-            try
-            {
-                return Results.Ok(fs.ListDirectory(path));
-            }
-            catch (ArgumentException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
+            return Results.Ok(fs.ListDirectory(path));
         });
 
         app.MapGet("/api/fs/stat", (string? path, HttpContext ctx) =>
@@ -882,14 +756,7 @@ public static class ApiEndpoints
                 return Results.BadRequest("Path is required.");
 
             var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
-            try
-            {
-                return Results.Ok(fs.GetStat(path));
-            }
-            catch (ArgumentException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
+            return Results.Ok(fs.GetStat(path));
         });
 
         app.MapPost("/api/fs/mkdir", (CreateDirectoryRequest request, HttpContext ctx) =>
@@ -898,18 +765,7 @@ public static class ApiEndpoints
                 return Results.BadRequest("Path is required.");
 
             var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
-            try
-            {
-                return Results.Ok(fs.CreateDirectory(request.Path));
-            }
-            catch (ArgumentException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.Conflict(ex.Message);
-            }
+            return Results.Ok(fs.CreateDirectory(request.Path));
         });
 
         app.MapPost("/api/fs/reveal", (RevealInExplorerRequest request, HttpContext ctx) =>
@@ -918,15 +774,8 @@ public static class ApiEndpoints
                 return Results.BadRequest("Path is required.");
 
             var fs = ctx.RequestServices.GetRequiredService<IFileSystemService>();
-            try
-            {
-                fs.RevealInExplorer(request.Path);
-                return Results.NoContent();
-            }
-            catch (ArgumentException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
+            fs.RevealInExplorer(request.Path);
+            return Results.NoContent();
         });
 
         app.MapPost("/api/fs/cleanup", (CleanupWorkspaceRequest request, HttpContext ctx) =>
@@ -1120,15 +969,8 @@ public static class ApiEndpoints
                 return Results.BadRequest("WorkspacePath and ModelId are required.");
 
             var service = ctx.RequestServices.GetRequiredService<IModelCandidateService>();
-            try
-            {
-                var added = await service.AddAsync(request.WorkspacePath, request.ModelId, ctx.RequestAborted);
-                return Results.Ok(ToCandidateDto(added));
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(ex.Message);
-            }
+            var added = await service.AddAsync(request.WorkspacePath, request.ModelId, ctx.RequestAborted);
+            return Results.Ok(ToCandidateDto(added));
         });
 
         app.MapDelete("/api/models/candidates/{id:guid}", async (Guid id, HttpContext ctx) =>

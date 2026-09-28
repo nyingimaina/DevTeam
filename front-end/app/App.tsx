@@ -10,6 +10,7 @@ import SettingsView from "./Project/Settings/SettingsView";
 import PathBrowser from "./Project/UI/PathBrowser";
 import WorkspaceCleanupNotice from "./UI/WorkspaceCleanupNotice";
 import ActiveTurnIndicator from "./UI/ActiveTurnIndicator";
+import ContextDial from "./UI/ContextDial";
 import { formatCleanupNoticeMessage, projectNameFromPath } from "./Project/workspaceCleanup";
 import { installGlobalErrorHandlers } from "./UI/diagnostics";
 import { FaFolderOpen, FaListCheck, FaCodeBranch, FaShieldHalved, FaGear, FaChartLine } from "react-icons/fa6";
@@ -137,6 +138,10 @@ export default function App() {
         >
           {projectName}
         </button>
+        {/* In the tab bar rather than floating over the page: the bar is already sticky, and as a
+            flex sibling ahead of the menu the dial can never end up sitting on top of the sidekick
+            hamburger the way an absolutely-positioned overlay would. */}
+        <ContextDial api={api} />
         <SidekickMenu
           items={navItems}
           side="right"

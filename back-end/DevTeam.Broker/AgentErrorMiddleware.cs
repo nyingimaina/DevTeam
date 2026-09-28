@@ -3,16 +3,26 @@ using DevTeam.Broker.Rpc;
 namespace DevTeam.Broker;
 
 /// <summary>
+/// Runs every request's failure through <see cref="ApiErrorMapper"/>, so one mapping serves all
+/// ninety endpoints.
+///
+/// <para>
 /// The engine already records a failed agent turn on the stage run (Escalated +
 /// LastErrorKind — see WorkflowEngine.RecordPromptFailureAsync) and then rethrows so callers can
 /// react. Left uncaught, that rethrow reaches the client as a raw 500 with a stack trace and stops
 /// a debugger as "unhandled". This turns it into what it really is — the AI provider or the agent
 /// process failing, not a broker bug — with a message a non-technical user can act on.
+/// </para>
+///
+/// <para>
+/// The taxonomy itself lives in <see cref="ApiErrorMapper"/>, not here, so that adding a failure
+/// class means editing one place instead of a middleware plus every route.
+/// </para>
 /// </summary>
 public static class AgentErrorMiddleware
 {
     /// <summary>Plain-language text for a deliberate cancellation — safe to show a person.</summary>
-    public const string CancelledMessage = "The run was cancelled.";
+    public const string CancelledMessage = ApiErrorMapper.CancelledMessage;
 
     public static void UseAgentErrorHandling(this WebApplication app)
         => app.Use((context, next) => InvokeAsync(context, next));
@@ -23,50 +33,37 @@ public static class AgentErrorMiddleware
         {
             await next(context);
         }
-        catch (OperationCanceledException) when (!context.Response.HasStarted)
+        catch (Exception ex) when (!context.Response.HasStarted)
         {
+            var error = ApiErrorMapper.Map(ex, context.RequestAborted.IsCancellationRequested);
+            if (error is null)
+                throw;
+
             // A user-cancelled turn (or a client that went away) is not a broker failure: no
-            // error log, no stack trace, and no debugger "unhandled exception" — just a plain
-            // "cancelled" response so the caller can settle.
-            context.Response.Clear();
-            context.Response.StatusCode = StatusCodes.Status409Conflict;
-            context.Response.ContentType = "text/plain; charset=utf-8";
-            await context.Response.WriteAsync(WithReference(context, CancelledMessage));
-        }
-        catch (Exception ex) when (Describe(ex) is not null && !context.Response.HasStarted)
-        {
+            // stack trace, and no debugger "unhandled exception" — just a plain "cancelled"
+            // response so the caller can settle.
             var logger = context.RequestServices.GetService<ILogger<Program>>();
-            logger?.LogWarning(ex, "Agent call failed for {Method} {Path}", context.Request.Method, context.Request.Path);
+            logger?.LogWarning(ex, "{Method} {Path} failed: {Status}", context.Request.Method, context.Request.Path, error.Value.StatusCode);
+
+            // Read the request id before clearing: Response.Clear() drops response headers too, so
+            // capturing it afterwards yielded an empty reference — the one piece of information that
+            // makes a failure report actionable was being thrown away on every error.
+            var requestId = context.Response.Headers.TryGetValue(RequestDiagnosticsMiddleware.RequestIdHeader, out var id)
+                ? id.ToString()
+                : null;
 
             context.Response.Clear();
-            context.Response.StatusCode = StatusCodes.Status502BadGateway;
+            context.Response.StatusCode = error.Value.StatusCode;
             context.Response.ContentType = "text/plain; charset=utf-8";
-            await context.Response.WriteAsync(WithReference(context, Describe(ex)!));
+            if (!string.IsNullOrWhiteSpace(requestId))
+                context.Response.Headers[RequestDiagnosticsMiddleware.RequestIdHeader] = requestId;
+            if (error.Value.Message.Length > 0)
+                await context.Response.WriteAsync(WithReference(requestId, error.Value.Message));
         }
     }
 
     // A failure message carries the request id so the user can quote it ("reference 4f3a2b1c")
     // and a specialist can jump straight to that request in the logs.
-    private static string WithReference(HttpContext context, string message)
-        => context.Response.Headers.TryGetValue(RequestDiagnosticsMiddleware.RequestIdHeader, out var id)
-           && !string.IsNullOrWhiteSpace(id)
-            ? $"{message} (reference: {id})"
-            : message;
-
-    /// <summary>Plain-language text for an agent failure, or null when the exception isn't one.</summary>
-    public static string? Describe(Exception ex) => ex switch
-    {
-        RpcException rpc when IsFreeTierRefusal(rpc.Message) =>
-            "The AI service refused this request (it said its free model can only be used from within OpenCode). " +
-            "This is often temporary, so try again. If it keeps happening, pick a different model in settings.",
-        RpcException rpc =>
-            $"The AI service refused this request: {rpc.Message}. " +
-            "Check the model settings and try again.",
-        AcpDisconnectedException =>
-            "The AI agent stopped unexpectedly. Try again — it will start a fresh session.",
-        _ => null,
-    };
-
-    private static bool IsFreeTierRefusal(string message)
-        => message.Contains("free tier", StringComparison.OrdinalIgnoreCase);
+    private static string WithReference(string? requestId, string message)
+        => string.IsNullOrWhiteSpace(requestId) ? message : $"{message} (reference: {requestId})";
 }

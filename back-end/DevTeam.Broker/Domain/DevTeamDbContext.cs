@@ -42,9 +42,19 @@ public sealed class DevTeamDbContext : DbContext
     public DbSet<ReadinessReportRow> ReadinessReports => Set<ReadinessReportRow>();
     public DbSet<ReadinessCheckRow> ReadinessChecks => Set<ReadinessCheckRow>();
     public DbSet<ReadinessAttestation> ReadinessAttestations => Set<ReadinessAttestation>();
+    public DbSet<ContextUsageSample> ContextUsageSamples => Set<ContextUsageSample>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<ContextUsageSample>(sample =>
+        {
+            sample.HasKey(e => e.Id);
+            sample.Property(e => e.Id).ValueGeneratedOnAdd();
+            sample.Property(e => e.CostAmount).HasColumnType("TEXT");
+            sample.HasIndex(e => new { e.SessionId, e.Id });
+        });
+
+
         modelBuilder.Entity<DevTeamSession>(session =>
         {
             session.HasKey(e => e.Id);

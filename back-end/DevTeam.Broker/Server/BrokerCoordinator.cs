@@ -21,6 +21,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     public const string EventToolCall = "toolCall";
     public const string EventToolCallUpdated = "toolCallUpdated";
     public const string EventUsageUpdated = "usageUpdated";
+    public const string EventContextChanged = "contextChanged";
     public const string EventConfigOptionsUpdated = "configOptionsUpdated";
     public const string EventPromptError = "error";
     public const string EventTurnEnd = "turnEnd";
@@ -38,6 +39,27 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     private readonly IModelCandidateService? _modelCandidates;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
     private readonly SemaphoreSlim _initLock = new(1, 1);
+
+    // The context the agent is working in, kept on the session rather than on the turn. A turn that
+    // never reports one — one that failed, was cancelled, or was a slash command — has not learned
+    // anything new, and reading the number off the turn reported that as an empty context.
+    private readonly SessionContextState _context = new();
+
+    // The auto-compaction decision is stateful because it has to remember the last compaction:
+    // firing on every turn that sits above the threshold would be a paid model call each time, and
+    // on a context that does not shrink it never stops.
+    public ContextCompactionPolicy CompactionPolicy { get; set; } = new();
+
+    // The session whose context is being tracked. A reading can arrive after its turn has closed —
+    // the agent emits usage and the response at the same moment — and by then _turn is gone, so the
+    // reading would have no session to be attributed to and was written off. Remembering the session
+    // is what lets that late reading still be recorded against the right history.
+    private Guid? _contextSessionId;
+
+    // Long enough to catch a usage_update that is racing the prompt response, short enough to stay
+    // invisible on a turn that will never report one. The agent emits the two within a millisecond
+    // or so of each other, so this is generous for the real race and a rounding error otherwise.
+    private static readonly TimeSpan ContextReadGrace = TimeSpan.FromMilliseconds(250);
 
     private TurnCollector? _turn;
     private AgentInfo? _agentInfo;
@@ -181,6 +203,70 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         }
     }
 
+    /// <summary>
+    /// Discards the agent's context when the incoming work belongs to a different feature than the
+    /// context does, and returns what was dropped.
+    /// </summary>
+    /// <remarks>
+    /// A DevTeam session is scoped to a workspace, not a feature, so one agent session serves every
+    /// feature worked in that workspace and its context simply keeps growing. Starting a second
+    /// feature therefore inherited the first one's entire conversation — measured at 143k cached
+    /// tokens, with 11+ tool-call turns averaging over two minutes. Nothing summarises that away on
+    /// its own, because opencode only auto-compacts once the window has already overflowed.
+    ///
+    /// The boundary is a feature change, not a session change: the same session legitimately
+    /// accumulates context within one feature, and a session that has never run a turn has nothing
+    /// to discard. Because the previous feature's decisions are already persisted to
+    /// <c>handoff.md</c> and the artifacts, and DevTeam keeps its own transcript in
+    /// <c>Messages</c>/<c>Parts</c>, starting a new agent session loses no history the user can
+    /// still read — only the model's copy of it, which is what had become the problem.
+    /// </remarks>
+    /// <returns>What was reset, or null when the context already belonged to this feature.</returns>
+    public async Task<FeatureContextReset?> ResetContextOnFeatureChangeAsync(
+        Guid sessionId, string featureKey, CancellationToken cancellationToken)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        string workspacePath;
+        string? previousFeatureKey;
+        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        {
+            var session = await db.Sessions.SingleOrDefaultAsync(s => s.Id == sessionId, cancellationToken)
+                ?? throw new KeyNotFoundException($"Session {sessionId} not found.");
+            workspacePath = session.WorkspacePath;
+
+            // The last turn that ran against this context is what identifies the feature it holds.
+            // Projected and sorted client-side because SQLite cannot ORDER BY a DateTimeOffset; only
+            // these two columns are pulled, so this stays cheap even for a long-lived session.
+            var recentTurns = await db.TurnMetrics
+                .Where(m => m.SessionId == sessionId && m.FeatureKey != null)
+                .Select(m => new { m.StartedAt, m.FeatureKey })
+                .ToListAsync(cancellationToken);
+            previousFeatureKey = recentTurns
+                .OrderByDescending(m => m.StartedAt)
+                .Select(m => m.FeatureKey)
+                .FirstOrDefault();
+        }
+
+        if (previousFeatureKey is null
+            || string.Equals(previousFeatureKey, featureKey, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var acpSessionId = await RecreateAcpSessionAsync(sessionId, workspacePath, cancellationToken);
+
+        // The one moment the context is known to have been emptied outright. Writing it down is what
+        // lets a later query prove the reset happened, instead of inferring it from a fall in the
+        // curve that ordinary pruning could equally have caused.
+        _context.Clear(acpSessionId, ContextSampleSource.BoundaryReset, featureKey);
+        await PersistContextSampleAsync(sessionId, ContextSampleSource.BoundaryReset, acpSessionId);
+
+        _logger.LogInformation(
+            "Feature changed from {PreviousFeatureKey} to {FeatureKey}: opened a fresh agent session " +
+            "({AcpSessionId}) so the previous feature's context is not carried forward.",
+            previousFeatureKey, featureKey, acpSessionId);
+        return new FeatureContextReset(previousFeatureKey, acpSessionId);
+    }
+
     public async Task<SessionDetail?> GetSessionDetailAsync(Guid sessionId, CancellationToken cancellationToken)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
@@ -269,6 +355,8 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             }
 
             _turn = new TurnCollector(sessionId);
+            _contextSessionId = sessionId;
+            _context.BeginTurn();
             var turnStartedAt = DateTimeOffset.UtcNow;
 
             using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -373,6 +461,33 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             }
 
             promptStopwatch.Stop();
+
+            // The agent reports its context at the end of a turn, in the same millisecond as the
+            // response we just read. Reading it the instant the response arrives loses that race
+            // most of the time — and it lost it so consistently that ContextTokens was populated on
+            // one turn in 262, leaving no way to tell a cheap turn from one working against a full
+            // window. Give the reading a moment to land, then take whatever is known.
+            var contextReading = await _context.WaitForUsageAsync(ContextReadGrace, cancellationToken);
+            var contextTokens = contextReading?.UsedTokens ?? 0;
+            if (contextReading is not null)
+            {
+                var percent = contextReading.ContextSize is { } size and > 0
+                    ? 100.0 * contextTokens / size
+                    : (double?)null;
+                _logger.LogInformation(
+                    "Session {SessionId} context after turn: used={UsedTokens} size={ContextSize} percentFull={PercentFull} delta={Delta} cost={Cost}",
+                    sessionId, contextTokens, contextReading.ContextSize,
+                    percent is { } p ? Math.Round(p, 1) : null, _context.LastDeltaTokens,
+                    contextReading.CostAmount);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Session {SessionId} turn reported no context; carrying the last known reading of {UsedTokens}.",
+                    sessionId, _context.UsedTokens);
+                contextTokens = _context.UsedTokens;
+            }
+
             // Time-to-first-event is the number that explains "it looked hung": a turn that never
             // produced anything shows -1 here, which is exactly what a stall looks like.
             _logger.LogInformation(
@@ -407,7 +522,11 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                     _turn?.ThoughtEventCount ?? 0,
                     _turn?.ToolEventCount ?? 0,
                     Outcome: "Ok",
-                    CachedReadTokens: result.Usage?.CachedReadTokens));
+                    CachedReadTokens: result.Usage?.CachedReadTokens,
+                    // Null only when nothing has ever been reported. After a first reading, a turn
+                    // that reports none of its own carries the last known figure: reporting zero
+                    // instead would claim the context was emptied, and the agent never said so.
+                    ContextTokens: _context.UpdatedAt is null ? null : contextTokens));
         }
         catch (OperationCanceledException) when (providerFailure is { IsFailure: true })
         {
@@ -452,6 +571,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             if (!watchdogStop.IsCancellationRequested)
                 watchdogStop.Cancel();
             _turn = null;
+            _context.EndTurn();
             _turnLock.Release();
         }
     }
@@ -652,6 +772,17 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
     private void OnEventReceived(object? sender, AgentEvent @event)
     {
         var turn = _turn;
+
+        // A context reading is a fact about the session, not about whichever turn happens to be open,
+        // and the agent reports it at the end of a turn — right around the time the turn is being torn
+        // down. Dispatching it to the active turn threw away the reading whenever the response won
+        // that race, which is most of the time. Handle it before the turn check and keep it even
+        // when no turn is open, then let the rest of the events require a turn as they always did.
+        if (@event is AgentUsageUpdatedEvent { Usage: { } usageUpdate })
+        {
+            NoteContextUsage(turn?.SessionId ?? _contextSessionId, @event.SessionId, usageUpdate);
+        }
+
         if (turn is null)
         {
             _logger.LogDebug("Ignoring agent event outside the active turn: {Type}", @event.GetType().Name);
@@ -689,11 +820,15 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                 break;
             case AgentUsageUpdatedEvent usage:
                 // Not worth a feed line, but it IS proof the stream is alive — keep the heartbeat
-                // honest so a busy turn is never mistaken for a stalled one.
+                // honest so a busy turn is never mistaken for a stalled one. The reading itself was
+                // already taken above, before the turn check, so it survives the turn boundary.
                 _turnTracker.Touch();
+                // The window size is not output tokens. It used to be stuffed into that field, which
+                // meant "how full is the context" was answered by a number that was really the size
+                // of the window — two different things, and only one of them useful. The context
+                // reading itself travels in its own event now.
                 _ = FireAsync(turn.SessionId, EventUsageUpdated,
-                    new { Usage = new UsageDto(usage.Usage.UsedTokens, usage.Usage.ContextSize,
-                        usage.Usage.UsedTokens, null) },
+                    new { Usage = new UsageDto(usage.Usage.UsedTokens, 0, usage.Usage.UsedTokens, null) },
                     CancellationToken.None);
                 break;
             case AgentConfigOptionsUpdatedEvent options:
@@ -710,6 +845,138 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                 break;
         }
     }
+
+    // Records what the agent reported about the context it was working in, and keeps the whole series
+    // rather than just the latest number. The shape of the curve is the whole point: pruning shows up
+    // as a sawtooth and a feature boundary as a cliff, and neither is visible from one reading.
+    private void NoteContextUsage(Guid? sessionId, string? acpSessionId, AgentTurnUsage usage)
+    {
+        // The spoke reports 0 for a context size the agent did not send, and 0 is not a window.
+        var size = usage.ContextSize > 0 ? usage.ContextSize : (long?)null;
+
+        _context.NoteUsage(
+            acpSessionId, usage.UsedTokens, size,
+            usage.CostAmount, usage.CostCurrency, featureKey: null);
+
+        if (sessionId is { } id)
+        {
+            _ = PersistContextSampleAsync(id, ContextSampleSource.AgentUsage, acpSessionId, usage, size);
+            // Only while a turn is open: once the turn is gone there is no session to attribute the
+            // reading to, and the context belongs to the session rather than to the notification.
+            _ = FireAsync(id, EventContextChanged, CurrentContext(), CancellationToken.None);
+        }
+
+        // Debug, not Information: this fires once per turn on a busy session and the turn summary
+        // already logs the resulting number at Information.
+        _logger.LogDebug(
+            "Session {SessionId} context reported: used={UsedTokens} size={ContextSize} delta={Delta}",
+            sessionId, usage.UsedTokens, size, _context.LastDeltaTokens);
+    }
+
+    private async Task PersistContextSampleAsync(
+        Guid sessionId,
+        ContextSampleSource source,
+        string? acpSessionId = null,
+        AgentTurnUsage? usage = null,
+        long? size = null)
+    {
+        try
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync();
+            db.ContextUsageSamples.Add(new ContextUsageSample
+            {
+                SessionId = sessionId,
+                AcpSessionId = acpSessionId ?? _context.AcpSessionId,
+                FeatureKey = _context.FeatureKey,
+                At = DateTimeOffset.UtcNow,
+                UsedTokens = usage?.UsedTokens ?? 0,
+                ContextSize = size,
+                CostAmount = usage?.CostAmount,
+                CostCurrency = usage?.CostCurrency,
+                Source = source,
+            });
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            // A sample that fails to write is a gap in the history, not a reason to fail the turn the
+            // user is waiting on. Log it loudly enough to notice and move on.
+            _logger.LogWarning(ex, "Could not record a context sample for session {SessionId}.", sessionId);
+        }
+    }
+
+    // Records a coalesced snippet of streamed text/thoughts — see TurnCollector.SnippetFor.
+    /// <summary>
+    /// Asks the agent to summarize its context and make room, keeping whatever it worked out.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not a boundary reset. A reset discards the session to guarantee a clean slate;
+    /// compacting is what the user means by "I am running low on context" — the agent condenses
+    /// instead of forgetting. Both readings of the context before and after are returned so the
+    /// caller can see whether it actually worked, which is not guaranteed: if the context is mostly
+    /// irreducible instruction, summarizing frees very little and the next turn will hit the same
+    /// ceiling.
+    /// </remarks>
+    public Task<ContextCompactionResult?> CompactCurrentContextAsync(CancellationToken cancellationToken)
+        => _contextSessionId is { } sessionId
+            ? CompactContextAsync(sessionId, cancellationToken)
+            : Task.FromResult<ContextCompactionResult?>(null);
+
+    public async Task<ContextCompactionResult?> CompactContextAsync(Guid sessionId, CancellationToken cancellationToken)
+    {
+        // Only the tracked session can be compacted: a reading from any other session describes a
+        // context this coordinator is not holding, and reporting before/after numbers for it would
+        // be invented data.
+        if (_contextSessionId is not { } tracked || tracked != sessionId)
+            return null;
+
+        var before = _context.UsedTokens;
+        var startedAt = DateTimeOffset.UtcNow;
+        // Recorded as a zero, then the agent's own reading overwrites it when the summarize
+        // completes. Without this the compaction is invisible in the history — indistinguishable
+        // from one that never ran.
+        await PersistContextSampleAsync(sessionId, ContextSampleSource.Compaction, _context.AcpSessionId);
+        _context.Clear(_context.AcpSessionId ?? string.Empty, ContextSampleSource.Compaction, _context.FeatureKey);
+
+        var response = await PromptWithSessionRecoveryAsync(
+            sessionId, FeatureContextBoundary.CompactPromptText, cancellationToken);
+
+        var after = _context.UsedTokens;
+        var freed = before - after;
+        _logger.LogInformation(
+            "Session {SessionId} compacted on request: {BeforeTokens} -> {AfterTokens} (freed {FreedTokens}) in {ElapsedMs}ms",
+            sessionId, before, after, freed, (long)(DateTimeOffset.UtcNow - startedAt).TotalMilliseconds);
+
+        return new ContextCompactionResult(
+            before, after, freed,
+            (long)(DateTimeOffset.UtcNow - startedAt).TotalMilliseconds,
+            response.StopReason,
+            CurrentContext());
+    }
+
+    public void NoteAutoCompactionRan(double? occupancy, ContextCompactionResult result)
+        => _logger.LogInformation(
+            "Auto-compacted session {SessionId} at {Occupancy:P0} of the window: {BeforeTokens} -> {AfterTokens} " +
+            "(freed {FreedTokens}) in {ElapsedMs}ms",
+            result.Context.SessionId, occupancy, result.UsedTokensBefore, result.UsedTokensAfter,
+            result.FreedTokens, result.DurationMs);
+
+    public void NoteAutoCompactionSkipped(string? reason)
+        // Debug rather than Information: this is consulted before every step, so logging it loudly
+        // would bury the turns. The reason is still there when the question is asked after the fact.
+        => _logger.LogDebug("Auto-compaction skipped: {Reason}.", reason ?? "no reason given");
+
+    /// <summary>What is known about the context right now, for the UI and the API.</summary>
+    public ContextDto CurrentContext() => new(
+        _contextSessionId,
+        _context.UsedTokens,
+        _context.ContextSize,
+        _context.LastDeltaTokens,
+        _context.CostAmount,
+        _context.CostCurrency,
+        _context.TurnActive,
+        _context.CompactionCount,
+        _context.UpdatedAt);
 
     // Records a coalesced snippet of streamed text/thoughts — see TurnCollector.SnippetFor.
     private void RecordSnippet(TurnCollector turn, string kind, bool isThought)
@@ -1006,6 +1273,28 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         }
 
         public void SetUsage(AgentUsageInfo? usage) => Usage = usage;
+
+        /// <summary>
+        /// Tokens the agent reported as occupying its context, from the latest usage update.
+        /// </summary>
+        /// <remarks>
+        /// The agent usually omits usage from the final prompt result, so this mid-turn report was
+        /// the only place context pressure was ever visible — and it was being used solely as a
+        /// liveness heartbeat. Keeping the latest value is what makes a turn's cost explainable: it
+        /// separates "this turn was slow because it ran many tools" from "this turn was slow
+        /// because it ran against a full context window", and a drop across turns is the only
+        /// available evidence that pruning or a feature-boundary reset actually happened, since
+        /// opencode emits no compaction event over ACP.
+        /// </remarks>
+        public long? ContextTokens { get; private set; }
+
+        public void NoteContextUsage(AgentTurnUsage usage)
+        {
+            // A zero would be a malformed report, and letting it through would erase the last
+            // real reading for the turn.
+            if (usage.UsedTokens > 0)
+                ContextTokens = usage.UsedTokens;
+        }
 
         public void AppendText(string chunk) => Text.Append(chunk);
 

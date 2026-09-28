@@ -93,7 +93,7 @@ public class OpencodeFlowE2ETests : IDisposable
 
         // Stage start issues the full BA prompt to the real agent (writes BRS.md).
         _output.WriteLine("start release…");
-        var release = await engine.StartReleaseAsync("feat-e2e", _workspace, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-e2e", _workspace, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         _output.WriteLine("start stage…");
         var stageRun = await engine.StartStageAsync(featureId, CancellationToken.None);

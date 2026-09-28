@@ -35,8 +35,9 @@ import {
   StageRunDto,
   StoppedProcessDto,
   WorkspaceProfileDto,
-} from "./BrokerTypes";
-import { recentErrors, recordError } from "../../UI/diagnostics";
+  } from "./BrokerTypes";
+  import type { ContextCompactionResult, ContextDto } from "./ContextTypes";
+  import { recentErrors, recordError } from "../../UI/diagnostics";
 
 export default class BrokerApi {
   private async requestAsync<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -131,6 +132,22 @@ export default class BrokerApi {
 
   getCurrentTurnAsync(): Promise<ActiveTurnInfo | undefined> {
     return this.requestAsync<ActiveTurnInfo | undefined>("/api/turns/current");
+  }
+
+  // ─── context ───────────────────────────────────────────────────────────
+  //
+  // Polled, not pushed. The agent reports its context once at the end of a turn, so there is no
+  // stream of updates to subscribe to — a push transport would deliver the same single reading with
+  // extra machinery, and a smoothly filling bar would be showing motion the numbers don't support.
+
+  getContextAsync(): Promise<ContextDto> {
+    return this.requestAsync<ContextDto>("/api/context/current");
+  }
+
+  // Compacts whatever session the context belongs to. The bar is global and often has no session of
+  // its own to name — the broker knows whose context that is.
+  compactContextAsync(): Promise<ContextCompactionResult> {
+    return this.requestAsync<ContextCompactionResult>("/api/context/compact", { method: "POST" });
   }
 
   // A 404 here just means the turn already finished before the cancel arrived —
@@ -242,10 +259,10 @@ export default class BrokerApi {
 
   // ─── release endpoints ────────────────────────────────────────────────
 
-  createReleaseAsync(featureKey: string, workspacePath: string): Promise<ReleaseDto> {
+  createReleaseAsync(releaseKey: string, workspacePath: string): Promise<ReleaseDto> {
     return this.requestAsync<ReleaseDto>("/api/releases", {
       method: "POST",
-      body: JSON.stringify({ featureKey, workspacePath }),
+      body: JSON.stringify({ releaseKey, workspacePath }),
     });
   }
 

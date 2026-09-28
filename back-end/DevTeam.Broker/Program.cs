@@ -123,7 +123,12 @@ public partial class Program
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
-        builder.Services.AddSingleton<IAcpProcess>(sp =>
+
+        // The ACP process and the agent spoke are both created on first use, never on resolution.
+        // They sit on the dependency chain of the workflow engine, so an eager factory here made
+        // every read-only endpoint (GET /api/releases, /api/hotfixes, ...) launch the agent and
+        // answer 500 whenever the launch failed.
+        builder.Services.AddSingleton<IAcpProcess>(sp => new DeferredAcpProcess(() =>
         {
             var exe = identity.OpenCodePath
                 ?? throw new InvalidOperationException(
@@ -131,12 +136,36 @@ public partial class Program
                     $"(npm install -g opencode-ai, or winget install opencode), or set OPENCODE_PATH. " +
                     $"Searched: {string.Join(", ", identity.OpenCodeSearchedDirectories)}");
             var logger = sp.GetRequiredService<ILogger<Program>>();
+            // Logged at Information because this is the difference between "the CLI is missing" and
+            // "the CLI was found but Windows refused to launch it" — the two look identical from the
+            // outside otherwise, and the second one used to surface only as an opaque 500.
+            var launch = OpenCodePathResolver.ResolveLaunchTarget(exe);
+            logger.LogInformation(
+                "launching opencode: discovered={Discovered} launchTarget={LaunchTarget} ({Outcome}) cwd={Cwd}",
+                exe,
+                launch.Path,
+                launch.Resolved ? "symlink resolved" : launch.UnresolvedReason,
+                Environment.CurrentDirectory);
+            // Which compaction config the child will actually run with. The agent inherits this
+            // process's environment, so an OPENCODE_CONFIG_CONTENT set here is one the policy
+            // deliberately steps aside for — logging it is the only way to tell "prune is on" from
+            // "prune was requested but something else won".
+            logger.LogInformation(
+                "opencode compaction: prune=true reserved={Reserved} source={Source}",
+                CompactionPolicy.ReservedTokens,
+                string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(CompactionPolicy.EnvironmentVariable))
+                    ? "devteam policy"
+                    : "inherited " + CompactionPolicy.EnvironmentVariable);
             // Stderr is drained by the process wrapper regardless; forwarding it here means the
             // agent's own complaints ("stream error: rate limit exceeded") land in our log too.
-            return OpencodeAcpProcess.Create(exe, ["acp"], line => logger.LogDebug("opencode: {Line}", line));
-        });
+            return AcpProcessLaunch.Create(
+                exe,
+                ["acp"],
+                line => logger.LogDebug("opencode: {Line}", line));
+        }));
         builder.Services.AddSingleton<IPermissionPolicy, WorkspaceScopedPermissionPolicy>();
-        builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
+        builder.Services.AddSingleton<IAgentSpoke>(sp => new LazyAgentSpoke(() =>
+            new OpencodeAcpSpoke(sp.GetRequiredService<IAcpProcess>())));
         builder.Services.AddSingleton<ActiveTurnTracker>();
         builder.Services.AddSingleton<BrokerCoordinator>();
         builder.Services.AddSingleton<IWorkflowCoordinator>(sp => sp.GetRequiredService<BrokerCoordinator>());
@@ -172,6 +201,10 @@ public partial class Program
             sp.GetRequiredService<IRepomixRunner>(),
             sp.GetRequiredService<IGitProbe>(),
             sp.GetService<ILogger<RepoContextService>>()));
+        // Runs first of the hosted services: every run must be classified (GatesRunning healed,
+        // lost turns escalated) before any background worker or incoming request can touch them.
+        builder.Services.AddSingleton<WorkflowCrashRecoverer>();
+        builder.Services.AddHostedService<WorkflowCrashRecoveryService>();
         builder.Services.AddHostedService<RepoContextWorker>();
         builder.Services.AddHostedService<MetricsRetentionService>();
 

@@ -59,7 +59,7 @@ Log "Broker ready v$($health.version)"
 # --- 5. Create release ---
 Log "Creating release..."
 $release = Invoke-RestMethod -Uri "$BaseUrl/api/releases" -Method POST -ContentType "application/json" `
-    -Body '{"featureKey":"smoke-test","workspacePath":"C:\\work\\smoke"}'
+    -Body '{"releaseKey":"smoke-test","workspacePath":"C:\\work\\smoke"}'
 $rid = $release.id
 Log "Created: $rid  status=$($release.status)"
 if ($release.status -ne "InProgress") { Fail "Expected InProgress" }

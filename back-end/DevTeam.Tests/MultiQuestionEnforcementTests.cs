@@ -163,7 +163,7 @@ public class MultiQuestionEnforcementTests : IDisposable
     {
         _coordinator.UserTurnReply = "What should the login form do?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -178,7 +178,7 @@ public class MultiQuestionEnforcementTests : IDisposable
     {
         _coordinator.UserTurnReply = "What should it do? And who is the end user?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -205,7 +205,7 @@ public class MultiQuestionEnforcementTests : IDisposable
         using var workspace = new TempWorkspace();
         _coordinator.UserTurnReply = "What should the login form do?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -226,7 +226,7 @@ public class MultiQuestionEnforcementTests : IDisposable
         using var workspace = new TempWorkspace();
         _coordinator.UserTurnReply = "What should the login form do?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", workspace.Path, CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace.Path, CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -254,7 +254,7 @@ public class MultiQuestionEnforcementTests : IDisposable
     {
         _coordinator.UserTurnReply = "What should it do? And who is the end user?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -270,7 +270,7 @@ public class MultiQuestionEnforcementTests : IDisposable
     {
         _coordinator.UserTurnReply = "What should the login form do?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -288,7 +288,7 @@ public class MultiQuestionEnforcementTests : IDisposable
         // "or" phrasing partway through silently kills the quick-reply buttons for the rest of it.
         _coordinator.UserTurnReply = "What should the login form do?";
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -304,7 +304,7 @@ public class MultiQuestionEnforcementTests : IDisposable
         _coordinator.UserTurnReply = "Do you want A? Or B? Or C?";
         _coordinator.ReplyMultiQuestionToCorrections = true;
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -321,7 +321,7 @@ public class MultiQuestionEnforcementTests : IDisposable
         _coordinator.CorrectionReturn = new PromptResponse(
             Guid.NewGuid(), "max_calls_reached", 7, 3, 10);
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 
@@ -380,6 +380,14 @@ internal sealed class PersistingFakeCoordinator : IWorkflowCoordinator
 
     public Task<string> SetModeAsync(Guid sessionId, string modeId, CancellationToken ct)
         => Task.FromResult(modeId);
+
+    public List<string> FeatureBoundaryChecks { get; } = [];
+
+    public Task<FeatureContextReset?> ResetContextOnFeatureChangeAsync(Guid sessionId, string featureKey, CancellationToken ct)
+    {
+        FeatureBoundaryChecks.Add(featureKey);
+        return Task.FromResult<FeatureContextReset?>(null);
+    }
 
     public Task<PromptResponse> PromptWithSessionRecoveryAsync(Guid sessionId, string text, CancellationToken ct, bool isPriming = false, string? displayText = null)
     {

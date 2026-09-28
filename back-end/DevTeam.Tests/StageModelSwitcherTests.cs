@@ -66,7 +66,7 @@ public class StageModelSwitcherTests : IDisposable
             CreateFactory(), _gateRunner, _coordinator, new RecordingBroadcaster(),
             new FakeGitService(), new WorkflowDefinitionLoader(), NullLogger<WorkflowEngine>.Instance,
             new ModelCatalogService(_coordinator), new FakeGitCredentialStore(), new ActiveTurnTracker());
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
 

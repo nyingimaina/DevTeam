@@ -67,7 +67,7 @@ public class WorkflowResilienceTests : IDisposable
     private async Task<(WorkflowEngine Engine, Guid FeatureId, Guid RunId)> DriveBaToBlockedGateAsync()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -115,7 +115,7 @@ public class WorkflowResilienceTests : IDisposable
     {
         _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Pass("gherkin")]);
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -135,7 +135,7 @@ public class WorkflowResilienceTests : IDisposable
     {
         _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Pass("gherkin")]);
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -172,7 +172,7 @@ public class WorkflowResilienceTests : IDisposable
     public async Task StartStage_WritesPromptSucceededCheckpoint()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
@@ -188,7 +188,7 @@ public class WorkflowResilienceTests : IDisposable
     {
         _gateRunner.Results.AddRange([Pass("hygiene"), Pass("map"), Pass("scaffold"), Pass("core"), Fail("REQ-004 missing Given")]);
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -232,7 +232,7 @@ public class WorkflowResilienceTests : IDisposable
     {
         _gateRunner.Results.AddRange([Pass("scaffold"), Pass("core"), Pass("map"), Pass("context"), Pass("gherkin")]);
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -254,7 +254,7 @@ public class WorkflowResilienceTests : IDisposable
     public async Task RetryStage_TargetingEarlierStage_RewindsPositionAndClearsItsSignoff()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.SendMessageAsync(featureId, "We need a login form", CancellationToken.None);
@@ -285,7 +285,7 @@ public class WorkflowResilienceTests : IDisposable
         var pipeline = new WorkflowDefinitionLoader().LoadDefault();
         var lastRole = pipeline.Pipeline[^1];
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         await using (var db = CreateFactory().CreateDbContext())
@@ -323,7 +323,7 @@ public class WorkflowResilienceTests : IDisposable
     public async Task RetryStage_UnknownTargetStageName_Throws()
     {
         var engine = CreateEngine();
-        var release = await engine.StartReleaseAsync("feat-001", @"C:\work\proj", CancellationToken.None);
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", @"C:\work\proj", CancellationToken.None);
         var featureId = release.CurrentFeatureId!.Value;
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(

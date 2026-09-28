@@ -14,4 +14,10 @@ public interface IWorkflowCoordinator
     /// </summary>
     Task<PromptResponse> PromptWithSessionRecoveryAsync(
         Guid sessionId, string text, CancellationToken ct, bool isPriming = false, string? displayText = null);
+    /// <summary>
+    /// Discards the agent's context when it still belongs to a different feature, returning what was
+    /// dropped, or null when the context already matches <paramref name="featureKey"/>.
+    /// </summary>
+    Task<FeatureContextReset?> ResetContextOnFeatureChangeAsync(
+        Guid sessionId, string featureKey, CancellationToken ct);
 }

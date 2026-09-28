@@ -151,82 +151,27 @@ public sealed class WorkflowEngine : IWorkflowEngine
         }
     }
 
-    public async Task<DevTeamRelease> StartReleaseAsync(string featureKey, string workspacePath, CancellationToken ct)
+    public async Task<DevTeamRelease> StartReleaseAsync(string releaseKey, string workspacePath, CancellationToken ct)
     {
-        var workflow = LoadWorkflow(workspacePath);
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var releaseBranch = $"release/{featureKey}";
-        var featureBranch = $"feature/{featureKey}";
-
+        // A release is now created with no features at all — the key names the release itself
+        // (and its release/<key> branch, created lazily when the first feature is added), and the
+        // user lands on an empty state from which they add their first feature. Nothing is checked
+        // out and no branch is created here, so a featureless release never disturbs whatever
+        // feature another release already has checked out in this workspace.
         var release = new DevTeamRelease
         {
             WorkspacePath = workspacePath,
-            Title = $"Release {featureKey}",
+            Title = $"Release {releaseKey}",
             Status = ReleaseStatus.InProgress,
-            BranchName = releaseBranch,
+            BranchName = $"release/{releaseKey}",
         };
-
-        var feature = new ReleaseFeature
-        {
-            Release = release,
-            Key = featureKey,
-            Title = featureKey,
-            BranchName = featureBranch,
-            Status = ReleaseFeatureStatus.InProgress,
-        };
-        release.Features.Add(feature);
-
-        foreach (var role in workflow.Pipeline)
-        {
-            if (role.Signoff is not null)
-            {
-                feature.Signoffs.Add(new ReleaseSignoff
-                {
-                    Feature = feature,
-                    StageName = role.Name,
-                    Required = true,
-                    Approved = false,
-                });
-            }
-        }
 
         db.Releases.Add(release);
         await db.SaveChangesAsync(ct);
 
-        // The workspace may already have another release's feature checked out (releases have
-        // no disk representation of their own — WorkspacePath just tells you where a release's
-        // features live, and nothing stops two releases from sharing one). Step it down before
-        // taking over the checkout, same as CreateFeatureAsync does within a single release.
-        await MarkPreviouslyActiveFeatureOnHoldAsync(db, workspacePath, ct);
-        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: feature.Id, isHotfix: false, ct);
-        release.CurrentFeatureId = feature.Id;
-
-        var position = new ReleaseFlowPosition
-        {
-            Feature = feature,
-            CurrentStageIndex = 0,
-            CurrentStageName = workflow.Pipeline[0].Name,
-        };
-        db.ReleaseFlowPositions.Add(position);
-        await db.SaveChangesAsync(ct);
-
-        feature.FlowPosition = position;
-
-        try
-        {
-            await _gitService.InitAsync(workspacePath, ct);
-            await _gitService.EnsureBranchAsync(workspacePath, releaseBranch, ct);
-            await _gitService.EnsureBranchAsync(workspacePath, featureBranch, ct);
-            _logger.LogInformation("Created git branches {ReleaseBranch}/{FeatureBranch} for release {ReleaseId}",
-                releaseBranch, featureBranch, release.Id);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to create git branches for release {ReleaseId}", release.Id);
-        }
-
-        _logger.LogInformation("Started release {ReleaseId} for feature {FeatureKey}", release.Id, featureKey);
+        _logger.LogInformation("Started release {ReleaseId} ({ReleaseKey}) with no features yet", release.Id, releaseKey);
         return release;
     }
 
@@ -241,13 +186,14 @@ public sealed class WorkflowEngine : IWorkflowEngine
     /// the hotfix branch into release.BranchName ("main" here) and pushes/deletes it — the only
     /// genuinely new step is FinalizeHotfixAsync's follow-up merge into develop.
     /// </summary>
-    public async Task<ReleaseFeature> StartHotfixAsync(string key, string workspacePath, CancellationToken ct)
+    public async Task<DevTeamRelease> StartHotfixAsync(string key, string workspacePath, CancellationToken ct)
     {
-        var workflow = LoadWorkflow(workspacePath);
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var hotfixBranch = $"hotfix/{key}";
-
+        // Same change as StartReleaseAsync: the hotfix shell is created with no features, no
+        // branches, and no checkout takeover. The key names the shell (and is only used for its
+        // title today); the first feature added later owns the feature/<key> branch and merges
+        // into main (release.BranchName) on signoff exactly as before.
         var release = new DevTeamRelease
         {
             WorkspacePath = workspacePath,
@@ -257,61 +203,11 @@ public sealed class WorkflowEngine : IWorkflowEngine
             IsHotfix = true,
         };
 
-        var hotfix = new ReleaseFeature
-        {
-            Release = release,
-            Key = key,
-            Title = key,
-            BranchName = hotfixBranch,
-            Status = ReleaseFeatureStatus.InProgress,
-        };
-        release.Features.Add(hotfix);
-
-        foreach (var role in workflow.Pipeline)
-        {
-            if (role.Signoff is not null)
-            {
-                hotfix.Signoffs.Add(new ReleaseSignoff
-                {
-                    Feature = hotfix,
-                    StageName = role.Name,
-                    Required = true,
-                    Approved = false,
-                });
-            }
-        }
-
         db.Releases.Add(release);
         await db.SaveChangesAsync(ct);
 
-        await MarkPreviouslyActiveFeatureOnHoldAsync(db, workspacePath, ct);
-        await SetActiveCheckoutAsync(db, workspacePath, releaseFeatureId: hotfix.Id, isHotfix: true, ct);
-
-        var position = new ReleaseFlowPosition
-        {
-            Feature = hotfix,
-            CurrentStageIndex = 0,
-            CurrentStageName = workflow.Pipeline[0].Name,
-        };
-        db.ReleaseFlowPositions.Add(position);
-        await db.SaveChangesAsync(ct);
-
-        hotfix.FlowPosition = position;
-
-        try
-        {
-            var checkoutMain = await _gitService.CheckoutAsync(workspacePath, "main", ct);
-            if (!checkoutMain.Success)
-                _logger.LogWarning("Failed to check out 'main' for hotfix {HotfixId}: {Message}", hotfix.Id, checkoutMain.Message);
-            await _gitService.EnsureBranchAsync(workspacePath, hotfixBranch, ct);
-            _logger.LogInformation("Created git branch {Branch} for hotfix {HotfixId}", hotfixBranch, hotfix.Id);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to create git branch for hotfix {HotfixId}", hotfix.Id);
-        }
-
-        return hotfix;
+        _logger.LogInformation("Started hotfix {ReleaseId} ({Key}) with no features yet", release.Id, key);
+        return release;
     }
 
     /// <summary>
@@ -326,18 +222,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-        var hotfix = await db.ReleaseFeatures.Include(f => f.Release)
-            .SingleOrDefaultAsync(f => f.Id == hotfixId, ct)
+        // hotfixId is the hotfix release-shell's id (a hotfix has no single feature to key off
+        // anymore — it's a release-shell exactly like a normal release, just with IsHotfix set).
+        var release = await db.Releases.Include(r => r.Features)
+            .SingleOrDefaultAsync(r => r.Id == hotfixId, ct)
             ?? throw new KeyNotFoundException($"Hotfix {hotfixId} not found.");
 
-        var release = hotfix.Release;
         if (!release.IsHotfix)
             throw new InvalidOperationException($"{hotfixId} is not a hotfix.");
-        if (hotfix.Status != ReleaseFeatureStatus.Complete)
-            throw new InvalidOperationException(
-                $"The hotfix must complete its pipeline (signed off into main) before finalizing (current status: {hotfix.Status}).");
         if (release.Status == ReleaseStatus.Released)
             throw new InvalidOperationException("This hotfix has already been finalized.");
+        if (release.Features.Count == 0 || release.Features.Any(f => f.Status != ReleaseFeatureStatus.Complete))
+            throw new InvalidOperationException(
+                "The hotfix must complete its pipeline (signed off into main) before finalizing.");
 
         await MergeReleaseIntoAsync(db, release, "develop", ct);
 
@@ -347,7 +244,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
         {
             var pushDevelop = await _gitService.PushAsync(release.WorkspacePath, "develop", authToken, ct);
             if (!pushDevelop.Success)
-                _logger.LogWarning("Push of 'develop' failed after finalizing hotfix '{Hotfix}': {Message}", hotfix.Key, pushDevelop.Message);
+                _logger.LogWarning("Push of 'develop' failed after finalizing hotfix '{Hotfix}': {Message}", release.Title, pushDevelop.Message);
         }
         else
         {
@@ -439,6 +336,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
 
         try
         {
+            // The release branch is created lazily here, at the first feature, not at release
+            // creation — a release with no features has no branches at all until now.
+            if (!release.IsHotfix)
+                await _gitService.EnsureBranchAsync(release.WorkspacePath, release.BranchName, ct);
             await _gitService.CheckoutAsync(release.WorkspacePath, release.BranchName, ct);
             await _gitService.EnsureBranchAsync(release.WorkspacePath, featureBranch, ct);
             _logger.LogInformation("Created git branch {Branch} for feature {FeatureId}", featureBranch, feature.Id);
@@ -713,8 +614,8 @@ public sealed class WorkflowEngine : IWorkflowEngine
         PromptResponse response;
         try
         {
-            response = await _coordinator.PromptWithSessionRecoveryAsync(
-                acpSessionId, modelText, agentCts.Token, displayText: text);
+            response = await _coordinator.PromptForFeatureWithAutoCompactAsync(
+                acpSessionId, feature.Key, modelText, agentCts.Token, displayText: text);
             SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
             ClearPromptFailure(stageRun);
         }
@@ -2676,7 +2577,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
         Guid acpSessionId, string prompt, ReleaseStageRun stageRun, string workspacePath, string featureKey,
         WorkflowDefinition workflow, DevTeamDbContext db, CancellationToken ct)
     {
-        var response = await _coordinator.PromptWithSessionRecoveryAsync(acpSessionId, prompt, ct, isPriming: true);
+        // The priming prompt is where a stage's work for a feature begins, so it is also where a
+        // context left over from a different feature has to go. The delegation follow-ups below
+        // stay on the same feature and are deliberately not boundary-checked.
+        var response = await _coordinator.PromptForFeatureWithAutoCompactAsync(acpSessionId, featureKey, prompt, ct, isPriming: true);
         var requestPath = ArtifactPaths.DelegateRequestPath(workspacePath, featureKey);
 
         for (var round = 0; round < MaxDelegationRoundTrips && File.Exists(requestPath); round++)

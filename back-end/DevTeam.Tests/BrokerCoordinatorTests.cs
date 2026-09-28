@@ -4,6 +4,7 @@ using DevTeam.Broker.Models;
 using DevTeam.Broker.Rpc;
 using DevTeam.Broker.Server;
 using DevTeam.Broker.Spoke;
+using DevTeam.Broker.Workflow;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -726,7 +727,391 @@ public class BrokerCoordinatorTests : IDisposable
         Assert.Empty(_broadcaster.Events);
     }
 
+    // ─── context instrumentation ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task PromptWithSessionRecovery_RecordsContextOccupancyObservedMidTurn()
+    {
+        // The agent reports how much of its context is in use mid-turn but usually omits usage from
+        // the final result, so before this the recorded ContextTokens was always null and there was
+        // no way to tell a cheap turn from one working against a full context window. The number
+        // recorded is the occupancy ("used"), not the window size, which is fixed per model and so
+        // would say nothing about how much the turn was actually paying to prefill.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":130000,\"size\":200000}");
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+
+        var result = await pending;
+
+        Assert.NotNull(result.Measurement);
+        Assert.Equal(130_000, result.Measurement!.ContextTokens);
+    }
+
+    [Fact]
+    public async Task PromptWithSessionRecovery_RecordsTheLatestContextSizeSoAShrinkingContextIsVisible()
+    {
+        // A context size that DROPS mid-turn is the only signal available that pruning or
+        // compaction actually happened: opencode has no compaction event on ACP today, so the
+        // before/after comparison has to be read off these numbers.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":130000,\"size\":200000}");
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":21000,\"size\":200000}");
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+
+        var result = await pending;
+
+        Assert.Equal(21_000, result.Measurement!.ContextTokens);
+    }
+
+    [Fact]
+    public async Task PromptWithSessionRecovery_LeavesContextSizeNullWhenTheAgentNeverReportsIt()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+
+        var result = await pending;
+
+        Assert.Null(result.Measurement!.ContextTokens);
+    }
+
+    // ─── context measurement reliability ─────────────────────────────────────
+    //
+    // opencode emits usage_update in the same millisecond as the session/prompt response, so which
+    // of the two the broker observes first is a race. Reading the context the instant the reply
+    // arrived meant the reply usually won: ContextTokens was populated on 1 turn out of 262, which
+    // is why "is the context actually being cleaned?" could not be answered from the data at all.
+    // Context also belongs to the session, not to one turn, so a reading that lands just after a
+    // turn closes must still count.
+
+    [Fact]
+    public async Task PromptWithSessionRecovery_ReadsTheSessionContextSoALaterTurnWithoutItsOwnReadingIsNotReportedAsEmpty()
+    {
+        // The agent only reports context at the end of a turn, and a turn that fails, is cancelled
+        // or is a slash command never reports one at all. Reading the number off the turn therefore
+        // reports "no context" for those turns when in fact nothing was learned — reading it off
+        // the session reports what is still true, and the staleness is visible as a missing sample
+        // rather than as a fabricated zero.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var first = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, firstId, _) = await _harness.ReadRequestAsync();
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":130000,\"size\":200000}");
+        _harness.Reply(firstId, "{\"stopReason\":\"end_turn\"}");
+        await first;
+
+        var second = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "again", CancellationToken.None);
+        var (_, secondId, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(secondId, "{\"stopReason\":\"end_turn\"}");
+
+        var result = await second;
+
+        Assert.Equal(130_000, result.Measurement!.ContextTokens);
+    }
+
+    [Fact]
+    public async Task PromptWithSessionRecovery_DoesNotHangWhenTheAgentNeverReportsContext()
+    {
+        // Guards the bounded wait the turn does to catch a usage_update racing the reply. Waiting
+        // for a notification that will never arrive would stall every errored, cancelled and
+        // slash-handled turn, so the wait has to expire and has to expire quickly.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+
+        var started = DateTime.UtcNow;
+        var completed = await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.Same(pending, completed);
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(2), "the wait for a late usage_update must stay short");
+    }
+
+    [Fact]
+    public async Task PromptWithSessionRecovery_StillRecordsAUsageUpdateThatArrivesWellAfterTheTurnClosed()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+        await pending;
+
+        // Long after the turn is over and _turn has been cleared. Events are dispatched to the
+        // active turn, and a closed turn has none, so this reading used to be discarded outright.
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":88000,\"size\":200000}");
+
+        var samples = await WaitForContextSamplesAsync(session.SessionId, 1);
+        Assert.Equal(88_000, samples[0].UsedTokens);
+    }
+
+    [Fact]
+    public async Task UsageUpdates_ArePersistedAsATimeSeriesRatherThanOnlyTheLastReading()
+    {
+        // Keeping one number per turn throws away the evidence. The shape of the curve is what
+        // distinguishes pruning working (a sawtooth) from context simply growing, so every reading
+        // is kept with the window size needed to interpret it.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.EmitSessionUpdate("ses_abc", "{\"sessionUpdate\":\"usage_update\",\"used\":1000,\"size\":200000}");
+        _harness.EmitSessionUpdate("ses_abc", "{\"sessionUpdate\":\"usage_update\",\"used\":12000,\"size\":200000}");
+        _harness.EmitSessionUpdate("ses_abc", "{\"sessionUpdate\":\"usage_update\",\"used\":30000,\"size\":200000}");
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+        await pending;
+
+        var samples = await WaitForContextSamplesAsync(session.SessionId, 3);
+        Assert.Equal([1000, 12_000, 30_000], samples.Select(s => s.UsedTokens).ToArray());
+        Assert.All(samples, s => Assert.Equal(200_000, s.ContextSize));
+        Assert.All(samples, s => Assert.Equal(ContextSampleSource.AgentUsage, s.Source));
+    }
+
+    [Fact]
+    public async Task UsageUpdate_KeepsTheCumulativeCostOpenCodeReports()
+    {
+        // The cost is parsed off the wire and then dropped on the floor, which made it impossible
+        // to tell an expensive turn from a cheap one without cross-referencing the billing site.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, idRaw, _) = await _harness.ReadRequestAsync();
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":42000,\"size\":200000,"
+            + "\"cost\":{\"amount\":1.75,\"currency\":\"USD\"}}");
+        _harness.Reply(idRaw, "{\"stopReason\":\"end_turn\"}");
+        await pending;
+
+        var samples = await WaitForContextSamplesAsync(session.SessionId, 1);
+        Assert.Equal(1.75m, samples[0].CostAmount);
+        Assert.Equal("USD", samples[0].CostCurrency);
+    }
+
+    [Fact]
+    public async Task FeatureBoundaryReset_RecordsAZeroedSampleSoTheDropIsVisibleAfterwards()
+    {
+        // The feature-boundary reset is the one moment the context is known to have been emptied
+        // outright. Writing it down is what lets a later query prove the reset happened instead of
+        // inferring it from a drop that pruning could equally have caused.
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "feature-alpha");
+        _harness.EmitSessionUpdate("ses_abc",
+            "{\"sessionUpdate\":\"usage_update\",\"used\":120000,\"size\":200000}");
+
+        var pending = coordinator.ResetContextOnFeatureChangeAsync(
+            session.SessionId, "feature-beta", CancellationToken.None);
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, FreshSessionResultJson);
+        await ReplyToAsync("session/set_model");
+        await ReplyToAsync("session/set_mode");
+        await pending;
+
+        var samples = await WaitForContextSamplesAsync(session.SessionId, 2);
+        var reset = Assert.Single(samples, s => s.Source == ContextSampleSource.BoundaryReset);
+        Assert.Equal(0, reset.UsedTokens);
+        Assert.Equal("feature-beta", reset.FeatureKey);
+    }
+
+    private async Task<List<ContextUsageSample>> WaitForContextSamplesAsync(
+        Guid sessionId, int expected, int timeoutMs = 5000)
+    {
+        // Samples are written off the event thread, so an eventually-consistent wait is the honest
+        // assertion here rather than an artificial sleep.
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (true)
+        {
+            await using var db = CreateFactory().CreateDbContext();
+            var samples = db.ContextUsageSamples
+                .Where(s => s.SessionId == sessionId)
+                .OrderBy(s => s.Id)
+                .ToList();
+            if (samples.Count >= expected)
+                return samples;
+            if (DateTime.UtcNow >= deadline)
+                return samples;
+            await Task.Delay(25);
+        }
+    }
+
+    // ─── feature context boundary ────────────────────────────────────────────
+
+    [Fact]
+    public async Task ResetContextOnFeatureChange_SameFeature_KeepsTheSessionAndSpendsNoAgentCall()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "feature-alpha");
+
+        var reset = await coordinator
+            .ResetContextOnFeatureChangeAsync(session.SessionId, "feature-alpha", CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(reset);
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("ses_abc", detail!.AcpSessionId);
+    }
+
+    [Fact]
+    public async Task ResetContextOnFeatureChange_FeatureMatchIsCaseInsensitive()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "Feature-Alpha");
+
+        var reset = await coordinator
+            .ResetContextOnFeatureChangeAsync(session.SessionId, "feature-alpha", CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(reset);
+    }
+
+    [Fact]
+    public async Task ResetContextOnFeatureChange_NeverUsedSession_HasNothingToDiscard()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+
+        var reset = await coordinator
+            .ResetContextOnFeatureChangeAsync(session.SessionId, "feature-beta", CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(reset);
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("ses_abc", detail!.AcpSessionId);
+    }
+
+    [Fact]
+    public async Task ResetContextOnFeatureChange_DifferentFeature_OpensAFreshAgentSession()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "feature-alpha");
+
+        var pending = coordinator.ResetContextOnFeatureChangeAsync(
+            session.SessionId, "feature-beta", CancellationToken.None);
+
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, FreshSessionResultJson);
+        await ReplyToAsync("session/set_model");
+        await ReplyToAsync("session/set_mode");
+
+        var reset = await pending;
+        Assert.NotNull(reset);
+        Assert.Equal("feature-alpha", reset!.PreviousFeatureKey);
+        Assert.Equal("ses_fresh", reset.AcpSessionId);
+
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Equal("ses_fresh", detail!.AcpSessionId);
+    }
+
+    [Fact]
+    public async Task ResetContextOnFeatureChange_PreservesTheStoredTranscript()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "feature-alpha");
+
+        var prompt = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+        var (_, promptId, _) = await _harness.ReadRequestAsync();
+        _harness.Reply(promptId, "{\"stopReason\":\"end_turn\"}");
+        await prompt;
+
+        var pending = coordinator.ResetContextOnFeatureChangeAsync(
+            session.SessionId, "feature-beta", CancellationToken.None);
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, FreshSessionResultJson);
+        await ReplyToAsync("session/set_model");
+        await ReplyToAsync("session/set_mode");
+        await pending;
+
+        // Only the model's context is reset — DevTeam's own history must survive it, which is the
+        // whole reason a reset is safe to do automatically.
+        var detail = await coordinator.GetSessionDetailAsync(session.SessionId, CancellationToken.None);
+        Assert.Contains(detail!.Messages, m => m.Role == "user" && m.BodyText == "hello");
+    }
+
+    [Fact]
+    public async Task PromptForFeature_ResetsTheContextWhenTheFeatureChanges()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "feature-alpha");
+
+        var pending = FeatureContextBoundary.PromptForFeatureAsync(
+            coordinator, session.SessionId, "feature-beta", "kick off", CancellationToken.None);
+
+        var (newSessionMethod, newSessionId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/new", newSessionMethod);
+        _harness.Reply(newSessionId, FreshSessionResultJson);
+        await ReplyToAsync("session/set_model");
+        await ReplyToAsync("session/set_mode");
+
+        var (promptMethod, promptId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", promptMethod);
+        _harness.Reply(promptId, "{\"stopReason\":\"end_turn\"}");
+
+        var result = await pending;
+        Assert.Equal("end_turn", result.StopReason);
+    }
+
+    [Fact]
+    public async Task PromptForFeature_SameFeature_PromptsWithoutOpeningANewSession()
+    {
+        await using var coordinator = CreateCoordinator();
+        var session = await CreateSessionAsync(coordinator);
+        await RecordTurnFeatureAsync(session.SessionId, "feature-alpha");
+
+        var pending = FeatureContextBoundary.PromptForFeatureAsync(
+            coordinator, session.SessionId, "feature-alpha", "keep going", CancellationToken.None);
+
+        var (promptMethod, promptId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", promptMethod);
+        _harness.Reply(promptId, "{\"stopReason\":\"end_turn\"}");
+
+        var result = await pending;
+        Assert.Equal("end_turn", result.StopReason);
+    }
+
     // ─── helpers ─────────────────────────────────────────────────────────────
+
+    private async Task ReplyToAsync(string expectedMethod)
+    {
+        var (method, idRaw, _) = await _harness.ReadRequestAsync();
+        Assert.Equal(expectedMethod, method);
+        _harness.Reply(idRaw, "{}");
+    }
+
+    private async Task RecordTurnFeatureAsync(Guid sessionId, string featureKey)
+    {
+        await using var db = CreateFactory().CreateDbContext();
+        db.TurnMetrics.Add(new TurnMetric { SessionId = sessionId, FeatureKey = featureKey });
+        await db.SaveChangesAsync();
+    }
 
     private readonly ActiveTurnTracker _turnTracker = new();
 
@@ -764,6 +1149,15 @@ public class BrokerCoordinatorTests : IDisposable
         _harness.Reply(idRaw, NewSessionResultJson);
         return await pending;
     }
+
+    private const string FreshSessionResultJson =
+        "{\"sessionId\":\"ses_fresh\",\"configOptions\":["
+        + "{\"id\":\"model\",\"name\":\"Model\",\"category\":\"model\",\"type\":\"select\","
+        + "\"currentValue\":\"opencode/big-pickle\","
+        + "\"options\":[{\"value\":\"opencode/big-pickle\",\"name\":\"OpenCode Big Pickle\"}]},"
+        + "{\"id\":\"mode\",\"name\":\"Mode\",\"category\":\"provider\",\"type\":\"select\","
+        + "\"currentValue\":\"build\","
+        + "\"options\":[{\"value\":\"build\",\"name\":\"Build\"},{\"value\":\"plan\",\"name\":\"Plan\"}]}]}";
 
     private const string InitializeResultJson =
         "{\"protocolVersion\":1,"
