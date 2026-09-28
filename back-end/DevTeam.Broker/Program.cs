@@ -123,7 +123,11 @@ public partial class Program
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
-        builder.Services.AddSingleton<IAcpProcess>(sp =>
+        // The ACP process and the agent spoke are both created on first use, never on resolution.
+        // They sit on the dependency chain of the workflow engine, so an eager factory here made
+        // every read-only endpoint (GET /api/releases, /api/hotfixes, ...) launch the agent and
+        // answer 500 whenever the launch failed.
+        builder.Services.AddSingleton<IAcpProcess>(sp => new DeferredAcpProcess(() =>
         {
             var exe = identity.OpenCodePath
                 ?? throw new InvalidOperationException(
@@ -131,12 +135,19 @@ public partial class Program
                     $"(npm install -g opencode-ai, or winget install opencode), or set OPENCODE_PATH. " +
                     $"Searched: {string.Join(", ", identity.OpenCodeSearchedDirectories)}");
             var logger = sp.GetRequiredService<ILogger<Program>>();
+            var launch = OpenCodePathResolver.ResolveLaunchTarget(exe);
+            logger.LogInformation(
+                "launching opencode: discovered={Discovered} launchTarget={LaunchTarget} ({Outcome})",
+                exe,
+                launch.Path,
+                launch.Resolved ? "symlink resolved" : launch.UnresolvedReason);
             // Stderr is drained by the process wrapper regardless; forwarding it here means the
             // agent's own complaints ("stream error: rate limit exceeded") land in our log too.
-            return OpencodeAcpProcess.Create(exe, ["acp"], line => logger.LogDebug("opencode: {Line}", line));
-        });
+            return AcpProcessLaunch.Create(exe, ["acp"], line => logger.LogDebug("opencode: {Line}", line));
+        }));
         builder.Services.AddSingleton<IPermissionPolicy, WorkspaceScopedPermissionPolicy>();
-        builder.Services.AddSingleton<IAgentSpoke, OpencodeAcpSpoke>();
+        builder.Services.AddSingleton<IAgentSpoke>(sp => new LazyAgentSpoke(() =>
+            new OpencodeAcpSpoke(sp.GetRequiredService<IAcpProcess>())));
         builder.Services.AddSingleton<ActiveTurnTracker>();
         builder.Services.AddSingleton<BrokerCoordinator>();
         builder.Services.AddSingleton<IWorkflowCoordinator>(sp => sp.GetRequiredService<BrokerCoordinator>());

@@ -52,7 +52,25 @@ public sealed class AcpStalledException : TimeoutException
 }
 
 /// <summary>
-/// Raised when the model provider itself refused the request — a rate limit, an unavailable
+/// Raised when the agent process could not be started at all — nothing was ever spoken to.
+///
+/// <para>
+/// Distinct from <see cref="AcpDisconnectedException"/>: that is an agent that ran and then went
+/// away, this is one that never existed. The distinction matters to the caller, because this is
+/// fixable on the user's machine (reinstall the CLI, repoint <c>OPENCODE_PATH</c>) whereas a
+/// disconnect is usually just a retry — and it is the reason this carries its own type at all.
+/// Without it the launch failure had no meaning anywhere in the API and surfaced as a bare 500.
+/// </para>
+/// </summary>
+public sealed class AgentLaunchException : Exception
+{
+    public AgentLaunchException(string message, Exception inner)
+        : base(message, inner)
+    {
+    }
+}
+
+/// <summary>Raised when the model provider itself refused the request — a rate limit, an unavailable
 /// endpoint, an unknown model. Carries a sentence the user can act on, because the whole point is
 /// to stop saying "the agent stopped responding" when the real answer is "the AI service is busy".
 /// </summary>

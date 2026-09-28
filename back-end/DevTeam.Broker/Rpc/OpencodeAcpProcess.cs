@@ -48,12 +48,12 @@ public sealed class OpencodeAcpProcess : IAcpProcess
             : value;
 
     public OpencodeAcpProcess(string executable, IReadOnlyList<string> args, Action<string>? onStderr = null)
-        : this(WithArguments(NewStartInfo(executable), args), onStderr)
+        : this(WithCompactionPolicy(WithArguments(NewStartInfo(executable), args)), onStderr)
     {
     }
 
     public OpencodeAcpProcess(string executable, string rawArguments, Action<string>? onStderr = null)
-        : this(WithRawArguments(NewStartInfo(executable), rawArguments), onStderr)
+        : this(WithCompactionPolicy(WithRawArguments(NewStartInfo(executable), rawArguments)), onStderr)
     {
     }
 
@@ -75,9 +75,13 @@ public sealed class OpencodeAcpProcess : IAcpProcess
         _ = Task.Run(() => DrainStandardErrorAsync(onStderr));
     }
 
+    // Every launch funnels through here, so this is where a reparse point is unwrapped. winget
+    // links the CLI into %LOCALAPPDATA%\Microsoft\WinGet\Links, and CreateProcess rejects an image
+    // path that traverses a link (Win32Exception 448, "untrusted mount point"), which failed the
+    // whole broker whenever that install was detected.
     private static ProcessStartInfo NewStartInfo(string executable) => new()
     {
-        FileName = executable,
+        FileName = OpenCodePathResolver.LaunchTarget(executable),
         RedirectStandardInput = true,
         RedirectStandardOutput = true,
         RedirectStandardError = true,
@@ -97,6 +101,15 @@ public sealed class OpencodeAcpProcess : IAcpProcess
     private static ProcessStartInfo WithRawArguments(ProcessStartInfo startInfo, string rawArguments)
     {
         startInfo.Arguments = rawArguments;
+        return startInfo;
+    }
+
+    // Every agent child gets the compaction policy, so no launch path can end up running the agent
+    // with opencode's defaults (prune off, auto-compaction deferred to overflow). Set on the child
+    // environment rather than a config file so it cannot affect anything else on the machine.
+    private static ProcessStartInfo WithCompactionPolicy(ProcessStartInfo startInfo)
+    {
+        CompactionPolicy.Apply(startInfo);
         return startInfo;
     }
 
