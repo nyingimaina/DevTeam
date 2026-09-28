@@ -123,7 +123,6 @@ public partial class Program
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
-
         // The ACP process and the agent spoke are both created on first use, never on resolution.
         // They sit on the dependency chain of the workflow engine, so an eager factory here made
         // every read-only endpoint (GET /api/releases, /api/hotfixes, ...) launch the agent and

@@ -407,32 +407,62 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
-    public async Task FsCleanup_NoMatches_ReturnsEmptyList()
+    public async Task FsCleanup_NoMatches_ReturnsEmptyResult()
     {
-        _factory.CleanupService.Result = [];
-        var client = _factory.CreateClient();
+    _factory.CleanupService.Result = new CleanupResultDto([], []);
+    var client = _factory.CreateClient();
 
-        var response = await client.PostAsJsonAsync("/api/fs/cleanup", new { workspacePath = @"D:\apps\tictactoe" });
+    var response = await client.PostAsJsonAsync("/api/fs/cleanup", new { workspacePath = @"D:\apps\tictactoe" });
 
-        response.EnsureSuccessStatusCode();
-        var stopped = await response.Content.ReadFromJsonAsync<StoppedProcessDto[]>();
-        Assert.Empty(stopped!);
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<CleanupResultDto>(JsonOptions);
+    Assert.Empty(result!.Stopped);
+    Assert.Empty(result.RequiresApproval);
     }
 
     [Fact]
-    public async Task FsCleanup_WithMatches_ReturnsStoppedProcesses()
+    public async Task FsCleanup_WithMatches_ReturnsStoppedAndProcessIdsForApproval()
     {
-        _factory.CleanupService.Result = [new StoppedProcessDto(4242, "node.exe")];
-        var client = _factory.CreateClient();
+    _factory.CleanupService.Result = new CleanupResultDto(
+    [new StoppedProcessDto(4242, "node.exe")],
+    [new PendingStopDto(4243, "OpenCode.exe", @"C:\tools\OpenCode.exe", null, "An OpenCode process DevTeam did not start.")]);
+    var client = _factory.CreateClient();
 
-        var response = await client.PostAsJsonAsync("/api/fs/cleanup", new { workspacePath = @"D:\apps\tictactoe" });
+    var response = await client.PostAsJsonAsync("/api/fs/cleanup", new { workspacePath = @"D:\apps\tictactoe" });
 
-        response.EnsureSuccessStatusCode();
-        var stopped = await response.Content.ReadFromJsonAsync<StoppedProcessDto[]>();
-        Assert.Single(stopped!);
-        Assert.Equal(4242, stopped![0].ProcessId);
-        Assert.Equal("node.exe", stopped[0].Name);
-        Assert.Equal(@"D:\apps\tictactoe", _factory.CleanupService.LastWorkspacePath);
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<CleanupResultDto>(JsonOptions);
+    Assert.Single(result!.Stopped);
+    Assert.Equal(4242, result.Stopped[0].ProcessId);
+    var pending = Assert.Single(result.RequiresApproval);
+    Assert.Equal(4243, pending.ProcessId);
+    Assert.Equal(@"D:\apps\tictactoe", _factory.CleanupService.LastWorkspacePath);
+    }
+
+    [Fact]
+    public async Task ApproveStop_StopsTheApprovedProcessIds()
+    {
+    _factory.CleanupService.StoppedToReturnOnApprove = [new StoppedProcessDto(4243, "OpenCode.exe")];
+    var client = _factory.CreateClient();
+
+    var response = await client.PostAsJsonAsync("/api/fs/cleanup/approve", new { processIds = new[] { 4243 } });
+
+    response.EnsureSuccessStatusCode();
+    var stopped = await response.Content.ReadFromJsonAsync<StoppedProcessDto[]>(JsonOptions);
+    Assert.Single(stopped!);
+    Assert.Equal(4243, stopped![0].ProcessId);
+    Assert.Equal([4243], _factory.CleanupService.LastApprovedProcessIds);
+    }
+
+    [Fact]
+    public async Task ApproveStop_EmptyList_ReturnsBadRequest()
+    {
+    // The fixture fake is shared across this suite's tests, so clear the recorded call first.
+    _factory.CleanupService.LastApprovedProcessIds = null;
+    var client = _factory.CreateClient();
+    var response = await client.PostAsJsonAsync("/api/fs/cleanup/approve", new { processIds = Array.Empty<int>() });
+    Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    Assert.Null(_factory.CleanupService.LastApprovedProcessIds);
     }
 
     [Fact]
@@ -1568,14 +1598,22 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
     public sealed class FakeWorkspaceProcessCleanupService : IWorkspaceProcessCleanupService
     {
-        public IReadOnlyList<StoppedProcessDto> Result { get; set; } = [];
-        public string? LastWorkspacePath { get; private set; }
+    public CleanupResultDto Result { get; set; } = new([], []);
+    public IReadOnlyList<StoppedProcessDto> StoppedToReturnOnApprove { get; set; } = [];
+    public string? LastWorkspacePath { get; private set; }
+    public IReadOnlyList<int>? LastApprovedProcessIds { get; set; }
 
-        public IReadOnlyList<StoppedProcessDto> CleanupWorkspace(string workspacePath)
-        {
-            LastWorkspacePath = workspacePath;
-            return Result;
-        }
+    public Task<CleanupResultDto> CleanupWorkspace(string workspacePath)
+    {
+    LastWorkspacePath = workspacePath;
+    return Task.FromResult(Result);
+    }
+
+    public Task<IReadOnlyList<StoppedProcessDto>> StopApproved(IReadOnlyList<int> processIds)
+    {
+    LastApprovedProcessIds = processIds;
+    return Task.FromResult(StoppedToReturnOnApprove);
+    }
     }
 
     public sealed class FakeAgentSpoke : IAgentSpoke

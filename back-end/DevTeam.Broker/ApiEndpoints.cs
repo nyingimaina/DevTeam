@@ -778,13 +778,24 @@ public static class ApiEndpoints
             return Results.NoContent();
         });
 
-        app.MapPost("/api/fs/cleanup", (CleanupWorkspaceRequest request, HttpContext ctx) =>
+        app.MapPost("/api/fs/cleanup", async (CleanupWorkspaceRequest request, HttpContext ctx) =>
         {
             if (string.IsNullOrWhiteSpace(request.WorkspacePath) || !Path.IsPathRooted(request.WorkspacePath))
                 return Results.BadRequest("An absolute WorkspacePath is required.");
 
             var cleanup = ctx.RequestServices.GetRequiredService<IWorkspaceProcessCleanupService>();
-            return Results.Ok(cleanup.CleanupWorkspace(request.WorkspacePath));
+            return Results.Ok(await cleanup.CleanupWorkspace(request.WorkspacePath));
+        });
+
+        // Stopping a process the sweep collected as needing approval. Approval is per-list: only
+        // pids the sweep itself surfaced can be stopped — the route is never a kill-anyone door.
+        app.MapPost("/api/fs/cleanup/approve", async (ApproveStopRequest request, HttpContext ctx) =>
+        {
+            if (request.ProcessIds.Count == 0)
+                return Results.BadRequest("At least one process id is required.");
+
+            var cleanup = ctx.RequestServices.GetRequiredService<IWorkspaceProcessCleanupService>();
+            return Results.Ok(await cleanup.StopApproved(request.ProcessIds));
         });
 
         // ─── active turn (the one agent turn the broker can run at a time) ────

@@ -1,8 +1,10 @@
 import React from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import App from "./App";
 
-const cleanupWorkspaceAsync = jest.fn().mockResolvedValue([]);
+const cleanupWorkspaceAsync = jest.fn().mockResolvedValue({ stopped: [], requiresApproval: [] });
+const approveProcessStopAsync = jest.fn().mockResolvedValue([]);
 
 jest.mock("./Chat/Data/BrokerApi", () => {
   return {
@@ -13,11 +15,15 @@ jest.mock("./Chat/Data/BrokerApi", () => {
       listReleasesAsync: jest.fn().mockResolvedValue([]),
       listFileSystemRootsAsync: jest.fn().mockResolvedValue([]),
       cleanupWorkspaceAsync,
+      approveProcessStopAsync,
       getCurrentTurnAsync: jest.fn().mockResolvedValue(undefined),
       cancelCurrentTurnAsync: jest.fn().mockResolvedValue(true),
     })),
   };
 });
+
+// `userAction` keeps the clicks readable next to fireEvent (same library underneath).
+const userAction = userEvent;
 
 jest.mock("./Project/Navigation/ProjectNavigator", () => {
   function ProjectNavigatorMock({ workspacePath }: { workspacePath?: string }) {
@@ -88,7 +94,9 @@ jest.mock("jattac.libs.web.zest-sidekick-menu", () => {
 beforeEach(() => {
   localStorage.clear();
   cleanupWorkspaceAsync.mockReset();
-  cleanupWorkspaceAsync.mockResolvedValue([]);
+  cleanupWorkspaceAsync.mockResolvedValue({ stopped: [], requiresApproval: [] });
+  approveProcessStopAsync.mockReset();
+  approveProcessStopAsync.mockResolvedValue([]);
 });
 
 describe("App", () => {
@@ -197,19 +205,73 @@ describe("App", () => {
     });
   });
 
-  it("shows a notice listing stopped processes after opening a project", async () => {
-    cleanupWorkspaceAsync.mockResolvedValue([
+it("shows a notice listing stopped processes after opening a project", async () => {
+  cleanupWorkspaceAsync.mockResolvedValue({
+    stopped: [
       { processId: 1, name: "node.exe" },
       { processId: 2, name: "GamePlay.Api.exe" },
-    ]);
-    render(<App />);
-
-    fireEvent.click(screen.getByText("Pick"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Stopped 2 processes from my-project: node.exe, GamePlay.Api.exe")).toBeInTheDocument();
-    });
+    ],
+    requiresApproval: [],
   });
+  render(<App />);
+
+  fireEvent.click(screen.getByText("Pick"));
+
+  await waitFor(() => {
+    expect(screen.getByText("Stopped 2 processes from my-project: node.exe, GamePlay.Api.exe")).toBeInTheDocument();
+  });
+});
+
+it("asks for approval instead of stopping processes it does not own", async () => {
+  cleanupWorkspaceAsync.mockResolvedValue({
+    stopped: [],
+    requiresApproval: [
+      {
+        processId: 501,
+        name: "OpenCode.exe",
+        executablePath: "C:\\tools\\OpenCode.exe",
+        commandLine: null,
+        reason: "An OpenCode process DevTeam did not start (pid 501).",
+      },
+    ],
+  });
+  render(<App />);
+
+  fireEvent.click(screen.getByText("Pick"));
+
+  const notice = await screen.findByTestId("process-approval-notice");
+  expect(notice).toBeInTheDocument();
+  expect(screen.getByText(/did not start \(pid 501\)/i)).toBeInTheDocument();
+  expect(screen.getByTestId("process-approval-stop-btn")).toBeInTheDocument();
+
+  // Killing is never automatic: the confirm click is what stops it.
+  expect(approveProcessStopAsync).not.toHaveBeenCalled();
+});
+
+it("sends exactly the listed pids when the user approves the stop", async () => {
+  approveProcessStopAsync.mockResolvedValue([{ processId: 501, name: "OpenCode.exe" }]);
+  cleanupWorkspaceAsync.mockResolvedValue({
+    stopped: [],
+    requiresApproval: [
+      {
+        processId: 501,
+        name: "OpenCode.exe",
+        executablePath: "C:\\tools\\OpenCode.exe",
+        commandLine: null,
+        reason: "An OpenCode process DevTeam did not start (pid 501).",
+      },
+    ],
+  });
+  render(<App />);
+
+  fireEvent.click(screen.getByText("Pick"));
+  fireEvent.click(await screen.findByTestId("process-approval-stop-btn"));
+  await waitFor(() => expect(approveProcessStopAsync).toHaveBeenCalledWith([501]));
+
+  expect(
+    await screen.findByTestId("process-approval-result"),
+  ).toHaveTextContent(/Stopped 1 process: OpenCode\.exe/i);
+});
 
   it("shows no notice when the sweep finds nothing", async () => {
     render(<App />);

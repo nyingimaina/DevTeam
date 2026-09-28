@@ -331,6 +331,8 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         // Set when the agent's own log shows the model provider refused the request. opencode
         // never reports this over ACP, so without reading its log the turn would just hang.
         ProviderFailure? providerFailure = null;
+        List<CancellationTokenSource> replacedTurnCtses = [];
+        CancellationTokenSource? turnCts = null;
         using var watchdogStop = new CancellationTokenSource();
         var promptStopwatch = new System.Diagnostics.Stopwatch();
         try        {
@@ -359,18 +361,22 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             _context.BeginTurn();
             var turnStartedAt = DateTimeOffset.UtcNow;
 
-            using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            turnCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             using var turnScope = _turnTracker.Begin(sessionId, acpSessionId, displayText ?? text, turnCts, isPriming);
 
             // Watchdog: a healthy turn emits a steady trickle of events. If the stream goes
             // completely silent for StallAfter, treat it as stalled and end the turn now —
             // otherwise it would wait out the 30-minute request budget, which the user
             // experiences as the app hanging with no explanation.
-            _ = WatchForStallAsync(sessionId, watchdogStop.Token, () =>
+            void StartStallWatch()
             {
-                stalled = true;
-                turnCts.Cancel();
-            });
+                _ = WatchForStallAsync(sessionId, watchdogStop.Token, () =>
+                {
+                    stalled = true;
+                    turnCts.Cancel();
+                });
+            }
+            StartStallWatch();
 
             // The agent's own log is the only place a provider refusal shows up; watching it lets
             // the turn end with the real reason in seconds instead of waiting out the stall
@@ -415,6 +421,7 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             AgentPromptResult result;
             var triedModels = new List<string>();
             var recreations = 0;
+            var stallSwitches = 0;
             while (true)
             {
                 using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(turnCts.Token);
@@ -450,6 +457,32 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
 
                     acpSessionId = await RecreateAcpSessionAsync(sessionId, workspacePath, turnCts.Token);
                     _turn = new TurnCollector(sessionId);
+                }
+                catch (OperationCanceledException) when (stalled)
+                {
+                    var stallEx = new AcpStalledException(_stallAfter);
+                    _logger.LogWarning(
+                        "Turn for session {SessionId} produced no output for {Minutes} minutes; treating it as stalled.",
+                        sessionId, _stallAfter.TotalMinutes);
+                    var silenceRefusal = new ProviderUnavailableException(
+                        stallEx.Message, modelId: null, isRateLimit: false);
+                    // None — not turnCts.Token: the watchdog already cancelled that token, and the
+                    // switch decision (model list + persistence) must not inherit that cancellation.
+                    if (stallSwitches >= 1
+                       || !await TrySwitchToNextModelAsync(sessionId, workspacePath, acpSessionId, triedModels, silenceRefusal, CancellationToken.None))
+                    {
+                        throw;
+                    }
+
+                    // Fresh turn token (the old one was cancelled by the watchdog) and a fresh
+                    // watchdog, so the retry is judged on its own silence, not the old one's.
+                    stallSwitches++;
+                    stalled = false;
+                    var replaced = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    replacedTurnCtses.Add(turnCts);
+                    turnCts = replaced;
+                    StartStallWatch();
+                    _turnTracker.Record(TurnActivityKind.Status, "The model went silent — retrying on the next candidate");
                 }
                 catch (ProviderUnavailableException ex)
                 {
@@ -570,6 +603,9 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
             // Stop the stall watchdog the moment the turn ends, whatever the outcome.
             if (!watchdogStop.IsCancellationRequested)
                 watchdogStop.Cancel();
+            foreach (var replaced in replacedTurnCtses)
+                replaced.Dispose();
+            turnCts?.Dispose();
             _turn = null;
             _context.EndTurn();
             _turnLock.Release();
@@ -1047,7 +1083,9 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
         ProviderUnavailableException refusal, CancellationToken ct)
     {
         if (_modelCandidates is null)
+        {
             return false;
+        }
 
         var currentModelId = await GetStoredModelIdAsync(sessionId, ct);
         if (currentModelId is not null && !triedModels.Contains(currentModelId))
@@ -1069,8 +1107,11 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
 
         var next = await _modelCandidates.ResolveActiveAsync(workspacePath, ct);
         if (next is null || triedModels.Contains(next.ModelId) || triedModels.Count >= candidates.Count)
+        {
+            // Everthing else is already cooked by the previous refusal flows within: hint what
+            // a caller is left with here to save the next reader a full model-list re-derive.
             return false;
-
+        }
         await _spoke.SetModelAsync(acpSessionId, next.ModelId, ct);
         await SetStoredModelIdAsync(sessionId, next.ModelId, ct);
         triedModels.Add(next.ModelId);

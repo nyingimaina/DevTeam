@@ -9,10 +9,12 @@ import InsightsView from "./Project/Insights/InsightsView";
 import SettingsView from "./Project/Settings/SettingsView";
 import PathBrowser from "./Project/UI/PathBrowser";
 import WorkspaceCleanupNotice from "./UI/WorkspaceCleanupNotice";
+import ProcessApprovalNotice from "./UI/ProcessApprovalNotice";
 import ActiveTurnIndicator from "./UI/ActiveTurnIndicator";
 import ContextDial from "./UI/ContextDial";
 import { formatCleanupNoticeMessage, projectNameFromPath } from "./Project/workspaceCleanup";
 import { installGlobalErrorHandlers } from "./UI/diagnostics";
+import { PendingStopDto } from "./Chat/Data/BrokerTypes";
 import { FaFolderOpen, FaListCheck, FaCodeBranch, FaShieldHalved, FaGear, FaChartLine } from "react-icons/fa6";
 import styles from "./App.module.css";
 
@@ -34,6 +36,7 @@ export default function App() {
   const [project, setProject] = useState<string | null>(readProject);
   const [activeTab, setActiveTab] = useState<TabValue>("releases");
   const [cleanupNotice, setCleanupNotice] = useState<string | null>(null);
+  const [pendingStops, setPendingStops] = useState<PendingStopDto[] | null>(null);
 
   // Record anything the UI itself trips over, so "it just broke" becomes something the Support
   // tab can hand to a specialist. Idempotent.
@@ -43,13 +46,19 @@ export default function App() {
 
   const runWorkspaceCleanupAsync = useCallback(async (path: string) => {
     try {
-      const stopped = await api.cleanupWorkspaceAsync(path);
-      const message = formatCleanupNoticeMessage(path, stopped);
+      const result = await api.cleanupWorkspaceAsync(path);
+      const message = formatCleanupNoticeMessage(path, result.stopped);
       if (message) setCleanupNotice(message);
+      setPendingStops(result.requiresApproval.length > 0 ? result.requiresApproval : null);
     } catch {
-      // A failed sweep should never block opening or closing a project.
+      // A failed sweep should never block opening or closing a project — including its ask list.
     }
   }, [api]);
+
+  const approvePendingStops = useCallback(
+    (processIds: number[]) => api.approveProcessStopAsync(processIds),
+    [api],
+  );
 
   const openFolder = useCallback((path: string) => {
     setProject(path);
@@ -70,6 +79,14 @@ export default function App() {
   const notice = cleanupNotice && (
     <WorkspaceCleanupNotice message={cleanupNotice} onDismiss={() => setCleanupNotice(null)} />
   );
+  const approvalNotice = pendingStops && project && (
+    <ProcessApprovalNotice
+      workspacePath={project}
+      pending={pendingStops}
+      onApprove={approvePendingStops}
+      onDismiss={() => setPendingStops(null)}
+    />
+  );
 
   if (!project) {
     return (
@@ -82,6 +99,7 @@ export default function App() {
         </div>
         <PathBrowser api={api} mode="pickDirectory" onSelect={openFolder} />
         {notice}
+        {approvalNotice}
         <ActiveTurnIndicator api={api} />
       </div>
     );
@@ -172,6 +190,7 @@ export default function App() {
         </div>
       </main>
       {notice}
+      {approvalNotice}
       <ActiveTurnIndicator api={api} />
     </div>
   );
