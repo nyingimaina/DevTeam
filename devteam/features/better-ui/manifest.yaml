@@ -1,0 +1,6 @@
+feature: better-ui
+title: Remove tool-call noise from the assistant chat bubble
+codePaths:
+  - "front-end/app/Chat"
+corePathBack: "back-end/DevTeam.Shared"
+testCommand: "cmd.exe /d /c npm --prefix front-end test"
