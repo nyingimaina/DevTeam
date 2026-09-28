@@ -311,6 +311,63 @@ public class BrokerCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task Prompt_WhenTheAgentGoesSilent_ButAnotherModelIsAvailable_TriesIt()
+    {
+        // Live incident (2026-09-28, developer stage "create-installer"): the agent streamed for
+        // ~45 seconds after the priming prompt and then went completely silent; the watchdog
+        // escalated, the pipeline retried the SAME model, it went silent again, and the stage
+        // never completed across three attempts. Silence behaves like a refusal: if a second
+        // model is available, switch and retry within the turn instead of replaying a dead one.
+        var candidates = new ModelCandidateService(CreateFactory());
+        await using var coordinator = CreateCoordinator(
+            stallAfter: TimeSpan.FromMilliseconds(250), modelCandidates: candidates);
+        var session = await CreateSessionAsync(coordinator);
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "hello", CancellationToken.None);
+
+        await _harness.ReadRequestAsync(); // first attempt: the agent accepts and never emits another frame
+
+        // The silent model is cooled down and the agent is pointed at the seeded second candidate.
+        var (switchMethod, switchId, switchParams) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/set_model", switchMethod);
+        Assert.Contains("opencode-go/kimi-k3", switchParams);
+        _harness.Reply(switchId, "{}");
+
+        // The retry goes out on the new model and is answered normally this time.
+        var (retryMethod, retryId, _) = await _harness.ReadRequestAsync();
+        Assert.Equal("session/prompt", retryMethod);
+        _harness.Reply(retryId, "{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":2,\"outputTokens\":1,\"totalTokens\":3}}");
+
+        var result = await pending;
+        Assert.Equal("end_turn", result.StopReason);
+
+        // The silent model gets a cooldown, exactly like a refused one, so the next turn
+        // does not attempt the dead model again.
+        var after = await candidates.ListAsync(@"C:\work\proj", CancellationToken.None);
+        Assert.NotNull(after[0].CooldownUntil);
+        Assert.Equal("Unknown", after[0].LastFailureKind);
+    }
+
+    [Fact]
+    public async Task Prompt_WhenTheAgentGoesSilent_WithEveryModelDead_StillEscalatesStalled()
+    {
+        // Without an alternative the old contract holds: AcpStalledException with the silent
+        // duration, so the stage escalates with a reason the user can act on.
+        var candidates = new ModelCandidateService(CreateFactory());
+        foreach (var candidate in await candidates.ListSeededAsync(@"C:\work\proj", CancellationToken.None))
+            await candidates.SetEnabledAsync(candidate.Id, false, CancellationToken.None);
+
+        await using var coordinator = CreateCoordinator(
+            stallAfter: TimeSpan.FromMilliseconds(250), modelCandidates: candidates);
+        var session = await CreateSessionAsync(coordinator);
+
+        var pending = coordinator.PromptWithSessionRecoveryAsync(session.SessionId, "go", CancellationToken.None);
+        await _harness.ReadRequestAsync(); // the agent never replies
+
+        await Assert.ThrowsAsync<AcpStalledException>(() => pending);
+        Assert.Null(_turnTracker.Current);
+    }
+
+    [Fact]
     public async Task Prompt_WithOngoingActivity_IsNotTreatedAsStalled()
     {
         await using var coordinator = CreateCoordinator(stallAfter: TimeSpan.FromSeconds(1));

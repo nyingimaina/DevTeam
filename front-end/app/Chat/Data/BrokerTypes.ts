@@ -127,6 +127,21 @@ export interface StoppedProcessDto {
   name: string;
 }
 
+// Processes the sweep flagged for needing the operator's say-so before any stop. The backend
+// holds the list for one sweep: approval is granted on what was shown, pid-exactness included.
+export interface PendingStopDto {
+  processId: number;
+  name: string;
+  executablePath: string;
+  commandLine?: string | null;
+  reason: string;
+}
+
+export interface CleanupResult {
+  stopped: StoppedProcessDto[];
+  requiresApproval: PendingStopDto[];
+}
+
 // One thing the agent did, held in memory for the active turn only (see ActiveTurnTracker).
 export interface TurnActivityEntryDto {
   at: string;

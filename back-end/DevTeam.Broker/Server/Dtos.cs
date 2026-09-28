@@ -117,6 +117,15 @@ public sealed record RevealInExplorerRequest(string Path);
 
 public sealed record CleanupWorkspaceRequest(string WorkspacePath);
 
+// Process ownership: the sweep stops only what the broker itself started (or the shared agent's
+// own subprocess trees). Processes that merely live inside the workspace are NOT stopped on a
+// project open or close — they are listed here for the user to approve, one list per sweep.
+public sealed record PendingStopDto(int ProcessId, string Name, string ExecutablePath, string? CommandLine, string Reason);
+
+public sealed record CleanupResultDto(IReadOnlyList<StoppedProcessDto> Stopped, IReadOnlyList<PendingStopDto> RequiresApproval);
+
+public sealed record ApproveStopRequest(IReadOnlyList<int> ProcessIds);
+
 // ─── release endpoints ─────────────────────────────────────────────────────
 
 public sealed record CreateReleaseRequest(string FeatureKey, string WorkspacePath);

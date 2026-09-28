@@ -34,6 +34,7 @@ import {
   StagePromptResult,
   StageRunDto,
   StoppedProcessDto,
+  CleanupResult,
   WorkspaceProfileDto,
 } from "./BrokerTypes";
 import { recentErrors, recordError } from "../../UI/diagnostics";
@@ -122,10 +123,19 @@ export default class BrokerApi {
     });
   }
 
-  cleanupWorkspaceAsync(workspacePath: string): Promise<StoppedProcessDto[]> {
-    return this.requestAsync<StoppedProcessDto[]>("/api/fs/cleanup", {
+  cleanupWorkspaceAsync(workspacePath: string): Promise<CleanupResult> {
+    return this.requestAsync<CleanupResult>("/api/fs/cleanup", {
       method: "POST",
       body: JSON.stringify({ workspacePath }),
+    });
+  }
+
+  // Stops only pids the sweep itself surfaced as approval-needing. The backend refuses anything
+  // else, so this can never become a generic kill endpoint.
+  approveProcessStopAsync(processIds: number[]): Promise<StoppedProcessDto[]> {
+    return this.requestAsync<StoppedProcessDto[]>("/api/fs/cleanup/approve", {
+      method: "POST",
+      body: JSON.stringify({ processIds }),
     });
   }
 
