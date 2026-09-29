@@ -32,7 +32,7 @@ describe("MessageRow", () => {
     expect(screen.getByText("this", { selector: "strong" })).toBeInTheDocument();
   });
 
-  it("strips streamed tool-echo lines from assistant body", () => {
+  it("REQ_2_StreamedToolEchoLines_StayHiddenFromAssistantBody", () => {
     const message: MessageDto = {
       id: "3",
       role: "assistant",
@@ -47,7 +47,7 @@ describe("MessageRow", () => {
     expect(container).not.toHaveTextContent("call_abc12345xyz");
   });
 
-  it("renders a tool call chip with friendly label and short id", () => {
+  it("REQ_1_AssistantMessageWithOneToolCall_RendersNoToolCallNode", () => {
     const message: MessageDto = {
       id: "4",
       role: "assistant",
@@ -65,8 +65,47 @@ describe("MessageRow", () => {
       ],
     };
     render(<MessageRow message={message} />);
-    expect(screen.getByText("Run command")).toBeInTheDocument();
-    expect(screen.getByText("#12345xyz")).toBeInTheDocument();
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.queryByText("Run command")).not.toBeInTheDocument();
+    expect(screen.queryByText("#12345xyz")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Tool call/)).not.toBeInTheDocument();
+    expect(screen.getByText("done")).toBeInTheDocument();
+  });
+
+  it("REQ_1_AssistantMessageWithMultipleToolCalls_RendersNoToolCallNodesAtAll", () => {
+    const message: MessageDto = {
+      id: "4b",
+      role: "assistant",
+      bodyText: "All finished.",
+      createdAt: "2026-01-01T00:00:00Z",
+      isPriming: false,
+      parts: [
+        {
+          id: "p1",
+          kind: "tool_call",
+          toolName: "execute",
+          toolCallId: "call_abc12345xyz",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "p2",
+          kind: "tool_call",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "p3",
+          kind: "text",
+          text: "ignored",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+    };
+    const { container } = render(<MessageRow message={message} />);
+    expect(screen.queryAllByTestId("tool-call")).toHaveLength(0);
+    expect(container).not.toHaveTextContent("Tool call");
+    expect(container).not.toHaveTextContent("#12345xyz");
+    expect(container).not.toHaveTextContent("Run command");
+    expect(screen.getByText("All finished.")).toBeInTheDocument();
   });
 
   it("collapses a framework-injected message to a placeholder instead of the raw text", () => {
