@@ -50,6 +50,9 @@ const ERROR_KIND_LABELS: Record<string, string> = {
 const WHATS_NEXT: Record<string, string> = {
   "business-analyst": "Answer the agent's prompts one at a time. Type DONE when the requirements are settled.",
   developer: "No chat needed — watch the agent work the workspace. It runs the gates itself when done.",
+  // The one stage where a human may be needed without the stage asking for it up front: a
+  // disputed test can only be changed with your ruling, and the agent can't rule on itself.
+  "test-runner": "Runs automatically — it runs the tests and writes up every failure. If it challenges a test, reply here in the chat with your ruling; until you rule, the requirement stands as written.",
   qa: "Runs automatically. Reviews findings appear here once the QA agent finishes.",
   verification: "Runs automatically. Checks the project builds, its tests pass, and the house rules are met.",
 };
