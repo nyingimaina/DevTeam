@@ -816,20 +816,25 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
 
         var pipeline = await client.GetFromJsonAsync<PipelineStageDto[]>($"/api/features/{release.CurrentFeatureId}/pipeline", JsonOptions);
         Assert.NotNull(pipeline);
-        Assert.Equal(4, pipeline!.Length);
+        Assert.Equal(5, pipeline!.Length);
         Assert.Equal("business-analyst", pipeline[0].Name);
         Assert.True(pipeline[0].UserInputRequired);
         Assert.Equal("requirements-approval", pipeline[0].Signoff);
         Assert.Equal("developer", pipeline[1].Name);
         Assert.False(pipeline[1].UserInputRequired);
         Assert.Equal("pr-created", pipeline[1].Signoff);
-        Assert.Equal("qa", pipeline[2].Name);
+        // The test runner judges and writes no code, and needs no input to run: a green suite
+        // must never block on a human. A challenge is answered by messaging the live stage.
+        Assert.Equal("test-runner", pipeline[2].Name);
         Assert.False(pipeline[2].UserInputRequired);
-        Assert.Equal("release-approval", pipeline[2].Signoff);
-        // The final, automatic stage carries no signoff and needs no user input.
-        Assert.Equal("verification", pipeline[3].Name);
+        Assert.Null(pipeline[2].Signoff);
+        Assert.Equal("qa", pipeline[3].Name);
         Assert.False(pipeline[3].UserInputRequired);
-        Assert.Null(pipeline[3].Signoff);
+        Assert.Equal("release-approval", pipeline[3].Signoff);
+        // The final, automatic stage carries no signoff and needs no user input.
+        Assert.Equal("verification", pipeline[4].Name);
+        Assert.False(pipeline[4].UserInputRequired);
+        Assert.Null(pipeline[4].Signoff);
     }
 
     [Fact]
@@ -1307,7 +1312,7 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
         {
             var loaded = await client.GetFromJsonAsync<PipelineEditorDto>(
                 $"/api/workspace/pipeline?workspacePath={Uri.EscapeDataString(workspace)}", JsonOptions);
-            Assert.Equal(["business-analyst", "developer", "qa", "verification"], loaded!.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["business-analyst", "developer", "test-runner", "qa", "verification"], loaded!.Roles.Select(r => r.Name).ToArray());
 
             var reordered = loaded.Roles.AsEnumerable().Reverse().ToArray();
             var putResponse = await client.PutAsJsonAsync("/api/workspace/pipeline", new
@@ -1318,11 +1323,11 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
             putResponse.EnsureSuccessStatusCode();
 
             var afterPut = await putResponse.Content.ReadFromJsonAsync<PipelineEditorDto>(JsonOptions);
-            Assert.Equal(["verification", "qa", "developer", "business-analyst"], afterPut!.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["verification", "qa", "test-runner", "developer", "business-analyst"], afterPut!.Roles.Select(r => r.Name).ToArray());
 
             var reGet = await client.GetFromJsonAsync<PipelineEditorDto>(
                 $"/api/workspace/pipeline?workspacePath={Uri.EscapeDataString(workspace)}", JsonOptions);
-            Assert.Equal(["verification", "qa", "developer", "business-analyst"], reGet!.Roles.Select(r => r.Name).ToArray());
+            Assert.Equal(["verification", "qa", "test-runner", "developer", "business-analyst"], reGet!.Roles.Select(r => r.Name).ToArray());
         }
         finally
         {

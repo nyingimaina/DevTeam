@@ -9,7 +9,10 @@ public static class BuiltinRegistry
     public const string CodeMap = "code_map";
     public const string GherkinValidator = "gherkin_validator";
     public const string BuildCheck = "build_check";
+    public const string FastLane = "fast_lane";
     public const string VerifyCode = "verify_code";
+    public const string TestRun = "test_run";
+    public const string TestReport = "test_report";
     public const string CodeHygiene = "code_hygiene";
     public const string AppLaunch = "app_launch";
     public const string SliceGuard = "slice_guard";
@@ -30,7 +33,10 @@ public static class BuiltinRegistry
         CodeMap,
         GherkinValidator,
         BuildCheck,
+        FastLane,
         VerifyCode,
+        TestRun,
+        TestReport,
         CodeHygiene,
         AppLaunch,
         SliceGuard,

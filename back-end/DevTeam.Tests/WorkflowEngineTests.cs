@@ -856,7 +856,7 @@ public class WorkflowEngineTests : IDisposable
             new GateResult(true, "OK", "code map ok"),
             new GateResult(true, "OK", "context bundle ok"),
             new GateResult(true, "OK", "build check ok"),
-            new GateResult(true, "OK", "verify ok"),
+            new GateResult(true, "OK", "fast lane ok"),
             new GateResult(true, "OK", "hygiene ok"),
             new GateResult(true, "OK", "launch ok"),
             new GateResult(true, "OK", "reuse ok"),
@@ -878,11 +878,11 @@ public class WorkflowEngineTests : IDisposable
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
 
-        // 10 builtin steps run (code_map, context_bundle, build_check, verify_code, code_hygiene,
-        // app_launch, reuse_gate, project_structure, slice_scope, render_pr); each one's result
-        // must already be visible via a fresh context by the time the next one's RunAsync fires
-        // — i.e. counts strictly increase, not [0,0,0,0,0,0,0,0,0,0].
-        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], savedCountsBeforeEachCall);
+        // 9 builtin steps run (code_map, context_bundle, fast_lane, code_hygiene, app_launch,
+        // reuse_gate, project_structure, slice_scope, render_pr); each one's result must already
+        // be visible via a fresh context by the time the next one's RunAsync fires - i.e. counts
+        // strictly increase, not [0,0,0,0,0,0,0,0,0].
+        Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7, 8], savedCountsBeforeEachCall);
     }
 
     [Fact]
@@ -909,23 +909,46 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task RunGates_OnARecheckAfterTheStageAlreadyPassed_StillReRunsVerifyCode()
+    public async Task RunGates_OnARecheckAfterTheStageAlreadyPassed_StillReRunsTheCodeCheck()
     {
         // Regression: a gates-only recheck (what run-gates-and-repair calls after asking the
         // agent to fix a reported problem) must re-validate that the code still builds and its
-        // tests still pass. verify_code lives inside the developer stage's retry Loop alongside
-        // the agent step, so the "skip everything up to and including the first Agent/Loop step"
-        // logic used to skip it forever after the stage's first pass — a repaired stage could
-        // reach BlockedSignoff/Complete without its tests ever running against the latest edits.
+        // changed area still checks out. That step lives inside the developer stage's retry Loop
+        // alongside the agent step, so the "skip everything up to and including the first
+        // Agent/Loop step" logic used to skip it forever after the stage's first pass - a repaired
+        // stage could reach BlockedSignoff/Complete without ever re-checking the latest edits.
+        // (The full suite is no longer here either: it runs once, in the test-runner stage, as
+        // test_run - see TheFullTestRunHappensOnceInTheTestRunnerStage_NotInTheDeveloperLoop.)
         var engine = CreateEngine();
         var (_, featureId) = await DriveToDeveloperAsync(engine);
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
-        Assert.Equal(1, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.VerifyCode));
+        Assert.Equal(1, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.FastLane));
 
         await engine.RunGatesAsync(featureId, CancellationToken.None);
 
-        Assert.Equal(2, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.VerifyCode));
+        Assert.Equal(2, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.FastLane));
+    }
+
+    [Fact]
+    public async Task TheFullTestRunHappensOnceInTheTestRunnerStage_NotInTheDeveloperLoop()
+    {
+        // The developer no longer gates itself on the full suite - a scoped fast check is triage
+        // only. The authoritative run belongs to the test-runner stage, once per pass, and it must
+        // be judged (test_report) rather than just executed.
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+
+        Assert.Equal(0, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.TestRun));
+        Assert.Equal(0, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.VerifyCode));
+
+        await RunTestRunnerStageAsync(engine, featureId);
+
+        Assert.Equal(1, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.TestRun));
+        Assert.Equal(1, _gateRunner.Requests.Count(r => r.Builtin == BuiltinRegistry.TestReport));
     }
 
     [Fact]
@@ -1574,15 +1597,18 @@ public class WorkflowEngineTests : IDisposable
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
 
+        // The test runner runs and judges in between; it needs no signoff of its own.
+        await RunTestRunnerStageAsync(engine, featureId);
+
         // qa stage: code_map, context_bundle and verify_code pass, coverage_matrix fails. QA's
         // mandate is to verify, not author tests, so this must route back to developer (who owns
         // verify_code/coverage_matrix per the default pipeline) instead of leaving QA in a
         // retry loop it can never win.
-        _gateRunner.Results.Clear();
-        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
-        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
-        _gateRunner.Results.Add(new GateResult(true, "OK", ""));
-        _gateRunner.Results.Add(new GateResult(false, "missing coverage", "REQ-002 not covered"));
+        _gateRunner.Script(
+            new GateResult(true, "OK", ""),
+            new GateResult(true, "OK", ""),
+            new GateResult(true, "OK", ""),
+            new GateResult(false, "missing coverage", "REQ-002 not covered"));
 
         var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
 
@@ -1607,16 +1633,15 @@ public class WorkflowEngineTests : IDisposable
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
 
         // qa stage: code_map, context_bundle, verify_code, coverage_matrix all pass; only the
         // independent scope/architecture review (a GatePrompt, driven by _coordinator's stop
         // reason, not _gateRunner) finds a problem — this must route back to developer, same as
         // any other QA-owned gate whose failure only developer can fix.
-        _gateRunner.Results.Clear();
-        _gateRunner.Results.AddRange([
+        _gateRunner.Script(
             new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
-            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
-        ]);
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""));
         var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
         fake.StopReasonsToReturn.Enqueue("end_turn"); // qa's own agent turn
         fake.StopReasonsToReturn.Enqueue("max_tokens"); // the scope review itself — fails
@@ -1904,17 +1929,16 @@ public class WorkflowEngineTests : IDisposable
         var (_, featureId) = await DriveToDeveloperAsync(engine);
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
 
         // QA's exit checks, in order: code_map, context_bundle, verify_code, coverage_matrix,
         // render_handoff (the agent step between them is not a gate). Only coverage fails.
-        _gateRunner.Results.Clear();
-        _gateRunner.Results.AddRange([
+        _gateRunner.Script(
             new GateResult(true, "OK", string.Empty),
             new GateResult(true, "OK", string.Empty),
             new GateResult(true, "OK", "verify ok"),
             new GateResult(false, "missing coverage", "fail: no test references REQ-1"),
-            new GateResult(true, "OK", string.Empty),
-        ]);
+            new GateResult(true, "OK", string.Empty));
 
         var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
 
@@ -2031,15 +2055,19 @@ public class WorkflowEngineTests : IDisposable
 
         var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
 
-        Assert.Equal(4, pipeline.Count);
+        Assert.Equal(5, pipeline.Count);
         Assert.Equal("business-analyst", pipeline[0].Name);
         Assert.True(pipeline[0].UserInputRequired);
         Assert.Equal("requirements-approval", pipeline[0].Signoff);
         Assert.Equal("developer", pipeline[1].Name);
         Assert.False(pipeline[1].UserInputRequired);
-        Assert.Equal("qa", pipeline[2].Name);
-        Assert.Equal("verification", pipeline[3].Name);
-        Assert.Null(pipeline[3].Signoff);
+        // The test runner judges and writes no code, and a green suite must never wait on a
+        // human - so it takes no input up front and signs off on nothing.
+        Assert.Equal("test-runner", pipeline[2].Name);
+        Assert.False(pipeline[2].UserInputRequired);
+        Assert.Equal("qa", pipeline[3].Name);
+        Assert.Equal("verification", pipeline[4].Name);
+        Assert.Null(pipeline[4].Signoff);
     }
 
     [Fact]
@@ -2053,7 +2081,8 @@ public class WorkflowEngineTests : IDisposable
 
         Assert.Equal(["devteam/features/<F>/specs.feature", "devteam/features/<F>/handoff.md"], pipeline[0].ExpectedArtifacts);
         Assert.Equal(["devteam/features/<F>/code/"], pipeline[1].ExpectedArtifacts);
-        Assert.Equal(["devteam/features/<F>/coverage.md"], pipeline[2].ExpectedArtifacts);
+        Assert.Equal(["devteam/features/<F>/test-report.md"], pipeline[2].ExpectedArtifacts);
+        Assert.Equal(["devteam/features/<F>/coverage.md"], pipeline[3].ExpectedArtifacts);
     }
 
     [Fact]
@@ -2070,16 +2099,20 @@ public class WorkflowEngineTests : IDisposable
             pipeline[0].Steps);
         // The loop's inner steps are flattened once, not repeated per retry attempt.
         Assert.Equal(
-            ["code_map", "context_bundle", "agent:developer", "build_check", "verify_code", "code_hygiene", "app_launch", "reuse_gate", "project_structure", "slice_scope", "render_pr"],
+            ["code_map", "context_bundle", "agent:developer", "fast_lane", "code_hygiene", "app_launch", "reuse_gate", "project_structure", "slice_scope", "render_pr"],
             pipeline[1].Steps);
-        Assert.Equal("code_map", pipeline[2].Steps[0]);
-        Assert.Equal("context_bundle", pipeline[2].Steps[1]);
-        Assert.Equal("agent:qa", pipeline[2].Steps[2]);
-        Assert.Equal("verify_code", pipeline[2].Steps[3]);
-        Assert.Equal("coverage_matrix", pipeline[2].Steps[4]);
-        Assert.StartsWith("gate_prompt:", pipeline[2].Steps[5]);
-        Assert.Equal("render_handoff", pipeline[2].Steps[6]);
-        Assert.Equal(7, pipeline[2].Steps.Count);
+        // The test runner runs the suite once and then writes the per-failure report.
+        Assert.Equal(
+            ["context_bundle", "test_run", "agent:test-runner", "test_report"],
+            pipeline[2].Steps);
+        Assert.Equal("code_map", pipeline[3].Steps[0]);
+        Assert.Equal("context_bundle", pipeline[3].Steps[1]);
+        Assert.Equal("agent:qa", pipeline[3].Steps[2]);
+        Assert.Equal("verify_code", pipeline[3].Steps[3]);
+        Assert.Equal("coverage_matrix", pipeline[3].Steps[4]);
+        Assert.StartsWith("gate_prompt:", pipeline[3].Steps[5]);
+        Assert.Equal("render_handoff", pipeline[3].Steps[6]);
+        Assert.Equal(7, pipeline[3].Steps.Count);
     }
 
     [Fact]
@@ -2186,7 +2219,7 @@ public class WorkflowEngineTests : IDisposable
 
             var pipeline = await engine.GetPipelineAsync(featureId, CancellationToken.None);
 
-            Assert.Equal(["business-analyst", "developer", "qa", "verification"], pipeline.Select(p => p.Name).ToArray());
+            Assert.Equal(["business-analyst", "developer", "test-runner", "qa", "verification"], pipeline.Select(p => p.Name).ToArray());
         }
         finally
         {
@@ -2408,6 +2441,7 @@ public class WorkflowEngineTests : IDisposable
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
 
         _coordinator.AllowedWritePrefixesCalls.Clear();
         await engine.RunStageAsync(featureId, CancellationToken.None);
@@ -2729,6 +2763,7 @@ public class WorkflowEngineTests : IDisposable
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.RunGatesAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
 
         await engine.StartStageAsync(featureId, CancellationToken.None);
         await engine.RunGatesAsync(featureId, CancellationToken.None);
@@ -3414,6 +3449,7 @@ public class WorkflowEngineTests : IDisposable
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
 
         await engine.RunStageAsync(featureId, CancellationToken.None);
         await engine.SignoffAsync(featureId, "qa", "qa-lead", null, CancellationToken.None);
@@ -3449,6 +3485,24 @@ public class WorkflowEngineTests : IDisposable
         var after = await engine.SignoffAsync(featureId, "business-analyst", "pm", null, CancellationToken.None);
         Assert.Equal(1, after.FlowPosition!.CurrentStageIndex);
         return (after, featureId);
+    }
+
+    /// <summary>
+    /// Runs the test-runner stage that now sits between developer and QA. It needs no signoff,
+    /// so a clean run advances the pointer to QA on its own - the caller never approves it.
+    /// </summary>
+    private async Task RunTestRunnerStageAsync(WorkflowEngine engine, Guid featureId)
+    {
+        // Script, not Clear+AddRange: the fake's read cursor only moves when it has scripted
+        // results, and these two passes would otherwise leave the cursor at 2 and shift every
+        // result the next stage reads.
+        _gateRunner.Script(new GateResult(true, "OK", ""), new GateResult(true, "OK", ""));
+        var advanced = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        // Asserted on the feature, not on the release: a release can hold several features, and
+        // the release-level flow position tracks the release's *current* feature, not this one.
+        Assert.Contains(advanced.Features, f => f.Id == featureId &&
+            f.StageRuns.Any(sr => sr.StageName == "test-runner" && sr.Status == ReleaseStageStatus.Complete));
     }
 
     private readonly FakeBrokerCoordinator _coordinator = new();

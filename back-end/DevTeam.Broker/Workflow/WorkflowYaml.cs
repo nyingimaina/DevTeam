@@ -86,7 +86,12 @@ public sealed class WorkflowYaml
                 "name (e.g. REQ_3_AddCommand_NegativeOperands_ShowsNegativeSum) — the coverage check finds each test by that id. " +
                 "Also tag the code that implements a requirement with that id in a comment (e.g. // REQ-3) so completion can be measured. " +
                 "If this is a desktop or UI app, make sure it actually starts — a broken startup crashes the app even when the tests pass. " +
-                "Start the main window explicitly and avoid fragile relative resource URIs; set runCommand in the manifest if a custom launch command is needed. ",
+                "Start the main window explicitly and avoid fragile relative resource URIs; set runCommand in the manifest if a custom launch command is needed. " +
+                "You are no longer gated on the test suite passing: the full run happens in the test-runner stage, and the loop here only " +
+                "verifies the files you changed (fast_lane). Iterate on real errors it reports - compile errors, type errors, and the tests " +
+                "related to what you touched - and let the test-runner stage adjudicate anything the suite finds. " +
+                "Do not edit, skip, delete or weaken a test to make a failure go away. If a test looks wrong or contradicts the BRS, say so " +
+                "in your summary and leave the test alone - the test-runner stage files the challenge and the operator rules on it. ",
             ExpectedArtifacts = ["devteam/features/<F>/code/"],
             Steps =
             [
@@ -100,12 +105,12 @@ public sealed class WorkflowYaml
                         Steps =
                         [
                             new StepYaml { Agent = new AgentYaml { Mode = "developer" } },
-                            // Cheap "does it even compile" check ahead of the much slower full
-                            // test run — a scaffold-mismatch or a broken edit gets a clear,
-                            // fast compiler error here instead of only surfacing (slower, less
-                            // clearly) once verify_code's test run also fails for the same reason.
-                            new StepYaml { Builtin = BuiltinRegistry.BuildCheck },
-                            new StepYaml { Builtin = BuiltinRegistry.VerifyCode },
+                            // Verify only what this feature actually changed: the incremental
+                            // build for C#, a cached type check plus the tests related to the
+                            // changed sources for TypeScript. The full suite is not this loop's
+                            // job any more - it is the test-runner stage's, where a failure can
+                            // be adjudicated against the BRS instead of retried blindly.
+                            new StepYaml { Builtin = BuiltinRegistry.FastLane, ResponsibleRole = "developer" },
                         ],
                     },
                 },
@@ -115,6 +120,56 @@ public sealed class WorkflowYaml
                 new StepYaml { Builtin = BuiltinRegistry.ProjectStructure },
                 new StepYaml { Builtin = BuiltinRegistry.SliceScope },
                 new StepYaml { Builtin = BuiltinRegistry.RenderPr },
+            ],
+        },
+        // Between the developer and QA. The developer no longer runs the suite to gate itself, so
+        // this is the one place a full run happens before QA: test_run produces the machine
+        // facts, the test-runner agent turns them into a per-failure report, and test_report is
+        // the deterministic verdict on that report. A failure routes back to the developer
+        // (ResponsibleRole), which is where a code defect can actually be fixed — the test
+        // runner itself writes no code. A disputed requirement is not the runner's to grant: it
+        // becomes a challenge section, and the operator rules by messaging this stage (which
+        // works for any live stage, interactive or not). The stage therefore does not demand
+        // input up front — a green suite must never wait on a human.
+        ["test-runner"] = new RoleYaml
+        {
+            Signoff = null,
+            UserInputRequired = false,
+            WritesCode = false,
+            SeedPrompt =
+                " You are the test runner for feature <F>. The full test suite has just run; the machine-extracted " +
+                "result is in devteam/features/<F>/test-run.json (command, exit code, failed count, and the exact list of " +
+                "failed test names) and the BRS with its REQ ids is next to it. " +
+                "Write devteam/features/<F>/test-report.md from those facts - you are not guessing what failed, you are " +
+                "explaining it. Read each failed test, and read the code it exercises, then write one section per failure: " +
+                "\n\n## TEST-<n>: <the failed test's name exactly as the run recorded it>\n" +
+                "- Test: <path to the test file>\n" +
+                "- Requirement: <the REQ id the test name or body refers to>\n" +
+                "- Verdict: fix | challenge\n" +
+                "- Expected: <the acceptance criterion as the BRS states it>\n" +
+                "- Observed: <what actually happened>\n" +
+                "- Likely cause: <where in the code this comes from>\n" +
+                "- Classification: introduced by this feature | pre-existing\n" +
+                "\nEvery failed test the run recorded needs its own section - an unaccounted failure fails the stage. " +
+                "Use \"Verdict: fix\" when the requirement is right and the code is wrong: that is the ordinary case, and the " +
+                "developer is routed back to implement it. " +
+                "Use \"Verdict: challenge\" only when the test itself is wrong, contradicts the BRS, or asserts something the " +
+                "BRS never required. Then add: what the test asserts, why that is wrong, and the change you propose - as a " +
+                "section line \"- Ruling: pending operator ruling\", and say in your reply that the operator needs to rule. " +
+                "The operator rules by messaging this stage; when their ruling arrives, record it as \"- Ruling: accepted " +
+                "(addendum BRS.addendum-<n>.md)\" or \"- Ruling: rejected - implement as written\". An accepted ruling means you " +
+                "write the approved change as its own document " +
+                "devteam/features/<F>/BRS.addendum-<n>.md (the affected REQ, the revised acceptance criterion as Given/When/Then) " +
+                "and add one link line \"- See addendum: BRS.addendum-<n>.md\" at the end of the BRS. " +
+                "Never rewrite the BRS or this report to make something pass - the BRS is the contract, and a changed " +
+                "requirement is a new addendum plus a link, nothing else. Never edit, skip or delete a test yourself. ",
+            ExpectedArtifacts = ["devteam/features/<F>/test-report.md"],
+            Steps =
+            [
+                new StepYaml { Builtin = BuiltinRegistry.ContextBundle },
+                new StepYaml { Builtin = BuiltinRegistry.TestRun },
+                new StepYaml { Agent = new AgentYaml { Mode = "test-runner" } },
+                new StepYaml { Builtin = BuiltinRegistry.TestReport, ResponsibleRole = "developer" },
             ],
         },
         ["qa"] = new RoleYaml

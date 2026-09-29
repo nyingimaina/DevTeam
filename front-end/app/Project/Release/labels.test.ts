@@ -5,6 +5,8 @@ describe("stageLabel", () => {
     expect(stageLabel("business-analyst")).toBe("Business Analyst");
     expect(stageLabel("developer")).toBe("Developer");
     expect(stageLabel("qa")).toBe("QA");
+    // Not the derived "TEST Runner" - the fallback uppercases short words.
+    expect(stageLabel("test-runner")).toBe("Test Runner");
   });
 
   it("falls back to a friendly title-case of unknown stage names", () => {
@@ -87,6 +89,14 @@ describe("whatsNext", () => {
   it("returns an explicit hint for autonomous stages", () => {
     expect(whatsNext("developer")).toMatch(/watch/i);
     expect(whatsNext("qa")).toMatch(/automatically|watch/i);
+  });
+
+  it("tells the user the test runner runs on its own, and how a challenge gets ruled on", () => {
+    expect(whatsNext("test-runner")).toMatch(/automatically/i);
+    // A challenge cannot be waved through by the agent, so the one thing the user may have to
+    // do here has to be spelled out: answer in this stage's chat.
+    expect(whatsNext("test-runner")).toMatch(/challenge/i);
+    expect(whatsNext("test-runner")).toMatch(/here|chat|message/i);
   });
 
   it("returns empty string for unknown stages", () => {
