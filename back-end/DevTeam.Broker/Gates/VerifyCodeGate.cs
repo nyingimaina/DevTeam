@@ -22,10 +22,15 @@ public sealed class VerifyCodeGate : IGate
         if (result.TimedOut)
             return GateResult.Fail("Timed out waiting for tests to finish.", "Tests exceeded the time budget.");
 
-        var normalized = TestOutputNormalizer.Normalize(result.StandardOutput + "\n" + result.StandardError);
+        var raw = result.StandardOutput + "\n" + result.StandardError;
+        var normalized = TestOutputNormalizer.Normalize(raw);
+        // Three independent signals, none of them "the text contains fail:": a nonzero exit
+        // code, a summary line that counts failures, and the parsed failure entries. Matching
+        // the rendered marker instead would let an unrelated gate's "fail:" text decide a
+        // test verdict, and would re-raise every file:line a green run happens to print.
         var failed = result.ExitCode != 0
             || TestOutputNormalizer.FailedCount(normalized) > 0
-            || normalized.Contains("fail:", StringComparison.Ordinal);
+            || TestOutputNormalizer.FailureEntries(raw).Count > 0;
         return failed
             ? GateResult.Fail($"Tests failed", normalized)
             : GateResult.Pass("Tests passed", normalized);
