@@ -92,6 +92,8 @@ public sealed class BuiltinGateRegistry
         new BuildCheckGate(runner),
         new FastLaneGate(runner),
         new VerifyCodeGate(runner),
+        new TestRunGate(runner),
+        new TestReportGate(runner),
         new CodeHygieneGate(runner),
         new AppLaunchGate(runner),
         new SliceGuardGate(runner),

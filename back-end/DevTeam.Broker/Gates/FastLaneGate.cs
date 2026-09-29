@@ -25,8 +25,13 @@ public sealed class FastLaneGate : IGate
     private const int MaxEvidenceChars = 4000;
 
     private readonly IProcessRunner _runner;
+    private readonly GitChangeSet _changes;
 
-    public FastLaneGate(IProcessRunner runner) => _runner = runner;
+    public FastLaneGate(IProcessRunner runner)
+    {
+        _runner = runner;
+        _changes = new GitChangeSet(runner);
+    }
 
     public string Name => BuiltinRegistry.FastLane;
 
@@ -34,7 +39,7 @@ public sealed class FastLaneGate : IGate
     {
         var workspace = request.WorkspacePath;
         var baseRef = GateInputs.GetOptional(request.Inputs, "baseRef");
-        var changed = await ChangedPathsAsync(workspace, baseRef, cancellationToken);
+        var changed = await _changes.ChangedPathsAsync(workspace, baseRef, cancellationToken);
 
         if (changed.Count == 0)
             return GateResult.Pass("Nothing changed to check", "fast lane: no changed files since " + (baseRef ?? "HEAD"));
@@ -88,33 +93,6 @@ public sealed class FastLaneGate : IGate
         => baseRef is null
             ? "npx jest --onlyChanged --passWithNoTests"
             : $"npx jest --changedSince={baseRef} --passWithNoTests";
-
-    private async Task<IReadOnlyList<string>> ChangedPathsAsync(
-        string workspacePath, string? baseRef, CancellationToken cancellationToken)
-    {
-        var paths = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-
-        void Add(IEnumerable<string> discovered)
-        {
-            foreach (var path in discovered)
-            {
-                if (seen.Add(path))
-                    paths.Add(path);
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(baseRef))
-            Add(ChangedFiles.Parse((await GitAsync($"diff --name-only {baseRef}...HEAD", workspacePath, cancellationToken)).StandardOutput));
-
-        // Uncommitted work is the common case in the developer loop, so it is always part of the
-        // scope - a base ref alone would miss the edit that was just made.
-        Add(ChangedFiles.ParsePorcelain((await GitAsync("status --porcelain", workspacePath, cancellationToken)).StandardOutput));
-        return paths;
-    }
-
-    private Task<ProcessRunResult> GitAsync(string arguments, string workspacePath, CancellationToken cancellationToken)
-        => _runner.RunAsync(new ProcessRunRequest("git", arguments, workspacePath, StepTimeoutMs), cancellationToken);
 
     private async Task<StepOutcome> StepAsync(string commandLine, string workingDirectory, CancellationToken cancellationToken)
     {
