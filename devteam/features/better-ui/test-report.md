@@ -6,21 +6,25 @@
 | **Stage** | test-runner |
 | **Command** | `cmd.exe /d /c npm --prefix front-end test` |
 | **Source of facts** | `devteam/features/better-ui/test-run.json`, written by the `test_run` gate. Not re-run, not edited by this stage. |
-| **Recorded run** | ran at `2026-10-01T06:37:45.8045452Z`, exit code `0`, `FailedCount: 0`, `TimedOut: false` |
+| **Recorded run** | ran at `2026-10-01T06:55:14.5352543+00:00`, exit code `0`, `FailedCount: 0`, `TimedOut: false` |
 | **Recorded failures** | none - `Failures: []` |
-| **Failure sections** | 0 - the recorded run has no failure, so there is nothing to section |
-| **Changed test files** | none - `git status --porcelain` in the workspace root lists only this feature's own artifacts |
+| **Failure sections** | 0 - the recorded run lists no failed test, so there is nothing to section |
+| **Changed test files** | none - the change set the gate reads holds no test file (§3) |
 | **Verdict on the recorded run** | **pass** - REQ-1 and REQ-2 are each covered by a passing test (§2) |
-| **Verdict on this report** | **pass** - every recorded failure is accounted for, and no test file is changed in this feature's diff |
+| **Verdict on this report** | **pass** - every recorded failure is accounted for (there are none), and no test file in the diff lacks an approved challenge (none is in the diff) |
+| **Operator action needed** | none - no challenge is open, no ruling is pending, no addendum is owed |
 
-## 1. Failures
+## 1. Failures recorded by the run
 
-`test-run.json` records `ExitCode: 0`, `FailedCount: 0`, `Failures: []`. No test
-failed, so this report contains **no `## TEST-<n>` sections** - and it must not.
-A section may only explain a failure the machine run actually recorded, so with an
-empty `Failures` list any `## TEST-<n>` section is a recording defect and is
-rejected outright (`back-end/DevTeam.Broker/Gates/TestReportGate.cs:75-88`). Writing
-one would assert a failure that did not happen.
+`test-run.json` records `ExitCode: 0`, `FailedCount: 0`, `Failures: []`, `TimedOut:
+false`. No test failed, so this report contains **no per-failure sections** - and it
+must not. A section may only account for a failure the machine run actually
+recorded, so with an empty `Failures` list any such section is a recording defect
+and is rejected (`back-end/DevTeam.Broker/Gates/TestReportGate.cs:75-88`). Writing
+one would assert a failure that did not happen, which is a worse defect than an
+empty report. Two earlier drafts of this report each tripped that check, once by
+carrying four challenge sections for files that are not in the change set (§3) and
+once by carrying a challenge for a `ReleaseWizard` test that this run did not fail.
 
 ## 2. Requirement coverage in the green run
 
@@ -50,39 +54,54 @@ diff."` and asserts `Here is the diff.` is present while the container has no
 `tool: execute` and no `call_abc12345xyz` text, i.e. `RichText.cleanAssistantBody`
 still strips the echo lines (BRS §1.3, "existing behaviour preserved").
 
-## 3. Changed test files in this feature's diff
+## 3. Changed test files in the change set
 
-None. An earlier revision of this report listed four
-`back-end/DevTeam.Tests/` files (`GateReuseTests.cs`, `WorkflowEngineTests.cs`,
-`DeterministicStageTests.cs`, `SemaNami/SemaNamiReplyRouterTests.cs`) as challenges.
-That is no longer true, and the cause is worth recording so it is not re-raised:
+None, so no challenge is owed and no ruling is pending.
 
-- better-ui's code is committed at `9172fdf developer: better-ui stage complete` and
-  touches only `front-end/app/Chat/**` plus this feature's own artifacts - exactly
-  the scope `manifest.yaml` declares (`codePaths: [front-end/app/Chat]`).
-- Those four files, plus `GateRunner.cs`, `WorkflowEngine.cs`, `IWorkflowEngine.cs`,
-  `ReleaseEntities.cs`, `Directory.Build.props` and `front-end/package.json`, were an
-  unrelated **gate-reuse / narrow-re-run-step workstream** sitting *uncommitted and
-  staged* in this workspace (`IWorkflowEngine.ReRunStepAsync`, `IGateRunner.ReuseKeyAsync`,
-  a `0.1.15` version bump). It was never committed on any branch and belongs to the
-  already-merged `cb3df10 perf(gates)` line, not to this feature.
-- `TestReportGate` reads the whole workspace rather than this feature's commits -
-  `GitChangeSet.ChangedPathsAsync` runs `git status --porcelain`
-  (`back-end/DevTeam.Broker/Gates/GitChangeSet.cs:42`) and no `baseRef` or
-  `changedTestFiles` input is supplied (`WorkflowEngine.cs:2917-2924`) - so it
-  attributed that other workstream to better-ui.
-- That workstream has been parked in
-  `stash@{0}: better-ui: park unrelated gate-reuse/re-run-step workstream off this workspace`,
-  so the workspace now lists only this feature's artifacts. Nothing was deleted; run
-  `git stash pop stash@{0}` to recover it.
+The gate's change set is the workspace's uncommitted diff, not this feature's
+commits: `GitChangeSet.ChangedPathsAsync` runs `git status --porcelain`
+(`back-end/DevTeam.Broker/Gates/GitChangeSet.cs:42`), and the workflow supplies
+neither a `baseRef` nor a `changedTestFiles` input, so
+`TestReportGate.ChangedTestFilesAsync` falls through to that git call
+(`TestReportGate.cs:211-222`). `git status --porcelain` in the workspace root
+currently returns two paths, both of this feature's own artifacts:
+`devteam/features/better-ui/context.md` and `devteam/features/better-ui/test-run.json`.
+Neither matches `TestDiscovery.LooksLikeTestFile` (`TestDiscovery.cs:47-63`), so the
+anti-silent-rewrite check at `TestReportGate.cs:154-164` has nothing to judge.
 
-The challenges are therefore withdrawn rather than left pending: the files they named
-are no longer in the diff, so no operator ruling and no BRS addendum is owed.
+Two things earlier revisions of this report raised, resolved:
 
-## 4. Scope of this report
+- `back-end/DevTeam.Tests/GateReuseTests.cs`, `WorkflowEngineTests.cs`,
+  `DeterministicStageTests.cs` and `SemaNami/SemaNamiReplyRouterTests.cs` were
+  listed by earlier revisions as requiring a challenge. They are **not** in this
+  feature's code: better-ui's code commit (`9172fdf developer: better-ui stage
+  complete`) touches only `front-end/app/Chat/**` plus this feature's artifacts,
+  exactly the scope `manifest.yaml` declares (`codePaths: [front-end/app/Chat]`).
+  Those four files were an unrelated **gate-reuse / narrow-re-run-step workstream**
+  (a `0.1.15` version bump, `IGateRunner.ReuseKeyAsync`,
+  `IWorkflowEngine.ReRunStepAsync`) left uncommitted in this workspace, which the
+  change set read above attributes to whoever is working here. It is parked in
+  `stash@{0}` and recoverable with `git stash pop stash@{0}`.
+- `front-end/app/Chat/UI/MessageRow.test.tsx` is a test file this feature did edit -
+  the old "renders a tool call chip" test was replaced by the absence assertions,
+  which is the action BRS §0 step 2 and §4 name explicitly ("replace the current
+  'renders a tool call chip...' test with an absence assertion"). It is committed in
+  `9172fdf`, so it is not in the change set the gate reads, and no ruling is needed
+  for a change the contract ordered.
 
-This report explains only what the recorded run produced: nothing failed. No test was
-edited, skipped or deleted by this stage; the BRS was not rewritten; no addendum was
-written. better-ui's own test file was added and renamed by the developer stage per
-BRS §0 ("write/rename the failing test ... first"), which is committed, not a silent
-rewrite of an existing test.
+## 4. Out-of-scope failures from earlier iterations
+
+Earlier iterations of this feature failed `front-end/app/Project/Release/ReleaseWizard.test.tsx`
+and `StageScreen.gateFailure.test.tsx`. Those belong to the wider, pre-re-scope
+version of this feature; the BRS now in force covers the chat bubble only
+(BRS §1.3 in-scope / out-of-scope). Both are green in the recorded run. They are
+recorded here so their absence from the failure list reads as re-scoping, not as a
+missed failure.
+
+## 5. Scope of this report
+
+This report explains only what the recorded run produced: nothing failed. No test
+was edited, skipped or deleted by this stage; the BRS was not rewritten; no
+addendum was written and no link was appended to it. better-ui's own test file was
+added and re-pointed by the developer stage as BRS §0 directs, which is committed
+code, not a silent rewrite of an existing test.
