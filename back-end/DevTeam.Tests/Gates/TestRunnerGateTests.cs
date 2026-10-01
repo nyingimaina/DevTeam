@@ -407,6 +407,92 @@ public class TestReportGateTests
         Assert.Contains("operator ruling", result.EvidenceText);
     }
 
+    [Fact]
+    public async Task Fails_WhenASectionAccountsForNoRecordedFailure()
+    {
+        // The inverse of "every failure needs a section": a section may only account for a failure
+        // the machine run actually recorded. Without this, a green run can be held hostage by a
+        // challenge for a test that never failed - and the only ways out are accepting an addendum
+        // for a non-failure or sending the developer to implement a non-failure.
+        var workspace = CreateWorkspace();
+        WriteRun(workspace); // green: zero recorded failures
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), OrphanSectionReport);
+        var gate = new TestReportGate();
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.TestReport, workspace, "feat-001", "test-runner"),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Contains("recording defect", result.EvidenceText);
+        Assert.Contains("Scroller", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task AnOrphanSectionIsReportedAsADefect_NotAsAnUnaccountedFailure()
+    {
+        // Both directions are wrong in different ways and the operator has to be able to tell them
+        // apart: an unaccounted failure means the report forgot a real failure; a recording defect
+        // means the report invented one.
+        var workspace = CreateWorkspace();
+        WriteRun(workspace); // green, so nothing is unaccounted
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), OrphanSectionReport);
+        var gate = new TestReportGate();
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.TestReport, workspace, "feat-001", "test-runner"),
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.DoesNotContain("no section in the report", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task ASectionIsAccepted_WhenItAccountsForARecordedFailureAmongSeveral()
+    {
+        // Guards against the defect check being sloppy in the other direction: a report that
+        // accounts for a real failure AND mentions an unrelated passing test in passing prose must
+        // still pass, or ordinary narrative kills the stage.
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"),
+            """
+            # Test report - feat-001
+
+            Result: 11 passed, 1 failed. The suite also covers "Scroller > scrolls", which passed.
+
+            ## TEST-1: Wizard > saves
+            - Test: front-end/app/Wizard.test.tsx
+            - Requirement: REQ-4
+            - Verdict: fix
+            - Expected: Given a filled wizard, When I save, Then settings persist
+            - Observed: save returns 500, nothing persisted
+            - Likely cause: the save handler throws before the fetch
+            - Classification: introduced by this feature
+            """);
+        var gate = new TestReportGate();
+
+        var result = await gate.RunAsync(
+            new GateRequest(BuiltinRegistry.TestReport, workspace, "feat-001", "test-runner"),
+            CancellationToken.None);
+
+        // Still fails, but as a routed code defect - not as a recording defect.
+        Assert.False(result.Passed);
+        Assert.DoesNotContain("recording defect", result.EvidenceText);
+    }
+
+    private const string OrphanSectionReport = """
+        # Test report - feat-001
+
+        Result: 12 passed, 0 failed. One flaky failure seen on a re-run is reported below.
+
+        ## TEST-1: Scroller > scrolls to the bottom
+        - Test: front-end/app/Scroller.test.tsx
+        - Requirement: none
+        - Verdict: challenge
+        - Ruling: pending operator ruling
+        """;
+
     private static string ChallengeReport(bool pending = false, bool rejected = false, string? ruling = null)
     {
         ruling ??= pending

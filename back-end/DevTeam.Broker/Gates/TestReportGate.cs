@@ -67,6 +67,26 @@ public sealed class TestReportGate : IGate
                 reportPath);
         }
 
+        // A section may only account for a failure the machine run actually recorded. Without this
+        // inverse check a green run can be held hostage: the agent files a challenge for a test it
+        // saw fail on a re-run of its own, and the only ways out are accepting a BRS addendum for a
+        // test that never failed or sending the developer to "implement as written" a non-failure.
+        // It is the mirror of the check above, so the two are reported differently on purpose.
+        var recordingDefects = sections
+            .Where(section => !run.Failures.Any(failure => TestReportReader.AccountsFor(section, failure)))
+            .ToArray();
+        if (recordingDefects.Length > 0)
+        {
+            foreach (var section in recordingDefects)
+            evidence.Append(
+                $"fail: {Heading(section)} is a recording defect - it accounts for no failure the test run recorded " +
+                $"({run.FailedCount} recorded). A section may only explain a test that actually failed.\n");
+            return GateResult.Fail(
+                "The report describes a failure the test run did not record",
+                evidence.ToString(),
+                reportPath);
+        }
+
         var problems = new List<string>();
         var pendingFixes = new List<string>();
 
