@@ -13,13 +13,50 @@ namespace DevTeam.Broker.Gates;
 /// complete - timeout, no command - fails, because then there are no facts to write.
 /// </para>
 /// </summary>
-public sealed class TestRunGate : IGate
+public sealed class TestRunGate : IGate, IReusableGate
 {
     private readonly IProcessRunner _runner;
 
     public TestRunGate(IProcessRunner runner) => _runner = runner;
 
     public string Name => BuiltinRegistry.TestRun;
+
+    /// <summary>
+    /// Keyed on the command, where it runs, and the content of the files this feature changed.
+    /// <para>
+    /// The feature's own artifact directory is excluded on purpose: this gate writes test-run.json
+    /// into it, so hashing the directory would make the key change the moment the gate runs and it
+    /// could never be reused - the check would invalidate itself.
+    /// </para>
+    /// </summary>
+    public async Task<string?> ReuseKeyAsync(GateRequest request, CancellationToken cancellationToken)
+    {
+        var workspace = request.WorkspacePath;
+        var featureKey = request.FeatureKey ?? string.Empty;
+        if (string.IsNullOrEmpty(featureKey)) return null;
+
+        var commandLine = GateInputs.GetOptional(request.Inputs, "commandLine")
+            ?? SliceManifestIO.TryRead(ArtifactPaths.ManifestPath(workspace, featureKey))?.TestCommand
+            ?? "dotnet test DevTeam.slnx";
+        var workingDirectory = GateInputs.Get(request.Inputs, "workingDirectory", workspace);
+
+        var artifactDir = ArtifactPaths.FeatureDir(workspace, featureKey);
+        var changed = await new GitChangeSet(new SystemProcessRunner())
+            .ChangedPathsAsync(workspace, GateInputs.GetOptional(request.Inputs, "baseRef"), cancellationToken);
+
+        return GateCache.ForWorkspace(
+            workspace,
+            commandLine,
+            workingDirectory,
+            changed.Where(path => !IsInside(path, artifactDir)));
+    }
+
+    private static bool IsInside(string path, string directory)
+    {
+        var normalized = path.Replace('\\', '/');
+        var prefix = directory.Replace('\\', '/').TrimEnd('/') + "/";
+        return normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
 
     public async Task<GateResult> RunAsync(GateRequest request, CancellationToken cancellationToken)
     {

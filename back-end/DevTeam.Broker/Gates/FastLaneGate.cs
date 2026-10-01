@@ -19,7 +19,7 @@ namespace DevTeam.Broker.Gates;
 /// test-runner stage. Failing here means "fix this now"; passing here means "not obviously
 /// broken", nothing more.
 /// </summary>
-public sealed class FastLaneGate : IGate
+public sealed class FastLaneGate : IGate, IReusableGate
 {
     private const int StepTimeoutMs = 180_000;
     private const int MaxEvidenceChars = 4000;
@@ -34,6 +34,20 @@ public sealed class FastLaneGate : IGate
     }
 
     public string Name => BuiltinRegistry.FastLane;
+
+    /// <summary>
+    /// Keyed on the content of every changed file, because that set is exactly what this gate reads
+    /// (the C# incremental build, the type check and the scoped tests all key off it). Edit one of
+    /// those files and the key changes, so the next check re-runs; leave the tree alone and the
+    /// recorded verdict stands.
+    /// </summary>
+    public async Task<string?> ReuseKeyAsync(GateRequest request, CancellationToken cancellationToken)
+    {
+        var workspace = request.WorkspacePath;
+        var baseRef = GateInputs.GetOptional(request.Inputs, "baseRef");
+        var changed = await _changes.ChangedPathsAsync(workspace, baseRef, cancellationToken);
+        return GateCache.ForChangedFiles(workspace, changed, baseRef, Name);
+    }
 
     public async Task<GateResult> RunAsync(GateRequest request, CancellationToken cancellationToken)
     {
