@@ -559,7 +559,8 @@ public sealed class BrokerCoordinator : IAsyncDisposable, IWorkflowCoordinator
                     // Null only when nothing has ever been reported. After a first reading, a turn
                     // that reports none of its own carries the last known figure: reporting zero
                     // instead would claim the context was emptied, and the agent never said so.
-                    ContextTokens: _context.UpdatedAt is null ? null : contextTokens));
+                    ContextTokens: _context.UpdatedAt is null ? null : contextTokens),
+                ReplyText: _turn?.Text.Length > 0 ? _turn.Text.ToString() : null);
         }
         catch (OperationCanceledException) when (providerFailure is { IsFailure: true })
         {

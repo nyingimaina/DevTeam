@@ -31,9 +31,38 @@ public sealed class VerifyCodeGate : IGate
         var failed = result.ExitCode != 0
             || TestOutputNormalizer.FailedCount(normalized) > 0
             || TestOutputNormalizer.FailureEntries(raw).Count > 0;
-        return failed
-            ? GateResult.Fail($"Tests failed", normalized)
-            : GateResult.Pass("Tests passed", normalized);
+        if (!failed)
+            return GateResult.Pass("Tests passed", normalized);
+
+        // A failure the operator already ruled on is settled, not a new defect. The test-runner
+        // stage adjudicated this suite; re-failing the same red test here would send the developer
+        // (who may not edit tests) round in a circle.
+        var entries = TestOutputNormalizer.FailureEntries(raw);
+        var accepted = AcceptedFailures(request, entries);
+        var summaryFailures = TestOutputNormalizer.FailedCount(normalized);
+        if (entries.Count > 0 && accepted.Count == entries.Count && summaryFailures <= accepted.Count)
+        {
+            return GateResult.Pass(
+                "Tests passed apart from failures the operator accepted",
+                normalized + "\n" + string.Join('\n', accepted.Select(name => $"accepted: {name}")));
+        }
+
+        return GateResult.Fail("Tests failed", normalized);
+    }
+
+    private static IReadOnlyList<string> AcceptedFailures(GateRequest request, IReadOnlyList<string> failures)
+    {
+        var reportPath = ArtifactPaths.TestReportPath(request.WorkspacePath, request.FeatureKey ?? string.Empty);
+        if (failures.Count == 0 || !File.Exists(reportPath))
+            return [];
+
+        var accepted = TestReportReader.Parse(File.ReadAllText(reportPath))
+            .Where(section => section.IsChallenge
+                && TestAddendum.IsAccepted(TestRulings.EffectiveRuling(request.WorkspacePath, request.FeatureKey ?? string.Empty, section)))
+            .ToArray();
+        return failures
+            .Where(failure => accepted.Any(section => TestReportReader.AccountsFor(section, failure)))
+            .ToArray();
     }
 
     private static (string FileName, string Arguments) SplitCommand(string commandLine)

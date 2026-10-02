@@ -14,6 +14,7 @@ import {
   MessageDto,
   ModelCandidateDto,
   ModelSwitchResultDto,
+  AttentionItemDto,
   NotificationSettingsDto,
   MetricsSummaryDto,
   ModelOption,
@@ -237,6 +238,22 @@ export default class BrokerApi {
     return this.requestAsync<ModelOption[]>(
       `/api/models/available?workspacePath=${encodeURIComponent(workspacePath)}`,
     );
+  }
+
+  // ─── things only the person can do next ───────────────────────────────
+
+  getAttentionAsync(workspacePath: string): Promise<AttentionItemDto[]> {
+    return this.requestAsync<AttentionItemDto[]>(
+      `/api/attention?workspacePath=${encodeURIComponent(workspacePath)}`,
+    );
+  }
+
+  /** The person's one-click call on a challenged test: accept the change, or keep the requirement. */
+  recordRulingAsync(featureId: string, test: string, decision: "accept" | "reject"): Promise<{ ok: boolean }> {
+    return this.requestAsync<{ ok: boolean }>(`/api/features/${featureId}/rulings`, {
+      method: "POST",
+      body: JSON.stringify({ test, decision }),
+    });
   }
 
   // ─── desktop notifications ─────────────────────────────────────────────

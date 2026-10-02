@@ -1,0 +1,174 @@
+/* A flex item between the tab bar and the scrolling page, so it is always on screen. */
+.bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  border-left: 6px solid var(--accent);
+  color: var(--text-heading);
+  animation: attentionPulse 2.4s ease-in-out infinite;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.message {
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.more {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.action {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.action:hover {
+  background: var(--accent-hover);
+}
+
+/* The dark accent is a light green: white text on it fails contrast, so flip to dark text. */
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme="light"])) .action {
+    color: #04210f;
+  }
+}
+
+:global(:root[data-theme="dark"]) .action {
+  color: #04210f;
+}
+
+.action:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+@keyframes attentionPulse {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 0 var(--accent-soft);
+  }
+  50% {
+    box-shadow: inset 0 0 0 100vmax var(--accent-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    animation: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.questionTitle {
+  font-weight: 700;
+}
+
+.label {
+  font-weight: 600;
+}
+
+.details summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.details pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+
+.answers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.answer {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--bg-surface);
+  color: var(--text-heading);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.answer:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.answer:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.answer:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.status {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.problem {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--danger);
+}

@@ -1,5 +1,6 @@
 using DevTeam.Broker.Context;
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Gates;
 using DevTeam.Broker.Diagnostics;
 using DevTeam.Broker.Metrics;
 using DevTeam.Broker.Gates.Readiness;
@@ -671,7 +672,9 @@ public static class ApiEndpoints
         app.MapGet("/healthz", (HttpContext ctx) =>
         {
             var appInfo = ctx.RequestServices.GetRequiredService<IAppInfo>();
-            return Results.Ok(new HealthResponse("ok", appInfo.Version));
+            var boot = ctx.RequestServices.GetRequiredService<BrokerBootInfo>();
+            return Results.Ok(new HealthResponse(
+                "ok", appInfo.Version, boot.ProcessId, boot.BootId.ToString(), boot.DataDirFingerprint));
         });
 
         app.MapGet("/api/info", async (HttpContext ctx) =>
@@ -796,6 +799,33 @@ public static class ApiEndpoints
 
             var cleanup = ctx.RequestServices.GetRequiredService<IWorkspaceProcessCleanupService>();
             return Results.Ok(await cleanup.StopApproved(request.ProcessIds));
+        });
+
+        // ─── things only the person can do next ──────────────────────────────
+        // The one place the UI asks "is anything waiting on me?" - approvals and stalled stages -
+        // so it can be shown (and announced) everywhere instead of being found by scrolling.
+        app.MapGet("/api/attention", async (string? workspacePath, HttpContext ctx) =>
+        {
+            var attention = ctx.RequestServices.GetRequiredService<AttentionService>();
+            return Results.Ok(await attention.ListAsync(workspacePath, ctx.RequestAborted));
+        });
+
+        // The person's one-click answer to a test the checker challenged. Recorded by the broker, not
+        // typed to an agent, and kept beside the report so a rewritten report cannot lose it.
+        app.MapPost("/api/features/{featureId:guid}/rulings", async (Guid featureId, RecordRulingRequest request, HttpContext ctx) =>
+        {
+            var decision = request.Decision?.Trim().ToLowerInvariant() switch
+            {
+                "accept" => (RulingDecision?)RulingDecision.Accept,
+                "reject" => RulingDecision.Reject,
+                _ => null,
+            };
+            if (decision is null || string.IsNullOrWhiteSpace(request.Test))
+                return Results.BadRequest(new { error = "A test and a decision (accept or reject) are required." });
+
+            var attention = ctx.RequestServices.GetRequiredService<AttentionService>();
+            var result = await attention.RecordRulingAsync(featureId, request.Test, decision.Value, ctx.RequestAborted);
+            return result.Ok ? Results.Ok(result) : Results.Conflict(new { error = result.Problem });
         });
 
         // ─── active turn (the one agent turn the broker can run at a time) ────

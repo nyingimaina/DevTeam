@@ -57,6 +57,38 @@ public class UserNotifierTests : IDisposable
     }
 
     [Fact]
+    public async Task AStageThatNeedsYourDecision_SaysSo_WithTheReasonInPlainWords()
+    {
+        var outcome = Outcome("BlockedGate", allPassed: false) with
+        {
+            NeedsDecision = true,
+            Detail = "The same check has been sent back and forth 3 times — it needs your decision.",
+        };
+
+        await CreateNotifier().StageFinishedAsync(outcome, CancellationToken.None);
+
+        var request = Assert.Single(_platform.Requests);
+        Assert.Contains("needs your decision", request.Title);
+        Assert.Contains("sent back and forth 3 times", request.Message);
+        Assert.Equal(NotificationUrgency.Attention, request.Urgency);
+    }
+
+    [Fact]
+    public async Task ADecisionIsStillAnnouncedWhenGenericAttentionAlertsAreSwitchedOff()
+    {
+        // Nothing automatic will ever resolve a decision, so silencing "needs attention" must not
+        // be able to leave a novice staring at a stalled app that never told them why.
+        var settings = await CreateSettingsAsync();
+        await settings.SetAsync(null, needsAttention: false, null, null, CancellationToken.None);
+        var notifier = new UserNotifier(_platform, settings, NullLogger<UserNotifier>.Instance);
+
+        await notifier.StageFinishedAsync(
+            Outcome("BlockedGate", allPassed: false) with { NeedsDecision = true }, CancellationToken.None);
+
+        Assert.Single(_platform.Requests);
+    }
+
+    [Fact]
     public async Task AStageStillRunning_IsNotWorthANotification()
     {
         foreach (var status in new[] { "Active", "Pending", "GatesRunning", "Stale" })

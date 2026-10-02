@@ -1,4 +1,5 @@
 using DevTeam.Broker.Domain;
+using DevTeam.Broker.Gates;
 using DevTeam.Broker.Server;
 
 namespace DevTeam.Broker.Workflow;
@@ -49,6 +50,9 @@ public sealed record StepExecutionResult
     // The role that should act when this specific gate fails — see WorkflowStep.ResponsibleRole.
     // Null means "the role currently running owns this," i.e. today's implicit default.
     public string? ResponsibleRole { get; init; }
+
+    /// <summary>Who must act on a failure - the gate knows better than the step's static owner.</summary>
+    public FailureKind Kind { get; init; }
 
     /// <summary>How long the check took, so a slow check is visible after the fact.</summary>
     public long DurationMs { get; init; }

@@ -69,6 +69,19 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
     }
 
     [Fact]
+    public async Task Attention_IsAnEmptyListWhenNothingIsWaitingOnThePerson()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/api/attention?workspacePath=" + Uri.EscapeDataString(@"C:\nowhere\at-all"));
+
+        response.EnsureSuccessStatusCode();
+        var items = await response.Content.ReadFromJsonAsync<List<AttentionItem>>(JsonOptions);
+        Assert.NotNull(items);
+        Assert.Empty(items!);
+    }
+
+    [Fact]
     public async Task SemaNamiSettings_RoundTripsThroughTheApi()
     {
         // Available reflects TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID being set in the *process*
@@ -1489,6 +1502,12 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                 services.RemoveAll<IWorkspaceProcessCleanupService>();
                 services.AddSingleton<IWorkspaceProcessCleanupService>(CleanupService);
 
+                // No agent runs in these tests. An independent review used to be waved through when
+                // its session could not start; it now (correctly) needs a verdict, so answer reviews
+                // - and only reviews - with a PASS and leave every other prompt on the real path.
+                services.RemoveAll<IWorkflowCoordinator>();
+                services.AddSingleton<IWorkflowCoordinator>(sp => new PassingReviewCoordinator(sp.GetRequiredService<BrokerCoordinator>()));
+
                 services.RemoveAll<IProcessLauncher>();
                 services.AddSingleton<IProcessLauncher>(ProcessLauncher);
 
@@ -1512,6 +1531,25 @@ public class ApiIntegrationTests : IClassFixture<ApiIntegrationTests.AppFactory>
                     services.Remove(semaNamiHostedService);
             });
         }
+    }
+
+    /// <summary>Answers review prompts with a PASS verdict and delegates everything else — see AppFactory.</summary>
+    private sealed class PassingReviewCoordinator(IWorkflowCoordinator inner) : IWorkflowCoordinator
+    {
+        public Task<SessionSummary> NewSessionAsync(string workspacePath, string? modelId, IReadOnlyList<string>? allowedWritePrefixes, CancellationToken ct)
+            => inner.NewSessionAsync(workspacePath, modelId, allowedWritePrefixes, ct);
+
+        public Task<string> SetModeAsync(Guid sessionId, string modeId, CancellationToken ct)
+            => inner.SetModeAsync(sessionId, modeId, ct);
+
+        public Task<PromptResponse> PromptWithSessionRecoveryAsync(
+            Guid sessionId, string text, CancellationToken ct, bool isPriming = false, string? displayText = null)
+            => text.Contains(ReviewVerdict.Instruction, StringComparison.Ordinal)
+                ? Task.FromResult(new PromptResponse(sessionId, "end_turn", 0, 0, 0, ReplyText: "VERDICT: PASS"))
+                : inner.PromptWithSessionRecoveryAsync(sessionId, text, ct, isPriming, displayText);
+
+        public Task<FeatureContextReset?> ResetContextOnFeatureChangeAsync(Guid sessionId, string featureKey, CancellationToken ct)
+            => inner.ResetContextOnFeatureChangeAsync(sessionId, featureKey, ct);
     }
 
     /// <summary>Captures notifications instead of raising real toasts — see AppFactory.</summary>

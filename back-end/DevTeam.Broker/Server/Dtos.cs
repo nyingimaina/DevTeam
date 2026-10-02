@@ -93,13 +93,27 @@ public sealed record PromptResponse(
     long InputTokens,
     long OutputTokens,
     long TotalTokens,
-    TurnMeasurement? Measurement = null);
+    TurnMeasurement? Measurement = null,
+    // What the agent said this turn, so a caller that must read the answer (a review's verdict)
+    // does not have to go back to the database for the latest assistant message.
+    string? ReplyText = null);
 
 public sealed record SetModelRequest(string ModelId);
 
+/// <summary>The person's call on a challenged test: "accept" the change or "reject" it (keep the requirement).</summary>
+public sealed record RecordRulingRequest(string Test, string Decision);
+
 public sealed record SetModeRequest(string ModeId);
 
-public sealed record HealthResponse(string Status, string? Version = null);
+// ProcessId/BootId/DataDirHash are the boot identity: the desktop shell reads them off
+// /healthz to decide whether the broker answering is the one it would have spawned for
+// its own data directory (adopt) or a different one (refuse to adopt, surface it).
+public sealed record HealthResponse(
+    string Status,
+    string? Version = null,
+    int? ProcessId = null,
+    string? BootId = null,
+    string? DataDirHash = null);
 
     public sealed record UsageDto(long InputTokens, long OutputTokens, long TotalTokens, long? CachedReadTokens);
 

@@ -44,6 +44,20 @@ public sealed class GitChangeSet
         return paths;
     }
 
+    /// <summary>
+    /// Only what has been committed since <paramref name="baseRef"/>: the feature's own diff, with
+    /// none of the checkout's unrelated uncommitted work mixed in. Null when git cannot resolve the
+    /// ref, so a caller falls back to the working tree instead of concluding "nothing changed".
+    /// </summary>
+    public async Task<IReadOnlyList<string>?> CommittedPathsAsync(
+        string workspacePath, string baseRef, CancellationToken cancellationToken)
+    {
+        var committed = await RunAsync($"diff --name-only {baseRef}...HEAD", workspacePath, cancellationToken);
+        return committed.ExitCode == 0 && !committed.TimedOut
+            ? ChangedFiles.Parse(committed.StandardOutput).ToArray()
+            : null;
+    }
+
     private Task<ProcessRunResult> RunAsync(string arguments, string workspacePath, CancellationToken cancellationToken)
         => _runner.RunAsync(new ProcessRunRequest("git", arguments, workspacePath, TimeoutMs), cancellationToken);
 }

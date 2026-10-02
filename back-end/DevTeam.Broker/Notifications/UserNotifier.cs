@@ -1,7 +1,9 @@
 namespace DevTeam.Broker.Notifications;
 
 /// <summary>What happened to a stage, as the notifier needs to know it.</summary>
-public sealed record StageOutcome(string FeatureKey, string StageName, string Status, bool AllPassed, Guid? FeatureId = null);
+public sealed record StageOutcome(
+    string FeatureKey, string StageName, string Status, bool AllPassed, Guid? FeatureId = null,
+    bool NeedsDecision = false, string? Detail = null);
 
 /// <summary>
 /// Decides whether a stage outcome is worth a desktop notification, and raises it through the
@@ -68,6 +70,17 @@ public sealed class UserNotifier : IUserNotifier
                     outcome.FeatureId)
                 : null;
 
+        // Nothing automatic will ever resolve this one, so it is not governed by the generic
+        // "needs attention" preference: silencing that must not leave a stalled app silent.
+        if (outcome.Status == "BlockedGate" && outcome.NeedsDecision)
+            return new NotificationRequest(
+                $"{stage} needs your decision",
+                string.IsNullOrWhiteSpace(outcome.Detail)
+                    ? $"Feature '{feature}' is paused until you decide what to do."
+                    : $"Feature '{feature}': {outcome.Detail}",
+                NotificationUrgency.Attention,
+                outcome.FeatureId);
+
         if (outcome.Status is "BlockedGate" or "BlockedEntry" or "Escalated")
             return _settings.NeedsAttention
                 ? new NotificationRequest(
@@ -104,7 +117,7 @@ public sealed class UserNotifier : IUserNotifier
         }
     }
 
-    private static string FriendlyStage(string stageName) => stageName switch
+    internal static string FriendlyStage(string stageName) => stageName switch
     {
         "business-analyst" => "Business Analyst",
         "qa" => "QA",

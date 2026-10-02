@@ -177,6 +177,16 @@ public sealed class WorkflowYaml
             Signoff = Signoffs.ReleaseApproval,
             UserInputRequired = false,
             WritesCode = true,
+            // QA had no written contract at all - only the generic autonomous preamble - so it was
+            // free to improvise (and to fail the developer for things the developer cannot change).
+            SeedPrompt =
+                " You are the verifier, not an author. Read the BRS and map every REQ to the test that proves it and " +
+                "the code that implements it, in devteam/features/<F>/coverage.md. Do not write or edit features or tests " +
+                "to make the picture look complete: a missing test or an unimplemented REQ is a gap to record in " +
+                "coverage.md (the coverage check routes it to the developer by itself - keep going). Finish with verdict " +
+                "\"blocked\" only when a requirement is ambiguous or contradicts another so that nobody could implement or " +
+                "test it, and with \"disputed\" when a check itself looks wrong; name the REQ id and say why. A person " +
+                "then decides - the pipeline will not bounce it around. ",
             ExpectedArtifacts = ["devteam/features/<F>/coverage.md"],
             Steps =
             [

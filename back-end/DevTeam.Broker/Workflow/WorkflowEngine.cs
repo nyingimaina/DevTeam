@@ -142,7 +142,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
         try
         {
             await _userNotifier.StageFinishedAsync(
-                new StageOutcome(featureKey, role.Name, stageRun.Status.ToString(), allPassed, featureId),
+                new StageOutcome(
+                    featureKey, role.Name, stageRun.Status.ToString(), allPassed, featureId,
+                    NeedsDecision: stageRun.Status == ReleaseStageStatus.BlockedGate && stageRun.AutoRetrySuppressed,
+                    Detail: stageRun.Summary),
                 CancellationToken.None);
         }
         catch (Exception ex)
@@ -1089,11 +1092,19 @@ public sealed class WorkflowEngine : IWorkflowEngine
             var delegationClause = BuildDelegationClause(specialists, featureKey);
             var profileClause = AsAugmentingClause(profilePromptText);
             var pointsContext = BuildNegotiationContext(feature, role.Name);
-            var closingInstruction = "When you are done, say DONE and provide a summary of what you changed.";
+            // The typed hand-off: what this stage tells the next one, and its answer to every point.
+            // Replaces "say DONE and summarise", which nothing read - gates judge the work, and the
+            // next stage got only a regenerated context.md with no word from this one.
+            var closingInstruction = StageResultIO.Instruction(featureKey, role.Name);
+            var previousResultContext = StageResultIO.BuildContext(
+                workspacePath, featureKey, currentIndex > 0 ? workflow.Pipeline[currentIndex - 1].Name : null);
+            // A result left by an earlier attempt must not be mistaken for this attempt's.
+            TryDeleteFile(StageResultIO.PathFor(workspacePath, featureKey, role.Name));
             var prompt = resolvedPrompt.OverridesBuiltIn
                 ? profilePromptText
                 : autonomyInstruction + seedInstruction + HandoffAutomationClause + AutonomousTersenessClause +
-                  delegationClause + profileClause + guidanceContext + pointsContext + artifactContext + closingInstruction;
+                  delegationClause + profileClause + guidanceContext + pointsContext + artifactContext +
+                  previousResultContext + closingInstruction;
             var composition = resolvedPrompt.OverridesBuiltIn
                 ? new PromptComposition(prompt.Length, 0, 0, 0, 0, 0, 0, 0, 0)
                 : new PromptComposition(
@@ -1113,6 +1124,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
                 SetCheckpoint(stageRun, StageCheckpointSignal.PromptSucceeded);
                 ClearPromptFailure(stageRun);
                 await db.SaveChangesAsync(ct);
+                await EnsureStageResultAsync(db, workspacePath, featureKey, role.Name, acpSessionId, promptResponse, ct);
             }
             catch (OperationCanceledException)
             {
@@ -1284,12 +1296,49 @@ public sealed class WorkflowEngine : IWorkflowEngine
         // *this* role's own loop can never converge (e.g. QA's verify_code failing because
         // developer didn't write tests — QA cannot author tests). Route the feature back to
         // whoever can actually fix it instead of leaving this stage in a dead-end retry loop.
+        // The stage's own word outranks green gates: if it says it is blocked, or that a check or
+        // requirement is wrong, no gate can see that - and advancing would bury the objection.
+        if (RoleUsesAgent(role) && !cancelled)
+        {
+            var reported = StageResultIO.TryRead(workspacePath, featureKey, role.Name);
+            if (reported.Ok && reported.Result!.Verdict != StageVerdict.Done)
+            {
+                allPassed = false;
+                finalFailedSteps.Add(new StepExecutionResult
+                {
+                    StepName = "stage_result",
+                    Passed = false,
+                    Reason = $"The {role.Name} stage reported it is {reported.Result.Verdict.ToString().ToLowerInvariant()}: {reported.Result.Summary}",
+                    Evidence = reported.Result.Summary,
+                    Kind = FailureKind.OperatorDecision,
+                });
+            }
+        }
+
         var routed = false;
+        // Set when the only thing that can unblock this stage is a person - see FailureKind.
+        var awaitingOperator = finalFailedSteps.Any(s => s.Kind == FailureKind.OperatorDecision);
+        var bouncesExhausted = false;
         if (!allPassed && finalFailedSteps.Count > 0)
         {
-            var owner = finalFailedSteps
-                .Select(s => s.ResponsibleRole)
-                .FirstOrDefault(r => !string.IsNullOrWhiteSpace(r) && r != role.Name);
+            // Only a code defect (Default) is worth sending upstream. A defective report or a
+            // pending ruling bounced to the developer just comes straight back.
+            var owner = awaitingOperator
+                ? null
+                : finalFailedSteps
+                    .Where(s => s.Kind == FailureKind.Default)
+                    .Select(s => s.ResponsibleRole)
+                    .FirstOrDefault(r => !string.IsNullOrWhiteSpace(r) && r != role.Name);
+
+            // The same check bouncing to the same owner again and again is a dead end no agent can
+            // break; stop and ask instead of sending it round once more.
+            if (owner is not null && NegotiationProtocol.BouncesExhausted(
+                    PriorPointsTo(feature, owner), finalFailedSteps.Select(s => s.StepName)))
+            {
+                bouncesExhausted = true;
+                awaitingOperator = true;
+                owner = null;
+            }
 
             routed = owner is not null && await RouteGateFailureToOwnerAsync(
                 feature, workflow, position, role.Name, currentIndex, owner, finalFailedSteps, db, ct);
@@ -1319,7 +1368,22 @@ public sealed class WorkflowEngine : IWorkflowEngine
             if (challenge is not null)
             {
                 var challengeResult = await RunChallengeAsync(challenge, stageRun, featureKey, workspacePath, db, ct);
-                if (!challengeResult.Passed) allPassed = false;
+                if (!challengeResult.Passed)
+                {
+                    allPassed = false;
+                    // A failed review is a failure like any other: the retry must be told what the
+                    // reviewer objected to (it used to see nothing), and the loop guard must see it.
+                    finalFailedSteps.Add(challengeResult);
+                    awaitingOperator |= challengeResult.Kind == FailureKind.OperatorDecision;
+                    db.ReleaseGuidanceNotes.Add(new ReleaseGuidanceNote
+                    {
+                        StageRunId = stageRun.Id,
+                        StageRun = stageRun,
+                        Text = BuildGateFailureFeedback([challengeResult]),
+                        AddedBy = "system:gate-failure",
+                    });
+                    await db.SaveChangesAsync(ct);
+                }
             }
         }
 
@@ -1337,6 +1401,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
             await CaptureNegotiationResponsesAsync(db, feature, role.Name, ct);
             if (!routed)
                 GateFailureLoopGuard.RecordFailure(stageRun, finalFailedSteps.Select(step => step.StepName).ToList());
+            // After the guard: RecordFailure assigns AutoRetrySuppressed outright and would undo it.
+            await HaltForOperatorOnDisputeAsync(db, feature, stageRun, ct);
+            if (awaitingOperator)
+                stageRun.AutoRetrySuppressed = true;
         }
 
         stageRun.ReadyToProceed = allPassed;
@@ -1375,6 +1443,10 @@ public sealed class WorkflowEngine : IWorkflowEngine
         stageRun.FinishedAt = DateTimeOffset.UtcNow;
         stageRun.Summary = allPassed
             ? $"Stage {role.Name} passed all gates and challenge."
+            : bouncesExhausted
+                ? $"The same check has been sent back and forth {NegotiationProtocol.MaxRounds} times without being resolved — it needs your decision."
+            : awaitingOperator
+                ? "This needs an operator decision before it can continue — re-running it cannot resolve it."
             : stageRun.AutoRetrySuppressed
                 ? "The same check keeps failing and the agent can't fix it — a person needs to look before running it again."
                 : $"Stage {role.Name} failed gates or challenge.";
@@ -1516,23 +1588,6 @@ public sealed class WorkflowEngine : IWorkflowEngine
         var targetIndex = FindRoleIndex(workflow, responsibleRole);
         if (targetIndex < 0 || targetIndex >= fromIndex) return false;
 
-        // Bound the exchange: after MaxRounds of the same owner failing the same checks, stop
-        // bouncing and hand it to the analyst to re-scope instead of looping forever.
-        var nextRound = NegotiationProtocol.NextRound(PriorPointsTo(feature, responsibleRole));
-        if (nextRound > NegotiationProtocol.MaxRounds)
-        {
-            var analyst = workflow.Pipeline.Count > 0 ? workflow.Pipeline[0].Name : null;
-            var analystIndex = analyst is null ? -1 : FindRoleIndex(workflow, analyst);
-            if (analystIndex < 0 || analystIndex >= fromIndex)
-                return false;
-
-            await MoveToStageAsync(
-                feature, position, fromStageName, analystIndex, analyst,
-                NegotiationProtocol.ReScopeSummary(nextRound) + Environment.NewLine + Environment.NewLine +
-                    BuildGateFailureFeedback(failedSteps),
-                "system:negotiation-cap", db, ct, failedSteps);
-            return true;
-        }
 
         await MoveToStageAsync(
             feature, position, fromStageName, targetIndex, responsibleRole,
@@ -2857,7 +2912,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
     {
         var result = step.Kind switch
         {
-            WorkflowStepKind.Builtin => await ExecuteBuiltinAsync(step.Builtin!, featureKey, workspacePath, ct),
+            WorkflowStepKind.Builtin => await ExecuteBuiltinAsync(step.Builtin!, featureKey, workspacePath, ct, BaseRefFor(stageRun)),
             WorkflowStepKind.Agent => new StepExecutionResult { StepName = $"agent:{step.AgentMode}", Passed = true, Evidence = "Interactive — handled via chat." },
             WorkflowStepKind.Loop => await ExecuteLoopAsync(step, role, featureKey, workspacePath, workflow, stageRun, db, ct),
             WorkflowStepKind.GatePrompt => await ExecuteGatePromptAsync(
@@ -2873,12 +2928,16 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return result with { ResponsibleRole = step.ResponsibleRole ?? result.ResponsibleRole };
     }
 
+    // The branch this stage's feature was cut from; null when the stage has no loaded release.
+    private static string? BaseRefFor(ReleaseStageRun stageRun)
+        => stageRun.Feature?.Release?.BranchName is { Length: > 0 } branch ? branch : null;
+
     private static string Truncate(string text, int maxChars) =>
         text.Length <= maxChars ? text : text[..maxChars] + "…";
 
-    private async Task<StepExecutionResult> ExecuteBuiltinAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
+    private async Task<StepExecutionResult> ExecuteBuiltinAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct, string? baseRef = null)
     {
-        var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: await BuildBuiltinInputsAsync(gateName, featureKey, workspacePath, ct));
+        var request = new GateRequest(gateName, workspacePath, featureKey, Inputs: await BuildBuiltinInputsAsync(gateName, featureKey, workspacePath, ct, baseRef));
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var result = await _gateRunner.RunAsync(gateName, request, ct);
         stopwatch.Stop();
@@ -2888,6 +2947,7 @@ public sealed class WorkflowEngine : IWorkflowEngine
             Passed = result.Passed,
             Reason = result.Reason,
             Evidence = result.EvidenceText,
+            Kind = result.Kind,
             DurationMs = stopwatch.ElapsedMilliseconds,
         };
     }
@@ -2914,8 +2974,13 @@ public sealed class WorkflowEngine : IWorkflowEngine
         };
     }
 
-    private static async Task<IReadOnlyDictionary<string, string>> BuildBuiltinInputsAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct)
+    private static async Task<IReadOnlyDictionary<string, string>> BuildBuiltinInputsAsync(string gateName, string featureKey, string workspacePath, CancellationToken ct, string? baseRef = null)
     {
+        // The feature's diff is measured from where its release branched, not from whatever else
+        // happens to be uncommitted in the checkout.
+        if (gateName is BuiltinRegistry.TestReport && !string.IsNullOrWhiteSpace(baseRef))
+            return new Dictionary<string, string> { ["baseRef"] = baseRef };
+
         if (gateName is not BuiltinRegistry.GherkinValidator
             and not BuiltinRegistry.CoverageMatrix
             and not BuiltinRegistry.ScaffoldSpecs
@@ -2982,53 +3047,144 @@ public sealed class WorkflowEngine : IWorkflowEngine
         return lastResult with { StepName = $"loop({maxAttempts})" };
     }
 
+    // A review is only as good as the verdict it commits to. The reviewer must end its reply with a
+    // VERDICT line (see ReviewVerdict); a normal end_turn alone proves nothing, so it no longer
+    // passes. A reply with no verdict, or a review that could not run, is not "fine" - it is an
+    // operator decision, because neither the producer nor a blind retry can resolve it.
     private async Task<StepExecutionResult> ExecuteGatePromptAsync(
         string promptText, string stepName, string target, string findingSummary,
         ReleaseStageRun stageRun, string workspacePath, DevTeamDbContext db, CancellationToken ct)
     {
         try
         {
-            var session = await _coordinator.NewSessionAsync(workspacePath, await ResolveModelIdAsync(workspacePath, ct), null, ct);
-            var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, promptText, ct, isPriming: true);
+            var modelId = await ResolveModelIdAsync(workspacePath, ct);
+            var session = await _coordinator.NewSessionAsync(workspacePath, modelId, null, ct);
+            var prompt = promptText + "\n\n" + ReviewVerdict.Instruction;
+            var response = await _coordinator.PromptWithSessionRecoveryAsync(session.SessionId, prompt, ct, isPriming: true);
             await RecordTurnMetricAsync(
                 db, stageRun, null, workspacePath, stageRun.StageName, TurnKind.GatePrompt,
-                await ResolveModelIdAsync(workspacePath, ct), promptText.Length, null, response, ct);
+                modelId, prompt.Length, null, response, ct);
 
-            var passed = response.StopReason == "end_turn";
-            if (!passed)
+            if (response.StopReason != "end_turn")
             {
-                db.ReviewFindings.Add(new ReviewFinding
+                return new StepExecutionResult
                 {
-                    StageRun = stageRun,
-                    Target = target,
-                    Kind = ReviewFindingKind.Requirement,
-                    Severity = ReviewFindingSeverity.Major,
-                    Summary = findingSummary,
-                    Status = ReviewFindingStatus.Open,
-                });
+                    StepName = stepName,
+                    Passed = false,
+                    Reason = $"The review of {target}'s work did not finish ({response.StopReason}).",
+                    Evidence = "The reviewer was cut off before giving a verdict.",
+                    Kind = FailureKind.OperatorDecision,
+                };
             }
 
-            return new StepExecutionResult { StepName = stepName, Passed = passed, Evidence = $"Reviewed by LLM prompt: {target}." };
+            var reply = response.ReplyText ?? await GetLatestAssistantTextAsync(db, session.SessionId, ct);
+            var verdict = ReviewVerdict.Parse(reply);
+            if (verdict.Outcome == ReviewOutcome.Missing)
+            {
+                var correction = await _coordinator.PromptWithSessionRecoveryAsync(
+                    session.SessionId, ReviewVerdict.CorrectionPrompt, ct, isPriming: true);
+                await RecordTurnMetricAsync(
+                    db, stageRun, null, workspacePath, stageRun.StageName, TurnKind.Correction,
+                    modelId, ReviewVerdict.CorrectionPrompt.Length, null, correction, ct);
+                var corrected = correction.ReplyText ?? await GetLatestAssistantTextAsync(db, session.SessionId, ct);
+                verdict = ReviewVerdict.Parse(corrected);
+                reply = string.IsNullOrWhiteSpace(corrected) ? reply : reply + "\n" + corrected;
+            }
+
+            switch (verdict.Outcome)
+            {
+                case ReviewOutcome.Pass:
+                    return new StepExecutionResult { StepName = stepName, Passed = true, Evidence = $"Reviewed by LLM prompt: {target}. {verdict.Detail}".Trim() };
+
+                case ReviewOutcome.Fail:
+                    db.ReviewFindings.Add(new ReviewFinding
+                    {
+                        StageRun = stageRun,
+                        Target = target,
+                        Kind = ReviewFindingKind.Requirement,
+                        Severity = ReviewFindingSeverity.Major,
+                        Summary = string.IsNullOrWhiteSpace(verdict.Detail) ? findingSummary : verdict.Detail,
+                        Status = ReviewFindingStatus.Open,
+                    });
+                    return new StepExecutionResult
+                    {
+                        StepName = stepName,
+                        Passed = false,
+                        Reason = string.IsNullOrWhiteSpace(verdict.Detail) ? findingSummary : verdict.Detail,
+                        Evidence = Truncate(reply ?? string.Empty, MaxEvidenceCharsPerStep),
+                    };
+
+                default:
+                    return new StepExecutionResult
+                    {
+                        StepName = stepName,
+                        Passed = false,
+                        Reason = $"The reviewer of {target}'s work gave no verdict.",
+                        Evidence = Truncate(reply ?? "(no reply)", MaxEvidenceCharsPerStep),
+                        Kind = FailureKind.OperatorDecision,
+                    };
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Gate prompt {StepName} failed for {Target}", stepName, target);
-            return new StepExecutionResult { StepName = stepName, Passed = true, Evidence = $"Gate prompt skipped: {ex.Message}" };
+            return new StepExecutionResult
+            {
+                StepName = stepName,
+                Passed = false,
+                Reason = $"The review of {target}'s work could not run: {ex.Message}",
+                Evidence = ex.Message,
+                Kind = FailureKind.OperatorDecision,
+            };
         }
+    }
+
+    // The antagonist's brief is specific to what the producer owes the next stage, and it may only
+    // fail work for a concrete defect against the BRS or that contract - never taste. A reviewer
+    // free to object to anything is what turns one review into an endless rework loop.
+    private static string BuildChallengePrompt(WorkflowChallenge challenge, string featureKey)
+    {
+        var brs = $"devteam/features/{featureKey}/{ArtifactPaths.BrsFileName}";
+        var checks = challenge.Producer switch
+        {
+            "business-analyst" =>
+                $"Read {brs}. Fail only if a requirement is not testable as written, is ambiguous enough that two " +
+                "developers would build different things, contradicts another requirement, or lacks Given/When/Then.",
+            "developer" =>
+                $"Read {brs} and the feature's code and tests. Fail only if a REQ has no implementation, no test " +
+                "named after its id, or the code adds behaviour no REQ asked for.",
+            _ =>
+                $"Read {brs} and the {challenge.Producer}'s output. Fail only if it does not satisfy a stated requirement.",
+        };
+
+        return $"You are an independent reviewer of the {challenge.Producer}'s work on feature '{featureKey}'. " +
+               checks + " Style, naming and preference are not grounds to fail. " +
+               "Name the exact file or REQ id for every problem you report.";
     }
 
     private Task<StepExecutionResult> RunChallengeAsync(WorkflowChallenge challenge, ReleaseStageRun stageRun, string featureKey, string workspacePath, DevTeamDbContext db, CancellationToken ct)
     {
-        var antagonistMode = challenge.AntagonistMode ?? "build";
-        var prompt = $"You are reviewing the {challenge.Producer}'s work for feature '{featureKey}'. " +
-                     $"Review for completeness, correctness, and quality. " +
-                     $"Report any issues, ambiguities, or gaps as findings.";
+        // No antagonist configured means no review: the stage's lint gate already ran as a step.
+        // Opening a generic session anyway only produced a verdict nobody read.
+        if (challenge.AntagonistMode is null)
+        {
+            return Task.FromResult(new StepExecutionResult
+            {
+                StepName = $"challenge:{challenge.Producer}",
+                Passed = true,
+                Evidence = "No antagonist configured.",
+            });
+        }
 
         return ExecuteGatePromptAsync(
-            prompt,
-            $"challenge:{challenge.Producer}->{antagonistMode}",
+            BuildChallengePrompt(challenge, featureKey),
+            $"challenge:{challenge.Producer}->{challenge.AntagonistMode}",
             challenge.Producer,
-            $"Challenge agent ({antagonistMode}) found issues.",
+            $"Challenge agent ({challenge.AntagonistMode}) found issues.",
             stageRun, workspacePath, db, ct);
     }
 
@@ -3380,6 +3536,32 @@ public sealed class WorkflowEngine : IWorkflowEngine
         await db.SaveChangesAsync(ct);
     }
 
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    // After an agent turn, make sure the hand-off exists. A missing or malformed result is not
+    // worth another paid turn (and must never wedge the pipeline): the reply is kept as an inferred
+    // result, marked as such, so the next stage and the operator still get words rather than a template.
+    private async Task EnsureStageResultAsync(
+        DevTeamDbContext db, string workspacePath, string featureKey, string role, Guid acpSessionId,
+        PromptResponse response, CancellationToken ct)
+    {
+        var read = StageResultIO.TryRead(workspacePath, featureKey, role);
+        if (read.Ok) return;
+
+        _logger.LogWarning(
+            "Stage {Role} for feature {FeatureKey} left no usable stage result ({Problem}); inferring one from its reply.",
+            role, featureKey, read.Problem);
+
+        if (!Directory.Exists(workspacePath)) return;
+        var reply = response.ReplyText ?? await GetLatestAssistantTextAsync(db, acpSessionId, ct);
+        StageResultIO.Write(workspacePath, featureKey, role, StageResultIO.Synthesize(reply));
+    }
+
     // The stage failed, so record how it answered each point — the next push can then be more
     // specific about the points it still disputes, and the user can see what was claimed.
     private async Task CaptureNegotiationResponsesAsync(
@@ -3398,16 +3580,39 @@ public sealed class WorkflowEngine : IWorkflowEngine
         if (run?.AcpSessionId is null || !Guid.TryParse(run.AcpSessionId, out var sessionId))
             return;
 
-        var text = await GetLatestAssistantTextAsync(db, sessionId, ct);
-        if (string.IsNullOrWhiteSpace(text))
-            return;
+        // The stage's own result file is authoritative; free text is only the fallback for an agent
+        // that ignored the contract.
+        var reported = StageResultIO.TryRead(feature.Release.WorkspacePath, feature.Key, stageName);
+        var responses = reported.Ok && reported.Result!.Points.Count > 0
+            ? StageResultIO.AnswerPoints(reported.Result, open)
+            : NegotiationProtocol.ParseResponses(await GetLatestAssistantTextAsync(db, sessionId, ct), open);
 
-        foreach (var response in NegotiationProtocol.ParseResponses(text, open))
+        foreach (var response in responses)
         {
             response.Point.ResponseKind = response.Kind;
             response.Point.ResponseText = Truncate(response.Detail, 600);
             response.Point.UpdatedAt = DateTimeOffset.UtcNow;
         }
+        await db.SaveChangesAsync(ct);
+    }
+
+    // A stage that answers a point DISPUTED ("the check is wrong") or BLOCKED ("can't be done as
+    // scoped") is telling us another automatic attempt cannot converge — the operator is the only
+    // arbiter. Stop the auto-retry rather than re-running into the same wall. Round 0 keeps the
+    // round-cap rule out of it: that path is already handled by RouteGateFailureToOwnerAsync.
+    private async Task HaltForOperatorOnDisputeAsync(
+        DevTeamDbContext db, ReleaseFeature feature, ReleaseStageRun stageRun, CancellationToken ct)
+    {
+        var open = PriorPointsTo(feature, stageRun.StageName)
+            .Where(f => f.Status == ReviewFindingStatus.Open)
+            .ToList();
+        if (NegotiationProtocol.Decide(0, open) == NegotiationAction.Continue)
+            return;
+
+        stageRun.AutoRetrySuppressed = true;
+        _logger.LogInformation(
+            "Stage {Stage} disputed or is blocked on an open point; auto-retry suppressed for the operator to decide.",
+            stageRun.StageName);
         await db.SaveChangesAsync(ct);
     }
 

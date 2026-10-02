@@ -56,6 +56,25 @@ public static partial class NegotiationProtocol
         return NegotiationAction.Continue;
     }
 
+    /// <summary>
+    /// True once the same failing check has already been sent to the receiving stage
+    /// <see cref="MaxRounds"/> times. The bound is per check, not per feature: a stage that keeps
+    /// failing one gate is a dead end only a person can break, while an unrelated gate failing
+    /// later is a fresh problem that deserves its own attempts. Counted from the points the
+    /// system itself opened, so it survives the receiving stage passing and clearing them in between
+    /// (which is exactly how the bounce goes on forever) and survives restarts.
+    /// </summary>
+    public static bool BouncesExhausted(IEnumerable<ReviewFinding> pointsSentToTarget, IEnumerable<string> failingChecks)
+    {
+        var checks = failingChecks.ToHashSet(StringComparer.Ordinal);
+        var rounds = pointsSentToTarget
+            .Where(p => p.OpenedBy?.StartsWith("system:", StringComparison.Ordinal) == true && checks.Contains(p.Target))
+            .Select(p => p.Round)
+            .Distinct()
+            .Count();
+        return rounds >= MaxRounds;
+    }
+
     /// <summary>The point-form block injected into the receiving stage's prompt.</summary>
     public static string BuildPointsBlock(IReadOnlyList<ReviewFinding> openPoints)
     {
@@ -117,9 +136,6 @@ public static partial class NegotiationProtocol
         return responses;
     }
 
-    public static string ReScopeSummary(int round) =>
-        $"The work has gone back and forth {round - 1} time(s) without converging. " +
-        "Re-scope the requirements so the next attempt has something it can actually satisfy.";
 
     // Matches a line that answers point N: "1. ADDRESSED — did X", "#2: BLOCKED because Y",
     // "Point 3 — DISPUTED: ...". Deliberately line-anchored so prose mentioning a keyword

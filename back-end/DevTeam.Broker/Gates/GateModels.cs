@@ -7,12 +7,33 @@ public sealed record GateRequest(
     string? RoleName = null,
     IReadOnlyDictionary<string, string>? Inputs = null);
 
+/// <summary>
+/// Who must act when a gate fails. Routing used to follow only a step's static ResponsibleRole,
+/// which sent report defects and pending operator rulings to a developer who could do nothing
+/// about them - the failure came straight back. The gate that knows why it failed says so.
+/// </summary>
+public enum FailureKind
+{
+    /// <summary>A code defect (or a check with no opinion): the step's ResponsibleRole owns it.</summary>
+    Default = 0,
+
+    /// <summary>The stage's own output is defective: the same stage repairs it; nobody upstream can.</summary>
+    SameStage,
+
+    /// <summary>Only the operator can unblock it. Never retried or routed automatically.</summary>
+    OperatorDecision,
+}
+
 public sealed record GateResult(
     bool Passed,
     string Reason,
     string EvidenceText = "",
     string? ArtifactPath = null)
 {
+    public FailureKind Kind { get; init; }
+
+    public GateResult OfKind(FailureKind kind) => this with { Kind = kind };
+
     public static GateResult Fail(string reason, string evidence = "", string? artifactPath = null)
         => new(false, reason, evidence, artifactPath);
 

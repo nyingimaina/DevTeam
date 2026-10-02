@@ -49,10 +49,16 @@ public sealed class TestReportGate : IGate
         if (!File.Exists(reportPath))
             return GateResult.Fail("No test report to review", $"expected {reportPath}");
 
-        var sections = TestReportReader.Parse(File.ReadAllText(reportPath));
+        // The operator's recorded rulings govern, so a report the agent rewrote as "pending" cannot
+        // undo a decision already taken.
+        var sections = TestReportReader.Parse(File.ReadAllText(reportPath))
+            .Select(section => section.IsChallenge
+                ? section with { Ruling = TestRulings.EffectiveRuling(workspace, featureKey, section) }
+                : section)
+            .ToArray();
         var evidence = new System.Text.StringBuilder();
         evidence.Append($"test run: {run.FailedCount} failed of the recorded run\n");
-        evidence.Append($"report: {sections.Count} section(s)\n");
+        evidence.Append($"report: {sections.Length} section(s)\n");
 
         var unaccounted = run.Failures
             .Where(failure => !sections.Any(section => TestReportReader.AccountsFor(section, failure)))
@@ -64,7 +70,7 @@ public sealed class TestReportGate : IGate
             return GateResult.Fail(
                 "The report does not account for every failed test",
                 evidence.ToString(),
-                reportPath);
+                reportPath).OfKind(FailureKind.SameStage);
         }
 
         // A section may only account for a failure the machine run actually recorded. Without this
@@ -84,23 +90,30 @@ public sealed class TestReportGate : IGate
             return GateResult.Fail(
                 "The report describes a failure the test run did not record",
                 evidence.ToString(),
-                reportPath);
+                reportPath).OfKind(FailureKind.SameStage);
         }
 
         var problems = new List<string>();
         var pendingFixes = new List<string>();
+        // Who has to act on the problems: a defect in the report is the test-runner's own to
+        // repair, a pending ruling is only the operator's, and a rejected challenge is a code
+        // defect again (Default) - the developer implements the requirement as written.
+        var reportDefects = false;
+        var awaitingRuling = false;
 
         foreach (var section in sections)
         {
             if (string.IsNullOrWhiteSpace(section.Verdict))
             {
                 problems.Add($"{Heading(section)} has no \"Verdict: fix\" or \"Verdict: challenge\" line.");
+                reportDefects = true;
                 continue;
             }
 
             if (!section.IsFix && !section.IsChallenge)
             {
                 problems.Add($"{Heading(section)} has Verdict: {section.Verdict} - only fix or challenge are allowed.");
+                reportDefects = true;
                 continue;
             }
 
@@ -124,6 +137,7 @@ public sealed class TestReportGate : IGate
                     $"{Heading(section)} is a challenge awaiting an operator ruling. The requirement stands until " +
                     "the operator rules; the ruling is recorded as \"Ruling: accepted (addendum <file>)\" or " +
                     "\"Ruling: rejected - implement as written\".");
+                awaitingRuling = true;
                 continue;
             }
 
@@ -138,16 +152,23 @@ public sealed class TestReportGate : IGate
                     $"The gate only accepts \"Ruling: accepted (addendum {TestAddendum.FileName(1)})\" - naming the " +
                     "addendum that holds the approved change - or \"Ruling: rejected - implement as written\". " +
                     "Record the operator's actual words; do not paraphrase them into a decision.");
+                awaitingRuling = true;
                 continue;
             }
 
             foreach (var id in addendumIds)
             {
                 if (!TestAddendum.Exists(workspace, featureKey, id))
+                {
                     problems.Add($"{Heading(section)} was accepted but {TestAddendum.FileName(id)} does not exist.");
+                    reportDefects = true;
+                }
                 else if (!BrsMutation.HasAddendumLink(ReadBrs(workspace, featureKey), id))
+                {
                     problems.Add(
                         $"{Heading(section)} was accepted but the BRS has no \"- See addendum: {TestAddendum.FileName(id)}\" link.");
+                    reportDefects = true;
+                }
             }
         }
 
@@ -158,16 +179,28 @@ public sealed class TestReportGate : IGate
                 && TestAddendum.IsAccepted(section.Ruling)))
             .ToArray();
         foreach (var file in silentTestEdits)
+        {
+            // Nobody has filed a challenge for the file yet: the test-runner must. Once a section
+            // names it, only the operator's ruling is missing.
+            var challenged = sections.Any(section => section.IsChallenge
+                && section.TestFile is not null
+                && NormalizePath(section.TestFile).EndsWith(NormalizePath(file), StringComparison.OrdinalIgnoreCase));
+            if (challenged) awaitingRuling = true; else reportDefects = true;
             problems.Add(
                 $"{file} was changed in this feature's diff without an approved challenge. A changed test file " +
                 "needs a challenge section naming it, ruled on by the operator, with the approved change written " +
                 "as a BRS addendum.");
+        }
 
         if (problems.Count > 0)
         {
             foreach (var problem in problems)
                 evidence.Append("fail: ").Append(problem).Append('\n');
-            return GateResult.Fail("Test report needs work before the feature can proceed", evidence.ToString(), reportPath);
+            var kind = reportDefects ? FailureKind.SameStage
+                : awaitingRuling ? FailureKind.OperatorDecision
+                : FailureKind.Default;
+            return GateResult.Fail("Test report needs work before the feature can proceed", evidence.ToString(), reportPath)
+                .OfKind(kind);
         }
 
         if (pendingFixes.Count > 0)
@@ -211,12 +244,19 @@ public sealed class TestReportGate : IGate
     private async Task<IReadOnlyList<string>> ChangedTestFilesAsync(GateRequest request, CancellationToken cancellationToken)
     {
         var declared = GateInputs.GetOptional(request.Inputs, "changedTestFiles");
-        var paths = declared is null
-            ? _changes is null
-                ? []
-                : await _changes.ChangedPathsAsync(
-                    request.WorkspacePath, GateInputs.GetOptional(request.Inputs, "baseRef"), cancellationToken)
-            : ChangedFiles.Parse(declared.Replace(';', '\n'));
+        if (declared is not null)
+            return ChangedFiles.Parse(declared.Replace(';', '\n')).Where(TestDiscovery.LooksLikeTestFile).ToArray();
+        if (_changes is null)
+            return [];
+
+        // With a base ref the feature's diff is what it committed since branching. Reading the
+        // working tree instead blamed the feature for unrelated workstreams' uncommitted tests -
+        // and the agent "fixed" that by stashing other people's work to satisfy the gate.
+        var baseRef = GateInputs.GetOptional(request.Inputs, "baseRef");
+        IReadOnlyList<string>? paths = baseRef is null
+            ? null
+            : await _changes.CommittedPathsAsync(request.WorkspacePath, baseRef, cancellationToken);
+        paths ??= await _changes.ChangedPathsAsync(request.WorkspacePath, baseRef, cancellationToken);
 
         return paths.Where(TestDiscovery.LooksLikeTestFile).ToArray();
     }

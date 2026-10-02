@@ -24,6 +24,76 @@ public class VerifyCodeGateTests
         Assert.Contains("tests: 42 passed", result.EvidenceText);
     }
 
+    private const string AcceptedChallengeReport = """
+        # Test report
+
+        ## TEST-1: Wizard > saves
+        - Test: front-end/app/Wizard.test.tsx
+        - Requirement: REQ-4
+        - Verdict: challenge
+        - Ruling: accepted (addendum BRS.addendum-1.md)
+        """;
+
+    private static string WorkspaceWithReport(string report)
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-verify-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(ArtifactPaths.FeatureDir(workspace, "feat-001"));
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), report);
+        return workspace;
+    }
+
+    private static Task<GateResult> VerifyAsync(string workspace, string output, int exitCode)
+        => new VerifyCodeGate(FakeProcessRunner.Git(output, exitCode)).RunAsync(
+            new GateRequest(BuiltinRegistry.VerifyCode, workspace, "feat-001", "qa"),
+            CancellationToken.None);
+
+    // The test-runner stage already adjudicated this failure and the operator accepted the challenge.
+    // QA re-running the suite and failing on the very same red test sent the developer (who may not
+    // touch tests) in a circle: the ruling must carry across the stage boundary.
+    [Fact]
+    public async Task Passes_WhenTheOnlyFailureWasAcceptedByTheOperator()
+    {
+        var workspace = WorkspaceWithReport(AcceptedChallengeReport);
+
+        var result = await VerifyAsync(workspace, "  ● Wizard › saves\nTests: 1 failed, 11 passed, 12 total", exitCode: 1);
+
+        Assert.True(result.Passed, result.Reason + " | " + result.EvidenceText);
+        Assert.Contains("accepted", result.EvidenceText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Fails_WhenAFailureBeyondTheAcceptedOnesRemains()
+    {
+        var workspace = WorkspaceWithReport(AcceptedChallengeReport);
+
+        var result = await VerifyAsync(workspace,
+            "  ● Wizard › saves\n  ● Wizard › loads\nTests: 2 failed, 10 passed, 12 total", exitCode: 1);
+
+        Assert.False(result.Passed);
+        Assert.Contains("loads", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task Fails_WhenTheChallengeWasRejectedOrIsStillPending()
+    {
+        var pending = AcceptedChallengeReport.Replace("accepted (addendum BRS.addendum-1.md)", "pending operator ruling");
+        var workspace = WorkspaceWithReport(pending);
+
+        var result = await VerifyAsync(workspace, "  ● Wizard › saves\nTests: 1 failed, 11 passed, 12 total", exitCode: 1);
+
+        Assert.False(result.Passed);
+    }
+
+    [Fact]
+    public async Task Fails_WhenTheSummaryCountsMoreFailuresThanWereAccepted()
+    {
+        var workspace = WorkspaceWithReport(AcceptedChallengeReport);
+
+        var result = await VerifyAsync(workspace, "  ● Wizard › saves\nTests: 3 failed, 9 passed, 12 total", exitCode: 1);
+
+        Assert.False(result.Passed);
+    }
+
     [Fact]
     public async Task Fails_WhenTestsFailDespiteZeroExitCode()
     {

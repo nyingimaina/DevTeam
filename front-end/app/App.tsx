@@ -11,10 +11,12 @@ import PathBrowser from "./Project/UI/PathBrowser";
 import WorkspaceCleanupNotice from "./UI/WorkspaceCleanupNotice";
 import ProcessApprovalNotice from "./UI/ProcessApprovalNotice";
 import ActiveTurnIndicator from "./UI/ActiveTurnIndicator";
+import AttentionBar from "./UI/AttentionBar";
+import { buildRoute } from "./Project/Navigation/routes";
 import ContextDial from "./UI/ContextDial";
 import { formatCleanupNoticeMessage, projectNameFromPath } from "./Project/workspaceCleanup";
 import { installGlobalErrorHandlers } from "./UI/diagnostics";
-import { PendingStopDto } from "./Chat/Data/BrokerTypes";
+import { AttentionItemDto, PendingStopDto } from "./Chat/Data/BrokerTypes";
 import { FaFolderOpen, FaListCheck, FaCodeBranch, FaShieldHalved, FaGear, FaChartLine } from "react-icons/fa6";
 import styles from "./App.module.css";
 
@@ -75,6 +77,12 @@ export default function App() {
       localStorage.removeItem(STORAGE_KEY);
     } catch { /* ignore */ }
   }, [project, runWorkspaceCleanupAsync]);
+
+  // Take the person to whatever is waiting on them: the Releases tab, then the feature's screen.
+  const openAttention = useCallback((item: AttentionItemDto) => {
+    setActiveTab("releases");
+    window.location.hash = buildRoute({ kind: "feature", releaseId: item.releaseId, featureId: item.featureId });
+  }, []);
 
   const notice = cleanupNotice && (
     <WorkspaceCleanupNotice message={cleanupNotice} onDismiss={() => setCleanupNotice(null)} />

@@ -22,6 +22,43 @@ public class NegotiationProtocolTests
             RequirementRef = requirementRef,
         };
 
+    private static ReviewFinding Sent(string check, int round, string openedBy = "system:gate-failure")
+        => new() { Target = check, Round = round, OpenedBy = openedBy };
+
+    [Fact]
+    public void BouncesExhausted_OnceTheSameCheckWasSentBackMaxRoundsTimes()
+    {
+        var sent = new[] { Sent("coverage_matrix", 1), Sent("coverage_matrix", 2), Sent("coverage_matrix", 3) };
+
+        Assert.True(NegotiationProtocol.BouncesExhausted(sent, ["coverage_matrix"]));
+    }
+
+    [Fact]
+    public void BouncesExhausted_IsFalseBelowTheCap_AndForADifferentCheck()
+    {
+        var sent = new[] { Sent("coverage_matrix", 1), Sent("coverage_matrix", 2), Sent("verify_code", 3) };
+
+        Assert.False(NegotiationProtocol.BouncesExhausted(sent, ["coverage_matrix"]));
+        Assert.False(NegotiationProtocol.BouncesExhausted(sent, ["verify_code"]));
+        Assert.False(NegotiationProtocol.BouncesExhausted(sent, ["something_else"]));
+    }
+
+    [Fact]
+    public void BouncesExhausted_CountsRoundsNotPoints_SoOneRoundWithManyPointsIsOneBounce()
+    {
+        var sent = new[] { Sent("a", 1), Sent("a", 1), Sent("a", 1), Sent("b", 1) };
+
+        Assert.False(NegotiationProtocol.BouncesExhausted(sent, ["a"]));
+    }
+
+    [Fact]
+    public void BouncesExhausted_IgnoresPointsAPersonOpened()
+    {
+        var sent = new[] { Sent("a", 1, "user"), Sent("a", 2, "user"), Sent("a", 3, "user") };
+
+        Assert.False(NegotiationProtocol.BouncesExhausted(sent, ["a"]));
+    }
+
     [Fact]
     public void NextRound_StartsAtOneAndIncrementsPerPushToTheSameTarget()
     {

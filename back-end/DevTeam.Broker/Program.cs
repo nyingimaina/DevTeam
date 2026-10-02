@@ -5,6 +5,7 @@ using DevTeam.Broker.Domain;
 using DevTeam.Broker.Gates;
 using DevTeam.Broker.Gates.Readiness;
 using DevTeam.Broker.Git;
+using DevTeam.Broker.Licensing;
 using DevTeam.Broker.Metrics;
 using DevTeam.Broker.Models;
 using DevTeam.Broker.Notifications;
@@ -34,6 +35,14 @@ public partial class Program
         var identity = RuntimeIdentity.Resolve(args, portEnv: null, dataDirEnv: null,
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+
+        // Single-instance license, decided before anything with a side effect: two live
+        // brokers on one data directory is the worst observed failure mode (2026-10-01:
+        // nine broker lifetimes in sixteen seconds fought over the shared SQLite database
+        // and Serilog files; one died mid-transaction and lost a 201 release insert).
+        if (!BrokerLicenseGate.TryEnter(identity))
+            return;
+
         Directory.CreateDirectory(identity.DataDirectory);
         Directory.CreateDirectory(identity.LogsDirectory);
 
@@ -74,6 +83,7 @@ public partial class Program
         builder.Services.AddSingleton<IProviderFailureWatcher>(
             _ => new OpenCodeLogWatcher(OpenCodeLogWatcher.DefaultLogPath));
         builder.Services.AddSingleton<NotificationSettings>();
+        builder.Services.AddSingleton<AttentionService>();
         builder.Services.AddSingleton<IUserNotifier, UserNotifier>();
         // The app has no UI of its own, so the desktop is how it reaches someone who walked away.
         // One adapter per platform; Linux/macOS are stubs for now. Registered by concrete type
@@ -123,6 +133,7 @@ public partial class Program
 
         builder.Services.AddSingleton(identity);
         builder.Services.AddSingleton<IAppInfo, AppInfo>();
+        builder.Services.AddSingleton(BrokerBootInfo.ForThisProcess(identity.DataDirectory));
         // The ACP process and the agent spoke are both created on first use, never on resolution.
         // They sit on the dependency chain of the workflow engine, so an eager factory here made
         // every read-only endpoint (GET /api/releases, /api/hotfixes, ...) launch the agent and

@@ -989,7 +989,7 @@ public class WorkflowEngineTests : IDisposable
         await engine.RunStageAsync(featureId, CancellationToken.None);
 
         var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
-        Assert.Contains(fake.Prompts, p => p.StartsWith("You are reviewing the developer's work"));
+        Assert.Contains(fake.Prompts, p => p.StartsWith("You are an independent reviewer of the developer's work"));
     }
 
     [Fact]
@@ -1137,7 +1137,7 @@ public class WorkflowEngineTests : IDisposable
     }
 
     [Fact]
-    public async Task RunStage_GatePromptExitStep_BehavesLikeChallenge_RecordingAFindingWhenNotEndTurn()
+    public async Task RunStage_GatePromptExitStep_BehavesLikeChallenge_RecordingAFindingWhenTheVerdictIsFail()
     {
         var workspace = Path.Combine(Path.GetTempPath(), "devteam-workflow-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
@@ -1154,8 +1154,8 @@ public class WorkflowEngineTests : IDisposable
         {
             // First prompt is the agent's own turn (stop reason irrelevant to its result);
             // second is the gate-prompt's own evaluation — this is the one that must fail.
-            _coordinator.StopReasonsToReturn.Enqueue("end_turn");
-            _coordinator.StopReasonsToReturn.Enqueue("max_tokens");
+            _coordinator.RepliesToReturn.Enqueue(null);
+            _coordinator.RepliesToReturn.Enqueue("Found one.\nVERDICT: FAIL - the diff logs a secret");
 
             var engine = CreateEngine();
             var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
@@ -1168,6 +1168,99 @@ public class WorkflowEngineTests : IDisposable
             var gateCheck = stageRun.GateChecks.Single(gc => gc.Name.StartsWith("gate_prompt:"));
             Assert.False(gateCheck.Passed);
             Assert.NotEmpty(stageRun.Findings);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    private async Task<(DevTeamRelease Release, Guid FeatureId, string Workspace)> StartTwoAgentStagesAsync(
+        Func<string, string?> resultForRole)
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "devteam-stageresult-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "devteam"));
+        File.WriteAllText(Path.Combine(workspace, "devteam", "release.yaml"), """
+            opinionated: false
+            pipeline:
+              researcher:
+                steps:
+                  - agent: { mode: researcher }
+              writer:
+                steps:
+                  - agent: { mode: writer }
+            """);
+
+        // Plays the agent: when a prompt asks for a role's stage-result file, write what the test says.
+        _coordinator.OnPrompt = (_, text) =>
+        {
+            foreach (var role in new[] { "researcher", "writer" })
+            {
+                var json = text.Contains($"stage-result.{role}.json", StringComparison.Ordinal) ? resultForRole(role) : null;
+                if (json is null) continue;
+                var dir = Path.Combine(workspace, "devteam", "features", "feat-001");
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(Path.Combine(dir, $"stage-result.{role}.json"), json);
+            }
+        };
+
+        var engine = CreateEngine();
+        var release = await engine.StartReleaseWithFeatureAsync("feat-001", workspace, CancellationToken.None);
+        return (await engine.RunStageAsync(release.CurrentFeatureId!.Value, CancellationToken.None), release.CurrentFeatureId.Value, workspace);
+    }
+
+    [Fact]
+    public async Task RunStage_StageReportsItIsBlocked_NothingAdvancesAndAPersonIsAsked()
+    {
+        var (updated, _, workspace) = await StartTwoAgentStagesAsync(role => role == "researcher"
+            ? """{ "verdict": "blocked", "summary": "REQ-4 contradicts REQ-1; cannot proceed." }"""
+            : null);
+        try
+        {
+            Assert.Equal("researcher", updated.FlowPosition!.CurrentStageName);
+            var run = updated.StageRuns.Single(sr => sr.StageName == "researcher");
+            Assert.Equal(ReleaseStageStatus.BlockedGate, run.Status);
+            Assert.True(run.AutoRetrySuppressed);
+            Assert.Contains(updated.StageRuns.SelectMany(sr => sr.GuidanceNotes), n => n.Text.Contains("REQ-4 contradicts REQ-1"));
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_TheNextStageIsToldWhatThePreviousOneConcluded()
+    {
+        var (updated, featureId, workspace) = await StartTwoAgentStagesAsync(role => role == "researcher"
+            ? """{ "verdict": "done", "summary": "Use the token bucket; REQ-2 needs a 429 test." }"""
+            : """{ "verdict": "done", "summary": "Drafted." }""");
+        try
+        {
+            Assert.Equal("writer", updated.FlowPosition!.CurrentStageName);
+
+            await CreateEngine().RunStageAsync(featureId, CancellationToken.None);
+
+            var writerPrompt = _coordinator.Prompts.Last(p => p.Contains("stage-result.writer.json"));
+            Assert.Contains("Result of the previous stage (researcher)", writerPrompt);
+            Assert.Contains("Use the token bucket; REQ-2 needs a 429 test.", writerPrompt);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunStage_AgentWritesNoResult_OneIsInferredAndMarked_AndThePipelineStillMoves()
+    {
+        var (updated, _, workspace) = await StartTwoAgentStagesAsync(_ => null);
+        try
+        {
+            Assert.Equal("writer", updated.FlowPosition!.CurrentStageName);
+            var read = StageResultIO.TryRead(workspace, "feat-001", "researcher");
+            Assert.True(read.Ok, read.Problem);
+            Assert.Contains("inferred", StageResultIO.BuildContext(workspace, "feat-001", "researcher"));
         }
         finally
         {
@@ -1643,8 +1736,8 @@ public class WorkflowEngineTests : IDisposable
             new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
             new GateResult(true, "OK", ""), new GateResult(true, "OK", ""));
         var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
-        fake.StopReasonsToReturn.Enqueue("end_turn"); // qa's own agent turn
-        fake.StopReasonsToReturn.Enqueue("max_tokens"); // the scope review itself — fails
+        fake.RepliesToReturn.Enqueue(null); // qa's own agent turn
+        fake.RepliesToReturn.Enqueue("Foo.cs re-implements Core/Bar.cs.\nVERDICT: FAIL - Foo.cs duplicates Core/Bar.cs"); // the scope review
 
         var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
 
@@ -1653,6 +1746,73 @@ public class WorkflowEngineTests : IDisposable
         var qaRun = updated.StageRuns.Where(sr => sr.StageName == "qa").OrderByDescending(sr => sr.StartedAt).First();
         Assert.Equal(ReleaseStageStatus.BlockedGate, qaRun.Status);
         Assert.Contains(qaRun.GateChecks, gc => gc.Name.StartsWith("gate_prompt:") && !gc.Passed);
+        // The developer is told what the reviewer actually found, not just that a review failed.
+        Assert.Contains(updated.StageRuns.SelectMany(sr => sr.GuidanceNotes), n => n.Text.Contains("Foo.cs duplicates Core/Bar.cs"));
+    }
+
+    [Fact]
+    public async Task RunStage_ScopeReviewGivesNoVerdict_WaitsForThePersonInsteadOfPassingOrRewinding()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
+
+        _gateRunner.Script(
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""));
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.RepliesToReturn.Enqueue(null); // qa's own agent turn
+        fake.RepliesToReturn.Enqueue("Looks fine to me."); // the review: no verdict line
+        fake.RepliesToReturn.Enqueue("Still thinking about it."); // and no verdict after the nudge either
+
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        Assert.Equal("qa", updated.FlowPosition!.CurrentStageName);
+        var qaRun = updated.StageRuns.Where(sr => sr.StageName == "qa").OrderByDescending(sr => sr.StartedAt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, qaRun.Status);
+        Assert.True(qaRun.AutoRetrySuppressed);
+    }
+
+    [Fact]
+    public async Task RunStage_ScopeReviewOmitsTheVerdictOnce_TheNudgeRecoversIt()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
+
+        _gateRunner.Script(
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""),
+            new GateResult(true, "OK", ""), new GateResult(true, "OK", ""), new GateResult(true, "OK", ""));
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.RepliesToReturn.Enqueue(null);
+        fake.RepliesToReturn.Enqueue("The diff is clean.");
+        fake.RepliesToReturn.Enqueue("VERDICT: PASS");
+
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        var qaRun = updated.StageRuns.Where(sr => sr.StageName == "qa").OrderByDescending(sr => sr.StartedAt).First();
+        Assert.Contains(qaRun.GateChecks, gc => gc.Name.StartsWith("gate_prompt:") && gc.Passed);
+    }
+
+    [Fact]
+    public async Task RunStage_DeveloperChallengeFails_TheDeveloperIsToldWhatTheReviewerObjectedTo()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        var fake = Assert.IsType<FakeBrokerCoordinator>(_coordinator);
+        fake.RepliesToReturn.Enqueue(null); // developer's own agent turn
+        fake.RepliesToReturn.Enqueue("VERDICT: FAIL - REQ-2 has no test named after it"); // the antagonist
+
+        var updated = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        Assert.Equal("developer", updated.FlowPosition!.CurrentStageName);
+        var run = updated.StageRuns.Where(sr => sr.StageName == "developer").OrderByDescending(sr => sr.Attempt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, run.Status);
+        Assert.Contains(updated.StageRuns.SelectMany(sr => sr.GuidanceNotes), n => n.Text.Contains("REQ-2 has no test named after it"));
     }
 
     [Fact]
@@ -1946,6 +2106,151 @@ public class WorkflowEngineTests : IDisposable
         await using var db = CreateFactory().CreateDbContext();
         var points = db.ReviewFindings.Where(f => f.PushedBackTo == "developer").ToList();
         Assert.Contains(points, p => p.OpenedBy == "system:gate-failure" && p.Target == "coverage_matrix" && p.Round == 1);
+    }
+
+    private async Task<DevTeamRelease> FailTestReportAsync(FailureKind kind)
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+
+        // test-runner: context_bundle, test_run, (agent), test_report.
+        _gateRunner.Script(
+            new GateResult(true, "OK", ""),
+            new GateResult(true, "OK", ""),
+            new GateResult(false, "report needs work", "fail: x").OfKind(kind));
+        return await engine.RunStageAsync(featureId, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task RunStage_TestReportAwaitsAnOperatorRuling_StaysPutAndWaitsForThePerson()
+    {
+        var updated = await FailTestReportAsync(FailureKind.OperatorDecision);
+
+        Assert.Equal("test-runner", updated.FlowPosition!.CurrentStageName);
+        var run = updated.StageRuns.Where(sr => sr.StageName == "test-runner").OrderByDescending(sr => sr.Attempt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, run.Status);
+        Assert.True(run.AutoRetrySuppressed);
+        Assert.Contains("operator", run.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RunStage_TestReportIsDefective_TheTestRunnerRepairsItInsteadOfTheDeveloper()
+    {
+        var updated = await FailTestReportAsync(FailureKind.SameStage);
+
+        Assert.Equal("test-runner", updated.FlowPosition!.CurrentStageName);
+        var run = updated.StageRuns.Where(sr => sr.StageName == "test-runner").OrderByDescending(sr => sr.Attempt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, run.Status);
+        Assert.False(run.AutoRetrySuppressed);
+        Assert.Contains(updated.StageRuns.SelectMany(sr => sr.GuidanceNotes), n => n.Text.Contains("test_report"));
+    }
+
+    [Fact]
+    public async Task RunStage_TestReportFindsACodeDefect_StillRoutesToTheDeveloper()
+    {
+        var updated = await FailTestReportAsync(FailureKind.Default);
+
+        Assert.Equal("developer", updated.FlowPosition!.CurrentStageName);
+    }
+
+    // Drives a feature to the point where QA's coverage failure has opened a point against the
+    // developer, then re-runs the developer with one unrelated check failing (code_hygiene: no
+    // ResponsibleRole, so it stays same-stage) and the agent answering that point with `reply`.
+    private async Task<ReleaseStageRun> RerunDeveloperAnsweringPointAsync(string reply)
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+        await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+        await RunTestRunnerStageAsync(engine, featureId);
+        _gateRunner.Script(
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", "verify ok"),
+            new GateResult(false, "missing coverage", "fail: no test references REQ-1"),
+            new GateResult(true, "OK", string.Empty));
+        await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        _coordinator.OnNewSession = sessionId =>
+        {
+            using var seed = CreateFactory().CreateDbContext();
+            seed.Sessions.Add(new DevTeamSession { Id = sessionId, WorkspacePath = @"C:\work\proj", AcpSessionId = sessionId.ToString() });
+            seed.Messages.Add(new Message { SessionId = sessionId, Role = "assistant", BodyText = reply });
+            seed.SaveChanges();
+        };
+        _gateRunner.Script(
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(false, "unclean", "TODO found"),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty),
+            new GateResult(true, "OK", string.Empty));
+        var release = await engine.RunStageAsync(featureId, CancellationToken.None);
+
+        return release.StageRuns
+            .Where(sr => sr.StageName == "developer")
+            .OrderByDescending(sr => sr.Attempt)
+            .First();
+    }
+
+    [Theory]
+    [InlineData("1. DISPUTED — the coverage check is wrong")]
+    [InlineData("1. BLOCKED — the requirement cannot be met as scoped")]
+    public async Task RunStage_StageDisputesOrIsBlockedOnAPoint_StopsAutoRetryAndAsksAPerson(string reply)
+    {
+        var devRun = await RerunDeveloperAnsweringPointAsync(reply);
+
+        Assert.True(devRun.AutoRetrySuppressed);
+        Assert.Equal(ReleaseStageStatus.BlockedGate, devRun.Status);
+        Assert.Contains("person", devRun.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RunStage_StageAddressesThePoint_StillAutoRetriesNormally()
+    {
+        var devRun = await RerunDeveloperAnsweringPointAsync("1. ADDRESSED — added a REQ-1 test in Foo.Tests.cs");
+
+        Assert.False(devRun.AutoRetrySuppressed);
+    }
+
+    [Fact]
+    public async Task RunStage_TheSameQaCheckBouncesToTheDeveloperThreeTimes_TheFourthFailureAsksAPersonInsteadOfBouncing()
+    {
+        var engine = CreateEngine();
+        var (_, featureId) = await DriveToDeveloperAsync(engine);
+
+        async Task<DevTeamRelease> QaFailsCoverageAsync()
+        {
+            await engine.RunStageAsync(featureId, CancellationToken.None); // developer passes
+            await engine.SignoffAsync(featureId, "developer", "tech-lead", null, CancellationToken.None);
+            await RunTestRunnerStageAsync(engine, featureId);
+            _gateRunner.Script(
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", string.Empty),
+                new GateResult(true, "OK", "verify ok"),
+                new GateResult(false, "missing coverage", "fail: no test references REQ-1"),
+                new GateResult(true, "OK", string.Empty));
+            return await engine.RunStageAsync(featureId, CancellationToken.None);
+        }
+
+        for (var bounce = 1; bounce <= NegotiationProtocol.MaxRounds; bounce++)
+        {
+            var bounced = await QaFailsCoverageAsync();
+            Assert.Equal("developer", bounced.FlowPosition!.CurrentStageName);
+        }
+
+        var stuck = await QaFailsCoverageAsync();
+
+        Assert.Equal("qa", stuck.FlowPosition!.CurrentStageName);
+        var qaRun = stuck.StageRuns.Where(sr => sr.StageName == "qa").OrderByDescending(sr => sr.Attempt).First();
+        Assert.Equal(ReleaseStageStatus.BlockedGate, qaRun.Status);
+        Assert.True(qaRun.AutoRetrySuppressed);
+        Assert.Contains("your decision", qaRun.Summary);
     }
 
     [Fact]
@@ -3817,6 +4122,15 @@ internal sealed class FakeBrokerCoordinator : IWorkflowCoordinator
         if (ExceptionsToThrow.Count > 0)
             throw ExceptionsToThrow.Dequeue();
         var stopReason = StopReasonsToReturn.Count > 0 ? StopReasonsToReturn.Dequeue() : "end_turn";
-        return Task.FromResult(new PromptResponse(sessionId, stopReason, 10, 5, 15));
+        // A review prompt (it carries the verdict contract) gets a clean PASS unless a test queued
+        // a different reply; every other prompt has no reply text, like a turn that said nothing.
+        var reply = RepliesToReturn.Count > 0
+            ? RepliesToReturn.Dequeue()
+            : text.Contains(ReviewVerdict.Instruction, StringComparison.Ordinal) ? "Reviewed.\nVERDICT: PASS" : null;
+        return Task.FromResult(new PromptResponse(sessionId, stopReason, 10, 5, 15, ReplyText: reply));
     }
+
+    // Dequeued (one per prompt) as the agent's reply text - for tests that need a review to fail
+    // or to omit its verdict. Takes precedence over the default PASS above.
+    public Queue<string?> RepliesToReturn { get; } = new();
 }

@@ -292,6 +292,159 @@ public class TestReportGateTests
     }
 
     [Fact]
+    public async Task ARulingTheOperatorRecorded_UnblocksAReportThatStillSaysPending()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), ChallengeReport(pending: true));
+        Assert.False((await JudgeAsync(workspace)).Passed);
+
+        var recorded = TestRulings.Record(workspace, "feat-001", "Wizard > saves", RulingDecision.Accept);
+
+        Assert.True(recorded.Ok, recorded.Problem);
+        var result = await JudgeAsync(workspace);
+        Assert.True(result.Passed, result.Reason + " | " + result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task ARejectedRulingRecordedByTheOperator_SendsTheDeveloperToImplementItAsWritten()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), ChallengeReport(pending: true));
+        TestRulings.Record(workspace, "feat-001", "Wizard > saves", RulingDecision.Reject);
+
+        var result = await JudgeAsync(workspace);
+
+        Assert.False(result.Passed);
+        Assert.Equal(FailureKind.Default, result.Kind);
+        Assert.Contains("rejected", result.EvidenceText);
+    }
+
+    private static FakeProcessRunner GitWith(string committed, string uncommitted, int diffExit = 0)
+        => new(request => request.Arguments.StartsWith("diff", StringComparison.Ordinal)
+            ? new ProcessRunResult(diffExit, committed, string.Empty, false, TimeSpan.Zero)
+            : new ProcessRunResult(0, uncommitted, string.Empty, false, TimeSpan.Zero));
+
+    private static Task<GateResult> JudgeWithBaseAsync(string workspace, FakeProcessRunner runner)
+        => new TestReportGate(runner).RunAsync(
+            new GateRequest(BuiltinRegistry.TestReport, workspace, "feat-001", "test-runner",
+                new Dictionary<string, string> { ["baseRef"] = "release/feat-001" }),
+            CancellationToken.None);
+
+    // "This feature's diff" is what the feature committed since it branched - an unrelated
+    // workstream's uncommitted tests in the same checkout are not the feature's silent rewrites.
+    [Fact]
+    public async Task WithABaseRef_OnlyTheFeaturesCommittedTestChangesNeedAChallenge()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace);
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), GreenReport);
+        var runner = GitWith(committed: "front-end/app/Wizard.test.tsx\n", uncommitted: "?? back-end/Other.tests.cs\n");
+
+        var result = await JudgeWithBaseAsync(workspace, runner);
+
+        Assert.False(result.Passed);
+        Assert.Contains("Wizard.test.tsx", result.EvidenceText);
+        Assert.DoesNotContain("Other.tests.cs", result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task WithABaseRef_UnrelatedUncommittedTestsDoNotFailAFeatureThatChangedNoTests()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace);
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), GreenReport);
+        var runner = GitWith(committed: "front-end/app/Wizard.tsx\n", uncommitted: "?? back-end/Other.tests.cs\n");
+
+        var result = await JudgeWithBaseAsync(workspace, runner);
+
+        Assert.True(result.Passed, result.Reason + " | " + result.EvidenceText);
+    }
+
+    [Fact]
+    public async Task WithABaseRefGitCannotResolve_ItFallsBackToTheWorkingTree_NeverToNothing()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace);
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), GreenReport);
+        var runner = GitWith(committed: string.Empty, uncommitted: "?? back-end/Other.tests.cs\n", diffExit: 128);
+
+        var result = await JudgeWithBaseAsync(workspace, runner);
+
+        Assert.False(result.Passed);
+        Assert.Contains("Other.tests.cs", result.EvidenceText);
+    }
+
+    private static async Task<GateResult> JudgeAsync(string workspace)
+        => await new TestReportGate().RunAsync(
+            new GateRequest(BuiltinRegistry.TestReport, workspace, "feat-001", "test-runner"),
+            CancellationToken.None);
+
+    // Who must act is part of the verdict: a report defect is the test-runner's own to repair,
+    // a pending ruling is the operator's, and only a real code defect belongs to the developer.
+    [Fact]
+    public async Task FailureKind_IsSameStage_WhenTheReportForgotAFailure()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), GreenReport);
+
+        Assert.Equal(FailureKind.SameStage, (await JudgeAsync(workspace)).Kind);
+    }
+
+    [Fact]
+    public async Task FailureKind_IsSameStage_WhenTheReportInventedAFailure()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace);
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), OneFailureReport);
+
+        Assert.Equal(FailureKind.SameStage, (await JudgeAsync(workspace)).Kind);
+    }
+
+    [Fact]
+    public async Task FailureKind_IsOperatorDecision_WhenAChallengeAwaitsARuling()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), ChallengeReport(pending: true));
+
+        Assert.Equal(FailureKind.OperatorDecision, (await JudgeAsync(workspace)).Kind);
+    }
+
+    [Fact]
+    public async Task FailureKind_IsSameStage_WhenAnAcceptedRulingHasNoAddendum()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), ChallengeReport(pending: false));
+        BrsMutation.AppendAddendumLink(workspace, "feat-001", 1);
+
+        Assert.Equal(FailureKind.SameStage, (await JudgeAsync(workspace)).Kind);
+    }
+
+    [Fact]
+    public async Task FailureKind_IsDefault_WhenTheCodeIsWrong_SoTheDeveloperOwnsIt()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), OneFailureReport);
+
+        Assert.Equal(FailureKind.Default, (await JudgeAsync(workspace)).Kind);
+    }
+
+    [Fact]
+    public async Task FailureKind_IsDefault_WhenTheOperatorRejectedTheChallenge()
+    {
+        var workspace = CreateWorkspace();
+        WriteRun(workspace, "Wizard > saves");
+        File.WriteAllText(ArtifactPaths.TestReportPath(workspace, "feat-001"), ChallengeReport(rejected: true));
+
+        Assert.Equal(FailureKind.Default, (await JudgeAsync(workspace)).Kind);
+    }
+
+    [Fact]
     public async Task Fails_WhenTheRunDataIsMissing()
     {
         var workspace = CreateWorkspace();

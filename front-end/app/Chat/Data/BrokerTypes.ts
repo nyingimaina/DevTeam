@@ -667,3 +667,27 @@ export interface NegotiationPointDto {
   requirementRef?: string | null;
   createdAt: string;
 }
+/** One thing only the person can do next (see the broker's AttentionService). */
+export interface AttentionItemDto {
+  id: string;
+  releaseId: string;
+  featureId: string;
+  featureKey: string;
+  stageName: string;
+  /** "Approval" (a finished step awaits sign-off) or "Decision" (a stalled step needs a call). */
+  kind: string;
+  title: string;
+  message: string;
+  since: string;
+  /** Tests the checker challenged that only the person can rule on (a Decision about tests). */
+  rulings?: PendingRulingDto[] | null;
+}
+
+/** A test the checker thinks is wrong, in plain fields. */
+export interface PendingRulingDto {
+  test: string;
+  requirement: string;
+  expected: string;
+  observed: string;
+  details: string;
+}
